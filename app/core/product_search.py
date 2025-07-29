@@ -1,0 +1,23 @@
+from app.vector.pinecone_client import get_index
+import openai
+import os
+
+openai.api_key = os.getenv("GPT_API_KEY")
+
+async def search_products(query, tenant_id, top_k=3):
+    # Embed the user's query
+    embedding = openai.embeddings.create(input=[query], model="text-embedding-ada-002")["data"][0]["embedding"]
+
+    # Search Pinecone for this tenant
+    index = get_index()
+    res = index.query(vector=embedding, top_k=top_k, include_metadata=True,
+                      filter={"tenant_id": {"$eq": tenant_id}})
+    results = []
+    for match in res["matches"]:
+        meta = match["metadata"]
+        results.append({
+            "product_id": meta["product_id"],
+            "score": match["score"],
+            # (You may want to fetch full product details from DB here)
+        })
+    return results
