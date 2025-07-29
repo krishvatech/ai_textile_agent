@@ -11,7 +11,7 @@ def get_index():
     if INDEX_NAME not in pinecone.list_indexes():
         pinecone.create_index(
             name=INDEX_NAME,
-            dimension=1536,  # OpenAI's embedding size; adjust if using another model
+            dimension=1536,
             metric="cosine"
         )
     return pinecone.Index(INDEX_NAME)

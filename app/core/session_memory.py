@@ -1,10 +1,13 @@
-# app/core/session_memory.py
-from collections import defaultdict
+import redis.asyncio as aioredis
+import os
+import json
 
-user_sessions = defaultdict(dict)
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+redis = aioredis.from_url(REDIS_URL, decode_responses=True)
 
-def get_session(user_id):
-    return user_sessions[user_id]
+async def get_user_memory(user_id: str):
+    data = await redis.get(user_id)
+    return json.loads(data) if data else {}
 
-def set_session(user_id, data):
-    user_sessions[user_id].update(data)
+async def set_user_memory(user_id: str, data: dict):
+    await redis.set(user_id, json.dumps(data), ex=3600)

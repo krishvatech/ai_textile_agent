@@ -1,0 +1,100 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.log
+*.sqlite3
+
+# Pipenv/Poetry
+Pipfile.lock
+poetry.lock
+
+# Virtualenv
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+
+# IDE/Editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*.bak
+
+# Jupyter/IPython
+.ipynb_checkpoints
+
+# macOS/Windows
+.DS_Store
+Thumbs.db
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# Database & data
+*.db
+*.sqlite
+data/
+uploads/
+media/
+tmp/
+logs/
+*.log
+
+# Alembic migration artifacts
+migrations/
+alembic.ini
+
+# Frontend (React/Next.js etc.)
+frontend/node_modules/
+frontend/build/
+frontend/.next/
+frontend/.env
+frontend/.env.*
+
+# Docker
+*.pid
+*.pid.lock
+
+# Coverage/testing
+htmlcov/
+.coverage
+.tox/
+.nox/
+.cache
+pytest_cache/
+
+# PyInstaller
+*.spec
+
+# VS Code local history
+.history/
+
+# Misc
+*.tar.gz
+*.zip
+*.bak
+*~
+
+# Ignore backup, temp and crash dumps
+*.tmp
+*.temp
+*.old
+*.orig
+*.swp
+*.swo
+
+# Ignore logs
+logs/
+*.log

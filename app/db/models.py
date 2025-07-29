@@ -1,53 +1,96 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, Float, Boolean, DateTime, JSON
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy import (
+    Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Enum, JSON, Index
+)
+from sqlalchemy.orm import relationship, declarative_base
 from datetime import datetime
+import enum
 
 Base = declarative_base()
 
+# --- Order Status Enum
+class OrderStatus(str, enum.Enum):
+    placed = "placed"
+    paid = "paid"
+    shipped = "shipped"
+    rented = "rented"
+    returned = "returned"
+    cancelled = "cancelled"
+
+# --- Tenant (Shop/Business)
 class Tenant(Base):
     __tablename__ = "tenants"
     id = Column(Integer, primary_key=True)
     name = Column(String, unique=True, index=True)
     whatsapp_number = Column(String, unique=True, index=True)
-    products = relationship("Product", back_populates="tenant", cascade="all, delete")
-    customers = relationship("Customer", back_populates="tenant", cascade="all, delete")
-    orders = relationship("Order", back_populates="tenant", cascade="all, delete")
+    phone_number = Column(String, nullable=True)
+    address = Column(String, nullable=True)
+    language = Column(String, default="en")  # Default language for this tenant
+    products = relationship("Product", back_populates="tenant", cascade="all, delete-orphan")
+    customers = relationship("Customer", back_populates="tenant", cascade="all, delete-orphan")
+    orders = relationship("Order", back_populates="tenant", cascade="all, delete-orphan")
 
+# --- Product (Multi-language)
 class Product(Base):
     __tablename__ = "products"
     id = Column(Integer, primary_key=True)
-    tenant_id = Column(Integer, ForeignKey("tenants.id"))
-    name = Column(String)
-    description = Column(String)
-    color = Column(String)
-    price = Column(Float)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    name_en = Column(String, nullable=False)
+    name_hi = Column(String, nullable=True)
+    name_gu = Column(String, nullable=True)
+    description_en = Column(String, nullable=True)
+    description_hi = Column(String, nullable=True)
+    description_gu = Column(String, nullable=True)
+    color = Column(String, nullable=True)
+    type = Column(String, nullable=True)  # Chaniya choli, saree, sherwani, etc.
+    price = Column(Float, nullable=False)
     is_rental = Column(Boolean, default=False)
-    available_stock = Column(Integer)
-    image_url = Column(String)
+    available_stock = Column(Integer, default=0)
+    image_url = Column(String, nullable=True)
     metadata = Column(JSON, nullable=True)
     tenant = relationship("Tenant", back_populates="products")
 
+    __table_args__ = (Index('idx_products_tenant_id', "tenant_id"),)
+
+# --- Customer (Per-tenant)
 class Customer(Base):
     __tablename__ = "customers"
     id = Column(Integer, primary_key=True)
-    tenant_id = Column(Integer, ForeignKey("tenants.id"))
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
     whatsapp_id = Column(String, index=True)
-    name = Column(String)
+    name = Column(String, nullable=True)
+    phone = Column(String, nullable=True)
     preferred_language = Column(String, default="en")
+    metadata = Column(JSON, nullable=True)
     tenant = relationship("Tenant", back_populates="customers")
     orders = relationship("Order", back_populates="customer")
 
+    __table_args__ = (Index('idx_customers_tenant_id', "tenant_id"),)
+
+class OrderStatus(str, enum.Enum):
+    placed = "placed"
+    paid = "paid"
+    shipped = "shipped"
+    rented = "rented"
+    returned = "returned"
+    cancelled = "cancelled"
+    
+# --- Order (Rental or Purchase)
 class Order(Base):
     __tablename__ = "orders"
     id = Column(Integer, primary_key=True)
-    tenant_id = Column(Integer, ForeignKey("tenants.id"))
-    customer_id = Column(Integer, ForeignKey("customers.id"))
-    product_id = Column(Integer, ForeignKey("products.id"))
-    order_type = Column(String)
-    start_date = Column(DateTime, nullable=True)
-    end_date = Column(DateTime, nullable=True)
-    price = Column(Float)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=False)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    order_type = Column(String, default="purchase")  # or "rental"
+    status = Column(Enum(OrderStatus), default=OrderStatus.placed)
+    start_date = Column(DateTime, nullable=True)  # For rental
+    end_date = Column(DateTime, nullable=True)    # For rental
+    price = Column(Float, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+    metadata = Column(JSON, nullable=True)
     tenant = relationship("Tenant", back_populates="orders")
     customer = relationship("Customer", back_populates="orders")
     product = relationship("Product")
+
+    __table_args__ = (Index('idx_orders_tenant_id', "tenant_id"),)
+
