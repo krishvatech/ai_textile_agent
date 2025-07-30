@@ -7,7 +7,7 @@ import asyncio
 from dotenv import load_dotenv
 load_dotenv()  # Load .env file
 openai.api_key = os.getenv("GPT_API_KEY")
-async def detect_language_openai(text: str) -> Tuple[str, float]:
+async def detect_language(text: str) -> Tuple[str, float]:
     """
     Detect language using OpenAI API for textile bot
     Supports: Hindi, Gujarati, English (including Romanized)
@@ -74,7 +74,7 @@ async def test_language_detection():
     for i, text in enumerate(test_cases, 1):
         try:
             print(f"\n{i}. Testing: '{text}'")
-            language, confidence = await detect_language_openai(text)
+            language, confidence = await detect_language(text)
             print(f"   → Language: {language}")
             print(f"   → Confidence: {confidence}")
         except Exception as e:
@@ -100,7 +100,7 @@ async def main():
                 print(":warning:  Please enter a message!")
                 continue
             print(":mag: Detecting language...")
-            language, confidence = await detect_language_openai(user_input)
+            language, confidence = await detect_language(user_input)
             print(f":memo: Input: '{user_input}'")
             print(f":globe_with_meridians: Detected Language: {language}")
             print(f":bar_chart: Confidence: {confidence:.2f}")
@@ -109,6 +109,3 @@ async def main():
             break
         except Exception as e:
             print(f":x: Error: {e}")
-if __name__ == "__main__":
-    # Run the main function
-    asyncio.run(main())
