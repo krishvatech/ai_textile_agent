@@ -15,7 +15,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 router = APIRouter()
 
-@router.websocket("/voice/stream")
+@router.websocket("/stream")
 async def websocket_endpoint(websocket: WebSocket):
     await stream_handler(websocket)
 
