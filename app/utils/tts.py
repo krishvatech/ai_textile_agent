@@ -58,6 +58,7 @@ async def synthesize_text(text: str, language_code: str = "en-IN", retries: int 
                 timeout = aiohttp.ClientTimeout(total=10)
                 async with session.post(SARVAM_API_URL, headers=headers, json=payload, timeout=timeout) as resp:
                     if resp.status == 200:
+                        logging.info("🟡 in tts....")
                         data = await resp.json()
                         if data.get("audios") and isinstance(data["audios"], list):
                             wav_data = base64.b64decode(data["audios"][0])

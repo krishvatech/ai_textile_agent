@@ -28,21 +28,22 @@ router = APIRouter()
 #     background_tasks.add_task(send_voice_response, call_sid, reply_text, "en")
 #     return {"status": "voice_replied"}
 
+
+
 @router.websocket("/stream")
 async def stream_audio(websocket: WebSocket):
     await websocket.accept()
-    
-    
-    # Step 1: Send greeting message via TTS
-    greeting_message = "Hello, Good Morning!"
-    logging.info(f"Sent greeting message: {greeting_message}")
 
-    # Send greeting message via TTS (using synthesize_stream to get audio chunks)
+    greeting_message = "Hello, Good Morning!"
+    logging.info(f"Sending greeting message: {greeting_message}")
+
+    # Send greeting audio chunks via TTS
     async for audio_chunk in synthesize_stream(greeting_message, language_code="en-IN"):
         await websocket.send_bytes(audio_chunk)
         logging.info("Sent greeting audio chunk")
 
-    await asyncio.sleep(1.5)
+    # Wait to ensure client receives and plays greeting
+    await asyncio.sleep(3.0)
 
     stt_handler = SarvamSTTStreamHandler()
     await stt_handler.start_stream()
@@ -52,9 +53,10 @@ async def stream_audio(websocket: WebSocket):
             try:
                 message = await websocket.receive()
             except WebSocketDisconnect:
-                logging.warning("🔌 WebSocket disconnected gracefully")
+                logging.warning("Client disconnected gracefully")
                 break
 
+            # Handle received messages
             if "bytes" in message:
                 pcm = message["bytes"]
                 await stt_handler.send_audio_chunk(pcm)
@@ -77,14 +79,15 @@ async def stream_audio(websocket: WebSocket):
                 except Exception as e:
                     logging.warning(f"⚠️ Failed to parse text message: {e}")
 
-            # try to pull final transcript
+            # Try to pull final transcript
             try:
                 transcript, is_final, lang = await asyncio.wait_for(
                     stt_handler.get_transcript(), timeout=1.5
                 )
                 if is_final and transcript.strip():
-                    print(f"✅ Final Transcript: {transcript}")
                     logging.info(f"✅ Final Transcript: {transcript}")
+
+                    # Replace user_id, tenant_id, shop_name, db as per your logic
                     reply_text, _, _ = await handle_user_message(
                         user_id="stream_user",
                         message=transcript,
@@ -93,6 +96,8 @@ async def stream_audio(websocket: WebSocket):
                         db=None,
                         channel="voice"
                     )
+
+                    # Send AI reply audio back to client
                     async for audio_chunk in synthesize_stream(reply_text, language_code=lang):
                         await websocket.send_bytes(audio_chunk)
 
@@ -102,9 +107,9 @@ async def stream_audio(websocket: WebSocket):
             except asyncio.TimeoutError:
                 continue
 
-    except WebSocketDisconnect:
-        await stt_handler.close_stream()
-        logging.warning("🔌 WebSocket disconnected")
     except Exception as e:
-        await stt_handler.close_stream()
         logging.error(f"❌ Error in stream handler: {e}")
+
+    finally:
+        await stt_handler.close_stream()
+        logging.info("Closed STT stream and WebSocket handler")
