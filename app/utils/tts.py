@@ -27,6 +27,9 @@ async def synthesize_stream(text: str, language_code: str = "en-IN"):
         yield chunk
         
 async def synthesize_text(text: str, language_code: str = "en-IN", retries: int = 3, delay: float = 1.0) -> bytes:
+    logging.info(f"Calling TTS for text: {text} in language: {language_code}")
+
+
     if not text or not isinstance(text, str) or not text.strip():
         logging.warning("⚠️ Empty or invalid text for TTS.")
         return b""
