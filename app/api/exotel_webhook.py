@@ -6,7 +6,7 @@ import logging
 
 router = APIRouter()
 
-@router.post("/inbound")
+@router.post("/stream")
 async def handle_inbound_call(request: Request):
     try:
         print("🔔 Incoming call webhook received!")
