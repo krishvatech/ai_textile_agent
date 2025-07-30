@@ -10,8 +10,7 @@ twilio
 celery
 redis
 rapidfuzz
-openai
-sentence-transformers
+openai==1.95.1
 pandas
 python-multipart
 apscheduler

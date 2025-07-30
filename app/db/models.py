@@ -71,7 +71,7 @@ class Customer(Base):
     name = Column(String, nullable=True)
     phone = Column(String, nullable=True)
     preferred_language = Column(String, default="en")
-    metadata = Column(JSON, nullable=True)
+    meta_data = Column(JSON, nullable=True)
     tenant = relationship("Tenant", back_populates="customers")
     orders = relationship("Order", back_populates="customer")
     email = Column(String, nullable=True)
@@ -102,7 +102,7 @@ class Order(Base):
     end_date = Column(DateTime, nullable=True)    # For rental
     price = Column(Float, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-    metadata = Column(JSON, nullable=True)
+    meta_data = Column(JSON, nullable=True)
     tenant = relationship("Tenant", back_populates="orders")
     customer = relationship("Customer", back_populates="orders")
     product = relationship("Product")

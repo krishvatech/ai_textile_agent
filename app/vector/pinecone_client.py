@@ -1,12 +1,9 @@
-import pinecone
 import os
-
+from pinecone import Pinecone
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_ENV = os.getenv("PINECONE_ENV", "us-west1-gcp")
 INDEX_NAME = os.getenv("PINECONE_INDEX", "textile-products")
-
-pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_ENV)
-
+pinecone = Pinecone(api_key=PINECONE_API_KEY)
 def get_index():
     if INDEX_NAME not in pinecone.list_indexes():
         pinecone.create_index(
@@ -15,3 +12,8 @@ def get_index():
             metric="cosine"
         )
     return pinecone.Index(INDEX_NAME)
+
+
+
+
+
