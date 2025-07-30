@@ -16,8 +16,13 @@ async def handle_inbound_call(request: Request):
 
         logging.info(f"📞 Inbound Call: From={caller}, To={callee}, SID={sid}")
 
-        return PlainTextResponse("OK", status_code=status.HTTP_200_OK)
+        # Return TwiML to say something on the call
+        response_xml = """
+        <Response>
+            <Say>Hello! Welcome to Krishva Textile Agent. Your call is connected.</Say>
+        </Response>
+        """
+        return PlainTextResponse(response_xml, media_type="text/xml")
 
     except Exception as e:
         logging.error(f"❌ Error in inbound call webhook: {e}")
-        return PlainTextResponse("Internal Server Error", status_code=500)

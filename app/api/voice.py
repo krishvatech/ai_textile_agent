@@ -14,6 +14,8 @@ router = APIRouter()
 
 @router.post("/webhook")
 async def voice_webhook(req: Request, background_tasks: BackgroundTasks, db = Depends(get_db)):
+    print("Received voice call webhook!")
+
     body = await req.json()
     user_id = body.get("From")
     transcript = body.get("SpeechResult", "")
