@@ -9,6 +9,8 @@ import asyncio
 import logging
 import base64
 from fastapi.responses import Response
+import asyncio
+
 
 router = APIRouter()
 
@@ -40,6 +42,8 @@ async def stream_audio(websocket: WebSocket):
         await websocket.send_bytes(audio_chunk)
         logging.info("Sent greeting audio chunk")
     
+    await asyncio.sleep(1.5)
+
     stt_handler = SarvamSTTStreamHandler()
     await stt_handler.start_stream()
 
@@ -100,20 +104,3 @@ async def stream_audio(websocket: WebSocket):
     except Exception as e:
         await stt_handler.close_stream()
         logging.error(f"❌ Error in stream handler: {e}")
-
-# @router.get("/stream")  # or better: rename to /voice/call-entry as mentioned earlier
-# async def exotel_call_handler(request: Request):
-#     params = dict(request.query_params)
-#     print("🔔 Incoming call params:", params)
-
-#     # Always return valid XML TwiML response
-#     return Response(
-#         content="""
-# <?xml version="1.0" encoding="UTF-8"?>
-# <Response>
-#     <Say>Welcome to the AI Textile Agent. Please wait while we connect you.</Say>
-#     <Record maxDuration="30" />
-# </Response>
-# """,
-#         media_type="application/xml"
-#     )
