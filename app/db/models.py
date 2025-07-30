@@ -28,6 +28,11 @@ class Tenant(Base):
     products = relationship("Product", back_populates="tenant", cascade="all, delete-orphan")
     customers = relationship("Customer", back_populates="tenant", cascade="all, delete-orphan")
     orders = relationship("Order", back_populates="tenant", cascade="all, delete-orphan")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    is_active = Column(Boolean, default=True)
+    
+    users = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
 
 # --- Product (Multi-language)
 class Product(Base):
@@ -47,6 +52,12 @@ class Product(Base):
     available_stock = Column(Integer, default=0)
     image_url = Column(String, nullable=True)
     metadata = Column(JSON, nullable=True)
+    sku = Column(String, unique=True, nullable=True)
+    rental_price = Column(Float, nullable=True)
+    category = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    is_active = Column(Boolean, default=True)
     tenant = relationship("Tenant", back_populates="products")
 
     __table_args__ = (Index('idx_products_tenant_id', "tenant_id"),)
@@ -63,6 +74,10 @@ class Customer(Base):
     metadata = Column(JSON, nullable=True)
     tenant = relationship("Tenant", back_populates="customers")
     orders = relationship("Order", back_populates="customer")
+    email = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    is_active = Column(Boolean, default=True)
 
     __table_args__ = (Index('idx_customers_tenant_id', "tenant_id"),)
 
@@ -91,6 +106,37 @@ class Order(Base):
     tenant = relationship("Tenant", back_populates="orders")
     customer = relationship("Customer", back_populates="orders")
     product = relationship("Product")
+    payment_status = Column(String, default="pending")  # Or as Enum
+    order_number = Column(String, unique=True, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    comments = Column(String, nullable=True)
+    discount = Column(Float, nullable=True)
 
     __table_args__ = (Index('idx_orders_tenant_id', "tenant_id"),)
 
+
+class Product(Base):
+    __tablename__ = "products"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    sku = Column(String, unique=True, nullable=True)
+    name_en = Column(String, nullable=False)
+    name_hi = Column(String, nullable=True)
+    name_gu = Column(String, nullable=True)
+    description_en = Column(String, nullable=True)
+    description_hi = Column(String, nullable=True)
+    description_gu = Column(String, nullable=True)
+    color = Column(String, nullable=True)
+    type = Column(String, nullable=True)
+    category = Column(String, nullable=True)
+    price = Column(Float, nullable=False)
+    rental_price = Column(Float, nullable=True)
+    is_rental = Column(Boolean, default=False)
+    available_stock = Column(Integer, default=0)
+    image_url = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    metadata = Column(JSON, nullable=True)
+    tenant = relationship("Tenant", back_populates="products")
+    __table_args__ = (Index('idx_products_tenant_id', "tenant_id"),)
