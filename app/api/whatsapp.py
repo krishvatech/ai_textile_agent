@@ -2,7 +2,7 @@ from fastapi import APIRouter, Request, BackgroundTasks, Depends
 from app.db.session import get_db
 from app.db.models import Tenant, Product
 from app.core.ai_agent import handle_user_message
-from app.utils.whatsapp_utils import send_whatsapp_message, send_whatsapp_image
+# from app.utils.whatsapp_utils import send_whatsapp_message, send_whatsapp_image
 
 router = APIRouter()
 
