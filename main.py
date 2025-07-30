@@ -12,6 +12,3 @@ app.include_router(api_router)
 def root():
     return {"message": "✅ API is live"}
 
-@app.websocket("/stream")
-async def websocket_route(websocket: WebSocket):
-    await stream_server.stream_handler(websocket)

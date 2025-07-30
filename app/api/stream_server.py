@@ -11,6 +11,14 @@ from app.utils.tts import synthesize_text  # your wrapper
 # Optional: import DB insert functions from app/db/*
 # from app.db.models import ...
 # from app.db.session import get_db
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+router = APIRouter()
+
+@router.websocket("/voice/stream")
+async def websocket_endpoint(websocket: WebSocket):
+    await stream_handler(websocket)
+
 
 
 async def speak_pcm(pcm_audio: bytes, websocket: WebSocket, stream_sid: str):

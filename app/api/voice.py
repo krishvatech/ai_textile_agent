@@ -100,7 +100,7 @@ async def voice_webhook(req: Request, background_tasks: BackgroundTasks, db = De
 #         await stt_handler.close_stream()
 #         logging.error(f"❌ Error in stream handler: {e}")
 
-@router.get("/stream")  # or better: rename to /voice/call-entry as mentioned earlier
+@router.get("/voice/stream")  # or better: rename to /voice/call-entry as mentioned earlier
 async def exotel_call_handler(request: Request):
     params = dict(request.query_params)
     print("🔔 Incoming call params:", params)
