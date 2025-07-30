@@ -5,7 +5,7 @@ import logging
 import time
 from datetime import datetime
 from fastapi import WebSocket, WebSocketDisconnect
-from app.utils.stt import STTHandler  # your wrapper
+from app.utils.stt import SarvamSTTStreamHandler
 from app.utils.tts import synthesize_text  # your wrapper
 
 # Optional: import DB insert functions from app/db/*
@@ -33,7 +33,7 @@ async def stream_handler(websocket: WebSocket):
     await websocket.accept()
     logging.info("✅ WebSocket connection accepted at /stream")
 
-    stt = STTHandler()
+    stt = SarvamSTTStreamHandler()
     stream_sid = None
     bot_is_speaking = False
     last_user_input_time = time.time()

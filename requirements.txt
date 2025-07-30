@@ -12,7 +12,6 @@ celery==5.5.3
 redis==6.2.0
 rapidfuzz
 openai==1.95.1
-sentence-transformers
 pandas
 python-multipart
 apscheduler
