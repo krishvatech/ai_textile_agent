@@ -41,7 +41,7 @@ async def stream_audio(websocket: WebSocket):
     async for audio_chunk in synthesize_stream(greeting_message, language_code="en-IN"):
         await websocket.send_bytes(audio_chunk)
         logging.info("Sent greeting audio chunk")
-    
+
     await asyncio.sleep(1.5)
 
     stt_handler = SarvamSTTStreamHandler()
@@ -49,7 +49,11 @@ async def stream_audio(websocket: WebSocket):
 
     try:
         while True:
-            message = await websocket.receive()
+            try:
+                message = await websocket.receive()
+            except WebSocketDisconnect:
+                logging.warning("🔌 WebSocket disconnected gracefully")
+                break
 
             if "bytes" in message:
                 pcm = message["bytes"]
