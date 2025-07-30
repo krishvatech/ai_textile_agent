@@ -24,7 +24,7 @@ async def whatsapp_webhook(req: Request, background_tasks: BackgroundTasks, db =
         return {"error": "No tenant for this WhatsApp number."}
 
     reply_text, images, _ = await handle_user_message(wa_from_number, user_msg, tenant.id, tenant.name, db)
-    for url, caption in images:
-        background_tasks.add_task(send_whatsapp_image, phone_number_id, wa_from_number, url, caption)
-    background_tasks.add_task(send_whatsapp_message, phone_number_id, wa_from_number, reply_text)
+    # for url, caption in images:
+    #     background_tasks.add_task(send_whatsapp_image, phone_number_id, wa_from_number, url, caption)
+    # background_tasks.add_task(send_whatsapp_message, phone_number_id, wa_from_number, reply_text)
     return {"status": "replied"}

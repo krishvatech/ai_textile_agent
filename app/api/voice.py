@@ -12,7 +12,7 @@ from fastapi.responses import Response
 
 router = APIRouter()
 
-@router.post("/webhook")
+@router.post("/webhook", operation_id="voice_webhook_post_1")
 async def voice_webhook(req: Request, background_tasks: BackgroundTasks, db = Depends(get_db)):
     print("Received voice call webhook!")
 

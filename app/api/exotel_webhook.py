@@ -9,17 +9,10 @@ router = APIRouter()
 @router.post("/inbound")
 async def handle_inbound_call(request: Request):
     try:
-        form_data = await request.form()
-        caller = form_data.get("From", "unknown")
-        callee = form_data.get("To", "unknown")
-        sid = form_data.get("CallSid", "N/A")
-
-        logging.info(f"📞 Inbound Call: From={caller}, To={callee}, SID={sid}")
-
-        # Return TwiML to say something on the call
+        print("🔔 Incoming call webhook received!")
         response_xml = """
         <Response>
-            <Say>Hello! Welcome to Krishva Textile Agent. Your call is connected.</Say>
+            <Say>Hello! This is a test from Krishva Agent. If you hear this, everything works.</Say>
         </Response>
         """
         return PlainTextResponse(response_xml, media_type="text/xml")
