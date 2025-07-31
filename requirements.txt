@@ -17,6 +17,7 @@ apscheduler
 asyncpg
 pydantic
 httpx
-pinecone-client
+pinecone
 langdetect
 aiofiles
+greenlet

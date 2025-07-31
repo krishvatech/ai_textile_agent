@@ -1,6 +1,9 @@
 import openai
 import os
 from pinecone import Pinecone
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Initialize Pinecone and OpenAI once at top of file
 pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])

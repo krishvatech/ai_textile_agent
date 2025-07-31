@@ -24,7 +24,7 @@ async def main():
         pprice = float(input("Price: "))
         pimage = input("Image URL: ")
         prod = Product(
-            name=pname, description=pdesc, color=pcolor,
+            name_en=pname, description_en=pdesc, color=pcolor,
             price=pprice, image_url=pimage, tenant_id=tenant.id
         )
         session.add(prod)
