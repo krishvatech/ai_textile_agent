@@ -4,7 +4,7 @@ from app.utils.stt import SarvamSTTStreamHandler
 from app.utils.tts import synthesize_text 
 from app.core.lang_utils import detect_language
 from app.core.ai_reply import generate_reply
-from core.intent_utils import detect_textile_intent_openai
+from app.core.intent_utils import detect_textile_intent_openai
 import json
 import asyncio
 import logging
