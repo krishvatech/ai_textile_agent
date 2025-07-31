@@ -37,8 +37,6 @@ async def stream_audio(websocket: WebSocket):
 
     stt = SarvamSTTStreamHandler()
     stream_sid = None
-    bot_is_speaking = False
-    last_user_input_time = time.time()
     lang_code = 'en-IN'
 
     try:
@@ -61,7 +59,7 @@ async def stream_audio(websocket: WebSocket):
                 await stt.send_audio_chunk(pcm)
                 try:
                     while True:
-                        txt, is_final, lang = await asyncio.wait_for(stt.get_transcript(), timeout=0.01)
+                        txt, is_final= await asyncio.wait_for(stt.get_transcript(), timeout=0.01)
                         if is_final and txt:
                             logging.info(f"🎤 Final transcript: {txt}")
                             
@@ -84,6 +82,7 @@ async def stream_audio(websocket: WebSocket):
                             await speak_pcm(audio, websocket, stream_sid)
                             
                             await stt.reset()
+                            break  
                         elif txt:
                             logging.info(f"📝 Interim: {txt}")
                 except asyncio.TimeoutError:
