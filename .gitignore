@@ -100,3 +100,6 @@ pytest_cache/
 # Ignore logs
 logs/
 *.log
+
+demo.py
+pinecone_demo.py
