@@ -4,6 +4,7 @@ from app.utils.stt import SarvamSTTStreamHandler
 from app.utils.tts import synthesize_text 
 from app.core.lang_utils import detect_language
 from app.core.ai_reply import generate_reply
+from core.intent_utils import detect_textile_intent_openai
 import json
 import asyncio
 import logging
@@ -76,9 +77,10 @@ async def stream_audio(websocket: WebSocket):
                         txt, is_final,lang= await asyncio.wait_for(stt.get_transcript(), timeout=0.01)
                         if is_final and txt:
                             logging.info(f"🎤 Final transcript: {txt}")
-                            
                             lang_code,confidence =await detect_language(txt)
+                            intent,intent_confidence=await detect_textile_intent_openai(txt,lang_code)
                             logging.info(f"🌐 Detected language: {lang_code}")
+                            logging.info(f"🌐 Detected Intent: {intent}")
                             
                             products = []  # <-- Replace this with your product search logic
                             shop_name = "Krishna Textiles"
@@ -88,7 +90,8 @@ async def stream_audio(websocket: WebSocket):
                                 products=products,
                                 shop_name=shop_name,
                                 action=None,
-                                language=lang_code
+                                language=lang_code,
+                                intent=intent,
                             )
                             logging.info(f"🤖 AI Reply: {ai_reply}")
                             

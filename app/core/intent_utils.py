@@ -1,11 +1,13 @@
-import openai
+from openai import AsyncOpenAI
 import json
 import logging
 from typing import Tuple
 import os
 from dotenv import load_dotenv
 load_dotenv()
-openai.api_key = os.getenv("GPT_API_KEY")
+
+client = AsyncOpenAI(api_key=os.getenv("GPT_API_KEY"))
+
 async def detect_textile_intent_openai(text: str, detected_language: str) -> Tuple[str, dict, float]:
     """
     Detect customer intent for textile business using OpenAI
@@ -134,13 +136,13 @@ Output: {{
 }}
 """
     try:
-        response = await openai.ChatCompletion.acreate(
+        response = await client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
             max_tokens=300  # Increased for better processing
         )
-        content = response.choices[0].message["content"].strip()
+        content = response.choices[0].message.content.strip()
         # Clean JSON response
         if content.startswith("```"):
             content = content.replace("```json", "").replace("```", "").strip()
