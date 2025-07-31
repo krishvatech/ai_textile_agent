@@ -1,4 +1,4 @@
-import openai
+from openai import AsyncOpenAI
 import json
 import logging
 from typing import Tuple
@@ -6,7 +6,7 @@ import os
 from dotenv import load_dotenv
 load_dotenv()  # Load .env file
 api_key=os.getenv("GPT_API_KEY")
-client = openai.OpenAI(api_key=api_key)
+client = AsyncOpenAI(api_key=api_key)
 async def detect_language(text: str) -> Tuple[str, float]:
     """
     Detect language using OpenAI API for textile bot
