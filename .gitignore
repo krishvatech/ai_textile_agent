@@ -103,3 +103,4 @@ logs/
 
 demo.py
 pinecone_demo.py
+test_stream_audio.py
