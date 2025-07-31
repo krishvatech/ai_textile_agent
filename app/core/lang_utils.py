@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 load_dotenv()  # Load .env file
 openai.api_key = os.getenv("GPT_API_KEY")
 
+client = openai.OpenAI()
+
 async def detect_language(text: str) -> Tuple[str, float]:
     """
     Detect language using OpenAI API for textile bot
@@ -38,8 +40,8 @@ You are a language detection expert for an Indian textile business WhatsApp bot.
 **Customer Message**: "{text}"
 """
     try:
-        response = await openai.ChatCompletion.acreate(
-            model="gpt-4.1-mini",
+        response = await client.chat.completions.create(
+            model="gpt-4-1106-preview",  # or your actual model name
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=150
