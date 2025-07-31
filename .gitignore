@@ -56,6 +56,8 @@ logs/
 migrations/
 alembic.ini
 
+.env
+
 # Frontend (React/Next.js etc.)
 frontend/node_modules/
 frontend/build/
