@@ -25,7 +25,6 @@ async def generate_reply(
     If the intent is 'greeting', just give a friendly greeting and ask how you can help.
     If the intent is 'goodbye', wish the customer well in a friendly, short way.
     If you need more info, request it briefly and politely in the same language.
-
     User: "{user_query}"
     Assistant:
     """

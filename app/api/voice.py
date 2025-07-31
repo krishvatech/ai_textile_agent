@@ -78,11 +78,11 @@ async def stream_audio(websocket: WebSocket):
                         if is_final and txt:
                             logging.info(f"🎤 Final transcript: {txt}")
                             lang_code,confidence =await detect_language(txt)
-                            intent,intent_confidence=await detect_textile_intent_openai(txt,lang_code)
+                            intent, filtered_entities, intent_confidence = await detect_textile_intent_openai(txt, lang_code)
                             logging.info(f"🌐 Detected language: {lang_code}")
                             logging.info(f"🌐 Detected Intent: {intent}")
                             
-                            products = []  # <-- Replace this with your product search logic
+                            products = []
                             shop_name = "Krishna Textiles"
                             
                             ai_reply = await generate_reply(
@@ -102,7 +102,6 @@ async def stream_audio(websocket: WebSocket):
                             # 🕒 Wait for user reply after speaking
                             response_txt = await wait_for_user_response(stt, timeout=30)
                             if response_txt:
-                                # You can optionally process this transcript immediately (loop)
                                 logging.info("✅ Got response after TTS, will process in next media loop")
                             else:
                                 logging.info("🤷‍♂️ No user reply. Waiting for next media stream from client...")
