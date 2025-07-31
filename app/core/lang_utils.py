@@ -44,7 +44,7 @@ You are a language detection expert for an Indian textile business WhatsApp bot.
             temperature=0.2,
             max_tokens=150
         )
-        content = response.choices[0].message["content"].strip()
+        content = response.choices[0].message.content.strip()
         # Clean JSON response
         if content.startswith("```"):
             content = content.replace("```json", "").replace("```", "").strip()
