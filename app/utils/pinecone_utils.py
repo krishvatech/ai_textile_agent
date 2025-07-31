@@ -9,11 +9,11 @@ openai.api_key = os.environ["GPT_API_KEY"]
 
 async def query_products(user_query: str, lang: str = "en", top_k: int = 3):
     # Get semantic embedding of user query
-    embedding_response = openai.Embedding.create(
+    embedding_response = openai.embeddings.create(
         input=user_query,
         model="text-embedding-ada-002"  # or your preferred model
     )
-    query_vec = embedding_response["data"][0]["embedding"]
+    query_vec = embedding_response.data[0].embedding
 
     # Query Pinecone for top matches
     result = index.query(vector=query_vec, top_k=top_k, include_metadata=True)
