@@ -32,7 +32,7 @@ async def speak_pcm(pcm_audio: bytes, websocket: WebSocket, stream_sid: str):
 @router.websocket("/stream")
 async def stream_audio(websocket: WebSocket):
     await websocket.accept()
-    logging.info("✅ WebSocket connection accepted at /stream")
+    logging.info("✅ WebSocket connection accepted at / stream")
 
     stt = SarvamSTTStreamHandler()
     stream_sid = None
