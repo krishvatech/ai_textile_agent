@@ -79,7 +79,7 @@ async def stream_audio(websocket: WebSocket):
                             logging.info(f"🎤 Final transcript: {txt}")
                             lang_code,confidence =await detect_language(txt)
                             intent, filtered_entities, intent_confidence = await detect_textile_intent_openai(txt, lang_code)
-                            logging.info(f"🌐 Detected language: {lang_code}")
+                            logging.info(f"🌐 Detected language : {lang_code}")
                             logging.info(f"🌐 Detected Intent: {intent}")
                             
                             products = []
