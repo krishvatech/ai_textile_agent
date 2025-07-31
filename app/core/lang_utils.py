@@ -3,10 +3,10 @@ import json
 import logging
 from typing import Tuple
 import os
-import asyncio
 from dotenv import load_dotenv
 load_dotenv()  # Load .env file
 openai.api_key = os.getenv("GPT_API_KEY")
+
 async def detect_language(text: str) -> Tuple[str, float]:
     """
     Detect language using OpenAI API for textile bot

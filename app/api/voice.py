@@ -63,7 +63,7 @@ async def stream_audio(websocket: WebSocket):
                         txt, is_final, lang = await asyncio.wait_for(stt.get_transcript(), timeout=0.01)
                         if is_final and txt:
                             logging.info(f"🎤 Final transcript: {txt}")
-                            lang_code=detect_language(txt)
+                            lang_code=await detect_language(txt)
                             logging.info(f" lang_code: {lang_code}")
                             response = f"You said: {txt}"  # Replace with AI logic if needed
                             audio = await synthesize_text(response, lang_code)
