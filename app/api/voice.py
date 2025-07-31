@@ -6,6 +6,7 @@ from app.core.lang_utils import detect_language
 from app.core.ai_reply import generate_reply
 from app.core.intent_utils import detect_textile_intent_openai
 from app.utils.pinecone_utils import query_products
+from app.core.attribute_extraction import extract_dynamic_attributes
 import json
 import asyncio
 import logging
@@ -14,6 +15,8 @@ import time
 import asyncio
 
 router = APIRouter()
+
+user_context = {}
 
 async def speak_pcm(pcm_audio: bytes, websocket: WebSocket, stream_sid: str):
     """Send TTS audio in chunks over WebSocket"""
@@ -38,6 +41,15 @@ async def stream_audio(websocket: WebSocket):
     stt = SarvamSTTStreamHandler()
     stream_sid = None
     lang_code = 'en-IN'
+    bot_is_speaking = False
+    
+    async def stop_tts():
+        """Stop TTS if bot is speaking"""
+        nonlocal bot_is_speaking
+        if bot_is_speaking:
+            logging.info(":red_circle: Interrupt detected, stopping TTS.")
+            bot_is_speaking = False
+            # Here, you can stop or
 
     async def receive_messages():
         """Task to receive WebSocket messages and feed audio to STT"""
@@ -45,6 +57,9 @@ async def stream_audio(websocket: WebSocket):
         try:
             while True:
                 message = await websocket.receive_text()
+                if bot_is_speaking:
+                    await stop_tts()
+                    
                 message = json.loads(message)
                 event_type = message.get("event")
                 if event_type == "connected":
@@ -60,7 +75,7 @@ async def stream_audio(websocket: WebSocket):
                     pcm = base64.b64decode(message["media"]["payload"])
                     await stt.send_audio_chunk(pcm)  # Feed chunk to STT (non-blocking)
                 elif event_type == "stop":
-                    logging.info(":octagonal_sign: Call ended.")
+                    logging.info("Call ended.")
                     break
         except WebSocketDisconnect:
             logging.info(":octagonal_sign: WebSocket disconnected")
@@ -70,10 +85,22 @@ async def stream_audio(websocket: WebSocket):
         last_activity = time.time()
         while True:
             try:
-                txt, is_final, lang = await asyncio.wait_for(stt.get_transcript(), timeout=0.5)
+                txt, is_final, lang = await asyncio.wait_for(stt.get_transcript(), timeout=0.2)
                 if is_final and txt:
                     logging.info(f"Final transcript: {txt}")
                     last_activity = time.time()  # Reset silence timer
+                    extracted_attributes = extract_dynamic_attributes(txt)
+                    logging.info(f"Extracted attributes: {extracted_attributes}")
+
+                    # Update the user context with extracted attributes
+                    if 'color' in extracted_attributes:
+                        user_context['color'] = extracted_attributes['color']
+                    if 'fabric' in extracted_attributes:
+                        user_context['fabric'] = extracted_attributes['fabric']
+                        
+                    print(f"Here are some {user_context['color']}")
+                    print(f"Here are some {user_context['fabric']}")
+                    
                     lang_code, confidence = await detect_language(txt)
                     intent, filtered_entities, intent_confidence = await detect_textile_intent_openai(txt, lang_code)
                     logging.info(f"Detected language: {lang_code}")

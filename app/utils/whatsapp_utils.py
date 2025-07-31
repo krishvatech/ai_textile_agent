@@ -1,25 +1,60 @@
+from fastapi import FastAPI, HTTPException
+from dotenv import load_dotenv
 import os
-import httpx
+import requests
+import logging
+load_dotenv()
+# Configure logging
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    level=logging.INFO    # Change to DEBUG for even more detail
+)
+# Load environment variables
+EXOTEL_SID = os.getenv("EXOTEL_SID")
+EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
+EXOTEL_TOKEN = os.getenv("EXOTEL_TOKEN")
+EXOPHONE = os.getenv("EXOPHONE")
+SUBDOMAIN = os.getenv("EXOTEL_SUBDOMAIN")
+TO_NUMBER = "918799559020"
+BODY = "Hello! This is a test message from the AI Textile Agent."
 
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
-WHATSAPP_API_URL = "https://graph.facebook.com/v19.0"
+# Initialize FastAPI app
+app = FastAPI()
 
-async def send_product_card(phone_number_id, to, product):
-    url = f"{WHATSAPP_API_URL}/{phone_number_id}/messages"
-    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "image",
-        "image": {
-            "link": product["image_url"],
-            "caption": (
-                f"*{product['name_en']}*\n"
-                f"{product['color']} | {product['type']}\n"
-                f"Price: ₹{product['price']}\n"
-                "Reply with 'Order' or 'Rent' to proceed!"
-            )
+# Endpoint to send WhatsApp message via Exotel
+@app.post("/whatsapp")
+async def send_whatsapp_message():
+    url = f"https://{SUBDOMAIN}/v2/accounts/{EXOTEL_SID}/messages"
+    headers = { "Content-Type": "application/json" }
+    req_json = {
+        "whatsapp": {
+            "messages": [
+                {
+                    "from": EXOPHONE,
+                    "to": TO_NUMBER,
+                    "content": {
+                        "recipient_type": "individual",
+                        "type": "text",
+                        "text": {
+                            "preview_url": False,
+                            "body": BODY
+                        }
+                    }
+                }
+            ]
         }
     }
-    async with httpx.AsyncClient() as client:
-        await client.post(url, headers=headers, json=payload)
+    # Log the request details
+    logging.info(f"Sending message to: {TO_NUMBER} | Body: '{BODY}'")
+    logging.debug(f"POST URL: {url}")
+    logging.debug(f"Request JSON: {req_json}")
+    # Send the request to Exotel
+    response = requests.post(url, headers=headers, json=req_json, auth=(EXOTEL_API_KEY, EXOTEL_TOKEN))
+    # Log the response details
+    logging.info(f"Exotel Response Status: {response.status_code}")
+    logging.info(f"Exotel Response Body: {response.text}")
+    if response.status_code in [200, 201, 202]:
+        return {"status": "success", "response": response.json()}
+    else:
+        logging.error("Error sending message to Exotel")
+        raise HTTPException(status_code=response.status_code, detail=response.text)
