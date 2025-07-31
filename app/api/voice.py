@@ -2,7 +2,7 @@ from fastapi import APIRouter, Request, BackgroundTasks, Depends, WebSocket, Web
 from app.db.session import get_db
 from app.utils.stt import SarvamSTTStreamHandler
 from app.utils.tts import synthesize_text 
-from core.lang_utils import detect_language
+from app.core.lang_utils import detect_language
 import json
 import asyncio
 import logging
