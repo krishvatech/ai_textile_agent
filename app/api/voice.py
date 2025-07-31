@@ -5,13 +5,13 @@ from app.utils.tts import synthesize_text
 from app.core.lang_utils import detect_language
 from app.core.ai_reply import generate_reply
 from app.core.intent_utils import detect_textile_intent_openai
+from app.utils.pinecone_utils import query_products
 import json
 import asyncio
 import logging
 import base64
 import time
 import asyncio
-
 
 router = APIRouter()
 
@@ -30,21 +30,6 @@ async def speak_pcm(pcm_audio: bytes, websocket: WebSocket, stream_sid: str):
         })
         await asyncio.sleep(0.2)
 
-async def wait_for_user_response(stt, timeout=10.0):
-    """Wait for user response after TTS. Exit if silence for too long."""
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            txt, is_final, lang = await asyncio.wait_for(stt.get_transcript(), timeout=0.5)
-            if is_final and txt:
-                logging.info(f"👂 Heard after TTS: {txt}")
-                return txt
-        except asyncio.TimeoutError:
-            continue
-    logging.info("⌛ No response from user after TTS.")
-    return None
-
-
 @router.websocket("/stream")
 async def stream_audio(websocket: WebSocket):
     await websocket.accept()
@@ -54,67 +39,85 @@ async def stream_audio(websocket: WebSocket):
     stream_sid = None
     lang_code = 'en-IN'
 
-    try:
+    async def receive_messages():
+        """Task to receive WebSocket messages and feed audio to STT"""
+        nonlocal stream_sid
+        try:
+            while True:
+                message = await websocket.receive_text()
+                message = json.loads(message)
+                event_type = message.get("event")
+                if event_type == "connected":
+                    greeting = "How can I help you today?"
+                    audio = await synthesize_text(greeting, lang_code)
+                    await speak_pcm(audio, websocket, stream_sid)
+                    
+                elif event_type == "start":
+                    stream_sid = message.get("stream_sid")
+                    logging.info(f"stream_sid: {stream_sid}")
+                    
+                elif event_type == "media":
+                    pcm = base64.b64decode(message["media"]["payload"])
+                    await stt.send_audio_chunk(pcm)  # Feed chunk to STT (non-blocking)
+                elif event_type == "stop":
+                    logging.info(":octagonal_sign: Call ended.")
+                    break
+        except WebSocketDisconnect:
+            logging.info(":octagonal_sign: WebSocket disconnected")
+            
+    async def process_transcripts():
+        """Task to process STT transcripts, generate replies, and handle TTS"""
+        last_activity = time.time()
         while True:
-            message = await websocket.receive_text()
-            message = json.loads(message)
-            event_type = message.get("event")
+            try:
+                txt, is_final, lang = await asyncio.wait_for(stt.get_transcript(), timeout=0.5)
+                if is_final and txt:
+                    logging.info(f"Final transcript: {txt}")
+                    last_activity = time.time()  # Reset silence timer
+                    lang_code, confidence = await detect_language(txt)
+                    intent, filtered_entities, intent_confidence = await detect_textile_intent_openai(txt, lang_code)
+                    logging.info(f"Detected language: {lang_code}")
+                    logging.info(f"Detected Intent: {intent}")
+                    products = []
+                    shop_name = "Krishna Textiles"
+                    if intent == "product_search":
+                        products = await query_products(txt, lang=lang_code)
+                        
+                    ai_reply = await generate_reply(
+                        user_query=txt,
+                        products=products,
+                        shop_name=shop_name,
+                        action=None,
+                        language=lang_code,
+                        intent=intent,
+                    )
+                    
+                    logging.info(f"AI Reply: {ai_reply}")
+                    audio = await synthesize_text(ai_reply, language_code=lang_code)
+                    await speak_pcm(audio, websocket, stream_sid)
 
-            if event_type == "connected":
-                greeting = "How can I help you today?"
-                audio = await synthesize_text(greeting, lang_code)
-                await speak_pcm(audio, websocket, stream_sid)
-
-            elif event_type == "start":
-                stream_sid = message.get("stream_sid")
-                logging.info(f"🔁 stream_sid: {stream_sid}")
-
-            elif event_type == "media":
-                pcm = base64.b64decode(message["media"]["payload"])
-                await stt.send_audio_chunk(pcm)
-                try:
-                    while True:
-                        txt, is_final,lang= await asyncio.wait_for(stt.get_transcript(), timeout=0.01)
-                        if is_final and txt:
-                            logging.info(f"🎤 Final transcript: {txt}")
-                            lang_code,confidence =await detect_language(txt)
-                            intent, filtered_entities, intent_confidence = await detect_textile_intent_openai(txt, lang_code)
-                            logging.info(f"🌐 Detected language : {lang_code}")
-                            logging.info(f"🌐 Detected Intent: {intent}")
-                            
-                            products = []
-                            shop_name = "Krishna Textiles"
-                            
-                            ai_reply = await generate_reply(
-                                user_query=txt,
-                                products=products,
-                                shop_name=shop_name,
-                                action=None,
-                                language=lang_code,
-                                intent=intent,
-                            )
-                            logging.info(f"🤖 AI Reply: {ai_reply}")
-                            
-                            audio = await synthesize_text(ai_reply, language_code=lang_code)
-                            await speak_pcm(audio, websocket, stream_sid)
-                            await stt.reset()
-
-                            # 🕒 Wait for user reply after speaking
-                            response_txt = await wait_for_user_response(stt, timeout=30)
-                            if response_txt:
-                                logging.info("✅ Got response after TTS, will process in next media loop")
-                            else:
-                                logging.info("🤷‍♂️ No user reply. Waiting for next media stream from client...")
-                        elif txt:
-                            logging.info(f"📝 Interim: {txt}")
-                except asyncio.TimeoutError:
-                    pass
-
-            elif event_type == "stop":
-                logging.info("🛑 Call ended.")
-                break
-
-    except WebSocketDisconnect:
-        logging.info("🛑 WebSocket disconnected")
+                elif txt:
+                    logging.info(f"Interim: {txt}")
+                    last_activity = time.time()
+            except asyncio.TimeoutError:
+                # Check for prolonged silence (e.g., no response after TTS)
+                if time.time() - last_activity > 30:  # Adjustable timeout
+                    logging.info("No response from user after TTS.")
+                    last_activity = time.time()  # Reset or handle end of turn
+                continue
+            
+    try:
+        # Start both tasks concurrently
+        receiver_task = asyncio.create_task(receive_messages())
+        processor_task = asyncio.create_task(process_transcripts())
+        # Wait for either task to complete (e.g., disconnect or stop)
+        done, pending = await asyncio.wait(
+            [receiver_task, processor_task],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+    except Exception as e:
+        logging.error(f"Error in WebSocket: {e}")
     finally:
         await stt.close_stream()

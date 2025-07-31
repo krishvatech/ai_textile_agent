@@ -39,7 +39,7 @@ You are a language detection expert for an Indian textile business WhatsApp bot.
 """
     try:
         response = await client.chat.completions.create(
-            model="gpt-4-1106-preview",  # or your actual model name
+            model="gpt-4.1-mini",  # or your actual model name
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=150

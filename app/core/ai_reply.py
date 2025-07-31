@@ -32,7 +32,7 @@ async def generate_reply(
         prompt += f"No matching products found.\n"
     else:
         prods = "\n".join(
-            f"{i+1}. {p['name']} – ₹{p['price']} (Color: {p['color']})"
+            f"{i+1}. {p.get('name') or p.get('product_name', 'Product')} – ₹{p.get('price', '?')} (Color: {p.get('color', '?')}, Fabric: {p.get('fabric', '?')})"
             for i, p in enumerate(products)
         )
         prompt += f"Matching products:\n{prods}\n"
@@ -41,10 +41,10 @@ async def generate_reply(
         prompt += "User wants to place an order. Ask politely for the delivery address.\n"
     elif action == "rental":
         prompt += "User wants to rent. Ask for rental dates.\n"
-
+    prompt += "Respond as a real assistant. Always use the given language and sound friendly.\n"
     try:
         response = await client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4.1-mini",
             messages=[
                 {
                     "role": "system",
