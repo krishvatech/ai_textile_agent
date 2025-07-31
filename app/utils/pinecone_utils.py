@@ -5,7 +5,7 @@ from pinecone import Pinecone
 # Initialize Pinecone and OpenAI once at top of file
 pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
 index = pc.Index(os.environ["PINECONE_INDEX"])
-openai.api_key = os.environ["OPENAI_API_KEY"]
+openai.api_key = os.environ["GPT_API_KEY"]
 
 async def query_products(user_query: str, lang: str = "en", top_k: int = 3):
     # Get semantic embedding of user query
