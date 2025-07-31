@@ -3,6 +3,7 @@ from app.db.session import get_db
 from app.utils.stt import SarvamSTTStreamHandler
 from app.utils.tts import synthesize_text 
 from app.core.lang_utils import detect_language
+from app.core.ai_reply import generate_reply
 import json
 import asyncio
 import logging
@@ -63,11 +64,25 @@ async def stream_audio(websocket: WebSocket):
                         txt, is_final, lang = await asyncio.wait_for(stt.get_transcript(), timeout=0.01)
                         if is_final and txt:
                             logging.info(f"🎤 Final transcript: {txt}")
+                            
                             lang_code,confidence =await detect_language(txt)
-                            logging.info(f" lang_code: {lang_code}")
-                            response = f"You said: {txt}"  # Replace with AI logic if needed
-                            audio = await synthesize_text(response, language_code=lang_code)
+                            logging.info(f"🌐 Detected language: {lang_code}")
+                            
+                            products = []  # <-- Replace this with your product search logic
+                            shop_name = "Krishna Textiles"
+                            
+                            ai_reply = await generate_reply(
+                                user_query=txt,
+                                products=products,
+                                shop_name=shop_name,
+                                action=None,
+                                language=lang_code
+                            )
+                            logging.info(f"🤖 AI Reply: {ai_reply}")
+                            
+                            audio = await synthesize_text(ai_reply, language_code=lang_code)
                             await speak_pcm(audio, websocket, stream_sid)
+                            
                             await stt.reset()
                         elif txt:
                             logging.info(f"📝 Interim: {txt}")
