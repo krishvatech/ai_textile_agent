@@ -59,7 +59,7 @@ async def stream_audio(websocket: WebSocket):
                 await stt.send_audio_chunk(pcm)
                 try:
                     while True:
-                        txt, is_final,detect_language= await asyncio.wait_for(stt.get_transcript(), timeout=0.01)
+                        txt, is_final,lang= await asyncio.wait_for(stt.get_transcript(), timeout=0.01)
                         if is_final and txt:
                             logging.info(f"🎤 Final transcript: {txt}")
                             
