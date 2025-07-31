@@ -54,11 +54,3 @@ You are a language detection expert for an Indian textile business WhatsApp bot.
         logging.error(f"Language detection failed: {e}")
         return "en-IN", 0.5  # Default fallback
 
-
-
-
-
-
-
-
-
