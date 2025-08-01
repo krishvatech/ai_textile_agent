@@ -109,7 +109,7 @@ async def stream_audio(websocket: WebSocket):
                     shop_name = "Krishna Textiles"
                     if intent == "product_search":
                         products = await query_products(txt, lang=lang_code)
-                        
+                    print("Products=",products)
                     ai_reply = await generate_reply(
                         user_query=txt,
                         products=products,
