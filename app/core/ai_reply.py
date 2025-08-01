@@ -80,9 +80,7 @@ async def generate_reply(
             temperature=0.7,
             max_tokens=500
         )
-        # return response.choices[0].message["content"].strip()
-        ai_reply = response['choices'][0]['message']['content'].strip()
-        return ai_reply
+        return response.choices[0].message["content"].strip()
     except Exception as e:
         return f":x: Sorry, I couldn't process your message due to an error: {e}"
 
