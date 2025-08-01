@@ -2,11 +2,9 @@ from openai import AsyncOpenAI
 import os
 from typing import List, Dict, Optional
 from dotenv import load_dotenv
-
 load_dotenv()
 api_key = os.getenv("GPT_API_KEY")
 client = AsyncOpenAI(api_key=api_key)
-
 async def generate_reply(
     user_query: str,
     products: List[Dict],
@@ -15,7 +13,13 @@ async def generate_reply(
     language: str = "en",
     intent: Optional[str] = None,
 ) -> str:
+    TONE_PROMPT = """
+    Speak in a warm, friendly, and enthusiastic tone. Be conversational and helpful, like a passionate textile shop assistant.
+    Mention product features and provide clear, engaging descriptions. Always be polite and empathetic. Show excitement about helping the customer find their perfect product.
+    Avoid sounding robotic or overly formal—use simple, friendly language.
+    """
     prompt = f"""
+    {TONE_PROMPT}
     You are KrishvaTech, an expert AI assistant for textile businesses. You help users with buying, renting, and booking products like sarees, sherwanis, chanya cholis, and more.
     Shop Name: {shop_name}
     Intent: {intent if intent else 'N/A'}
@@ -24,17 +28,23 @@ async def generate_reply(
     """
     # Handle product details
     if not products:
-        prompt += f"No matching products found.\n"
+         prompt += f"Sorry, I couldn't find anything matching that. :pensive: Let me know if you'd like to search for something else!"
     else:
         product_details = "\n".join(
             f"{i+1}. {p.get('name') or p.get('product_name', 'Product')} – ₹{p.get('price', '?')} (Color: {p.get('color', '?')}, Fabric: {p.get('fabric', '?')})"
             for i, p in enumerate(products)
         )
-        prompt += f"Matching products:\n{product_details}\n"
+        prompt += f"Here are some items I found:\n{product_details}\nWhat do you think? Anything catch your eye?"
     # Action-based prompt modification
-    if action == "order":
-        prompt += "User wants to place an order. Ask politely for the delivery address.\n"
-    elif action == "rental":
+    if intent == "Sales" or intent == "Purchase":
+        prompt +="""You are a sales specialist at KrishvaTech, assisting customers in buying textiles, sarees, ready-made outfits, and fabrics.
+                - Help users find products by type, color, fabric, or price range.
+                - Provide clear info on features, pricing, discounts, and stock availability.
+                - If an item is out of stock, recommend alternatives from your inventory.
+                - Answer all questions patiently and suggest related products for upselling.
+                - Guide users through payment and delivery or pickup options.
+                - Always confirm order details before finalizing and thank them for their trust."""
+    elif intent == "rental":
         prompt += """
             You are an expert assistant for textile outfit rentals. When a user asks to rent a wedding sherwani, chanya choli, or any garment:
             - Greet politely and confirm the required product, size, and rental dates.
@@ -43,27 +53,24 @@ async def generate_reply(
             - Clearly communicate the rental price, deposit amount, and any terms.
             - Guide the user to complete the booking, confirming all required details.
             - Remind the user about pickup/return dates, and thank them for choosing KrishvaTech.
-            - Keep the conversation natural and supportive, as if talking in person.\n
+            - Keep the conversation natural and supportive, as if talking in person.
             """
+    else:
+        prompt += """You are a friendly support assistant for KrishvaTech.
+                - Help users with order status, booking changes, product info, and rental returns.
+                - If you can't resolve the query, ask for their contact and assure a human agent will get back soon.
+                - Speak clearly, never guess, and always prioritize customer satisfaction.
+                - If the request is outside your domain, say so politely and offer further help.
+                """
     # Additional instructions for response generation
     prompt += f"""
-    - Respond in a natural, friendly, human-like tone.
-    - Guide users through the full process: product discovery, price inquiries, booking, rental details, payment, delivery, and support.
-    - If a user wants to rent an item, always check the availability for their desired date(s), inform them if it's already booked, and suggest alternatives if needed.
-    - Always confirm all important details (dates, sizes, colors, rental price, deposit, pickup/return info) before finalizing bookings.
-    - If a user wants to buy, give clear info about product features, stock, pricing, and next steps.
-    - Proactively clarify doubts, offer recommendations, and upsell relevant products/services.
-    - NEVER invent products, prices, or policies. Always use data from the inventory/database.
-    - Speak in the user's language: {language}.
-    - If the user asks for human support, offer to connect them or record their query for a callback.
-    - For every interaction, act as a smart, polite, and knowledgeable textile store representative, ensuring customer delight and trust.
-    If you don't know the answer, say, "I will check with our team and get back to you."
-    Always end conversations with a call-to-action, like:
-    "Would you like to book this now?" or "Is there anything else I can help you with?"
-    """
+        - Keep things short, friendly, and engaging.
+        - Use phrases like “Happy to help!” and “What can I assist with next?”
+        - Always ask a follow-up question to keep the conversation going: "Anything else I can help you with?" or "Would you like to book this now?"
+        """
     try:
         response = await client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
@@ -80,7 +87,6 @@ async def generate_reply(
             temperature=0.7,
             max_tokens=500
         )
-        print("RESPONSE_____________________________________________________________:",response)
         return response.choices[0].message.content.strip()
     except Exception as e:
         return f":x: Sorry, I couldn't process your message due to an error: {e}"
