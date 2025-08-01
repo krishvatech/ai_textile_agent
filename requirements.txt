@@ -10,7 +10,7 @@ twilio
 celery
 redis
 rapidfuzz
-openai==1.95.1
+openai==1.98.0
 pandas
 python-multipart
 apscheduler
@@ -21,3 +21,4 @@ pinecone
 langdetect
 aiofiles
 greenlet
+ngrok

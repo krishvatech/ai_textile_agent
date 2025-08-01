@@ -4,13 +4,15 @@ from fastapi import BackgroundTasks
 import os
 import logging
 import httpx
-from analyze import TextileAnalyzer
+from app.core.ai_reply import TextileAnalyzer
 from collections import defaultdict
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 
 # Load environment variables
 load_dotenv()
+# Separate analyzer for each WhatsApp user
+user_sessions = defaultdict(TextileAnalyzer)
 
 EXOTEL_SID = os.getenv("EXOTEL_SID")
 EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
