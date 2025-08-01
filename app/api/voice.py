@@ -98,6 +98,7 @@ async def stream_audio(websocket: WebSocket):
                     # Wait for the language detection result
                     lang_code, confidence = await lang_task
 
+                    
                     # Update context (as in your code)
                     if 'color' in extracted_attributes:
                         user_context['color'] = extracted_attributes['color']
