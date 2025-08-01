@@ -95,8 +95,9 @@ async def stream_audio(websocket: WebSocket):
                     extracted_attributes = extract_dynamic_attributes(txt)
                     # Asynchronously detect the language
                     lang_task = asyncio.create_task(detect_language(txt))
+                    # lang_code = detect_language(txt)
                     # Wait for the language detection result
-                    lang_code, confidence = await lang_task
+                    lang_code,confidence = await lang_task
 
                     
                     # Update context (as in your code)
