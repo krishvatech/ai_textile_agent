@@ -218,7 +218,7 @@ async def stream_audio(websocket: WebSocket):
                     if 'fabric' in extracted_attributes:
                         user_context['fabric'] = extracted_attributes['fabric']
 
-                    user_context[stream_sid]['language'] = lang_code  # Store language for session
+                    user_context['language'] = lang_code  # Store language for session
 
                     logging.info(f"Detected language: {lang_code}")
                     intent, filtered_entities, intent_confidence = await detect_textile_intent_openai(txt, lang_code)
