@@ -206,10 +206,12 @@ async def stream_audio(websocket: WebSocket):
                 if is_final and txt:
                     logging.info(f"Final transcript: {txt}")
                     last_activity = time.time()  # Reset silence timer
-                    attr_task = asyncio.create_task(extract_dynamic_attributes(txt))
+                    extracted_attributes = extract_dynamic_attributes(txt)
+                    # Asynchronously detect the language
                     lang_task = asyncio.create_task(detect_language(txt))
-                    extracted_attributes = await attr_task
+                    # Wait for the language detection result
                     lang_code, confidence = await lang_task
+
                     # Update context (as in your code)
                     if 'color' in extracted_attributes:
                         user_context['color'] = extracted_attributes['color']
