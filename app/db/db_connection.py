@@ -1,14 +1,17 @@
 import psycopg2
+from dotenv import load_dotenv
+import os
 
+load_dotenv()
 
 def get_db_connection():
     """Establish and return a new database connection and cursor."""
     conn = psycopg2.connect(
-        dbname='textile-agent',
-        user='postgres',
-        password='textileagent22',
-        host='textile-agent.ctwgo22okz6g.ap-south-1.rds.amazonaws.com',
-        port='5432'
+        dbname=os.getenv('dbname'),
+        user=os.getenv('user'),
+        password=os.getenv('password'),
+        host=os.getenv('host'),
+        port=os.getenv('port')
     )
     cursor = conn.cursor()
     return conn, cursor
