@@ -57,7 +57,7 @@ def insert_product_and_variants():
     name = input("Product name: ").strip()
     category = input("Category: ").strip()
     description = input("Description: ").strip()
-    type_ = input("Product type: ").strip()
+    type_ = input("Product type(Male/Female/Child): ").strip()
 
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
