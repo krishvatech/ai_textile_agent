@@ -16,6 +16,8 @@ build/
 Pipfile.lock
 poetry.lock
 
+.env
+
 # Virtualenv
 .venv/
 env/
