@@ -67,7 +67,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
         nonlocal db
         try:
             while True:
-                message = await websocket.receive_text()
+                message = await websocket.receive_json()
                 if bot_is_speaking:
                     await stop_tts()
                     
