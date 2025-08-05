@@ -147,7 +147,9 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                         tts_lang = last_user_lang
                     else:
                         last_user_lang = lang if lang else last_user_lang
+                        logging.info(f"Detected language last_user_lang: {last_user_lang}")
                         tts_lang = last_user_lang
+                        logging.info(f"Detected language tts_lang: {tts_lang}")
                     last_activity = time.time()  # Reset silence timer
                     ai_reply = await analyzer.analyze_message(
                         text=txt,
