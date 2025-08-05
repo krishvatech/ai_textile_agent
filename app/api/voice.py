@@ -3,6 +3,7 @@ from app.db.session import get_db
 from app.utils.stt import SarvamSTTStreamHandler
 from app.utils.tts import synthesize_text 
 from app.core.ai_reply import TextileAnalyzer
+from sqlalchemy import text
 from fastapi import Depends
 import json
 import asyncio
@@ -32,9 +33,9 @@ async def speak_pcm(pcm_audio: bytes, websocket: WebSocket, stream_sid: str):
         await asyncio.sleep(0.05)
 
 async def get_tenant_id_by_phone(phone_number: str, db):
-    query = "SELECT id FROM tenants WHERE phone_number = %s AND is_active = true LIMIT 1"
-    await db.execute(query, (phone_number,))
-    row = await db.fetchone()
+    query = text("SELECT id FROM tenants WHERE phone_number = :phone AND is_active = true LIMIT 1")
+    result = await db.execute(query, {"phone": phone_number})
+    row = result.fetchone()
     if row:
         return row[0]
     return None
@@ -55,7 +56,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
         """Stop TTS if bot is speaking"""
         nonlocal bot_is_speaking, tts_task
         if bot_is_speaking:
-            logging.info(":red_circle: Interrupt detected, stopping TTS.")
+            logging.info("Interrupt detected, stopping TTS.")
             bot_is_speaking = False
             if tts_task:
                 tts_task.cancel()  # Cancel the ongoing TTS task
@@ -82,7 +83,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                     stream_sid = message.get("stream_sid")
                     start_payload = message.get("start", {})
                     logging.info(f"start_payload : {start_payload}")
-                    phone_number = start_payload.get("from", "unknown")
+                    phone_number = start_payload.get("to", "unknown")
                     logging.info(f"Final phone: {phone_number}")
                     if phone_number:
                         tenant_id = await get_tenant_id_by_phone(phone_number, db)
