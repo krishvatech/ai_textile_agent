@@ -1,7 +1,9 @@
 from app.core.product_search import search_products
-from app.core.ai_reply import generate_reply
+from app.core.ai_reply import TextileAnalyzer
 from app.core.session_manager import SessionManager
 from app.core.lang_utils import detect_language
+
+analyzer = TextileAnalyzer()
 
 async def handle_user_message(user_id, message, tenant_id, shop_name, db, channel="whatsapp"):
     session = await SessionManager.get_session(user_id)
@@ -10,7 +12,7 @@ async def handle_user_message(user_id, message, tenant_id, shop_name, db, channe
 
     if session.get("pending_action") == "order":
         session["address"] = message
-        reply_text = generate_reply(message, [], shop_name, action="order", language=lang)
+        reply_text = await analyzer.generate_ai_reply(message, [], shop_name, action="order", language=lang)
         await SessionManager.clear_session(user_id)
         return reply_text, [], session
 
@@ -22,12 +24,12 @@ async def handle_user_message(user_id, message, tenant_id, shop_name, db, channe
 
     if any(w in message.lower() for w in ["buy", "order", "purchase"]):
         session["pending_action"] = "order"
-        reply_text = generate_reply(message, products, shop_name, action="order", language=lang)
+        reply_text = await analyzer.generate_ai_reply(message, products, shop_name, action="order", language=lang)
     elif any(w in message.lower() for w in ["rent", "rental", "book"]):
         session["pending_action"] = "rental"
-        reply_text = generate_reply(message, products, shop_name, action="rental", language=lang)
+        reply_text = await analyzer.generate_ai_reply(message, products, shop_name, action="rental", language=lang)
     else:
-        reply_text = generate_reply(message, products, shop_name, language=lang)
+        reply_text = await analyzer.generate_ai_reply(message, products, shop_name, language=lang)
         session["last_products"] = products
 
     await SessionManager.set_session(user_id, session)

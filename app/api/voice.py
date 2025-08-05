@@ -3,7 +3,7 @@ from app.db.session import get_db
 from app.utils.stt import SarvamSTTStreamHandler
 from app.utils.tts import synthesize_text 
 from app.core.lang_utils import detect_language
-from app.core.ai_reply import generate_reply
+from app.core.ai_reply import TextileAnalyzer
 from app.core.intent_utils import detect_textile_intent_openai
 from app.utils.pinecone_utils import query_products
 from app.core.attribute_extraction import extract_dynamic_attributes
@@ -17,6 +17,7 @@ import asyncio
 router = APIRouter()
 
 user_context = {}
+analyzer = TextileAnalyzer()
 
 async def speak_pcm(pcm_audio: bytes, websocket: WebSocket, stream_sid: str):
     """Send TTS audio in chunks over WebSocket"""
@@ -117,7 +118,7 @@ async def stream_audio(websocket: WebSocket):
                     if intent == "product_search":
                         products = await query_products(txt, lang=lang_code)
 
-                    ai_reply = await generate_reply(
+                    ai_reply = await analyzer.generate_ai_reply(
                         user_query=txt,
                         products=products,
                         shop_name=shop_name,

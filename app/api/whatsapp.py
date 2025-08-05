@@ -2,7 +2,7 @@ from fastapi import APIRouter, Request, BackgroundTasks, Depends
 from app.db.session import get_db
 from app.db.models import Tenant, Product
 from app.core.ai_agent import handle_user_message
-from app.utils.whatsapp_utils import send_whatsapp_message#, send_whatsapp_image
+from app.utils.whatsapp_utils import send_whatsapp_reply#, send_whatsapp_image
 from sqlalchemy import text
 
 router = APIRouter()
@@ -48,7 +48,7 @@ async def whatsapp_webhook(req: Request, background_tasks: BackgroundTasks, db =
     for url, caption in images:
         # background_tasks.add_task(send_whatsapp_image, wa_to_number, wa_from_number, url, caption)
         pass
-    background_tasks.add_task(send_whatsapp_message, wa_to_number, wa_from_number, reply_text)
+    background_tasks.add_task(send_whatsapp_reply, wa_to_number, wa_from_number, reply_text)
     print('print.....')
     return {"status": "replied"}
 

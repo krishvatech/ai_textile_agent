@@ -56,7 +56,7 @@ class TextileAnalyzer:
             if v and v not in ["", None, "null", "None"]:
                 self.collected_entities[k] = v
 
-    def get_missing_priority_entities(self, intent: str) -> List[str]:
+    def get_missing_priority_entities(self, intent: str) -> list[str]:
         priorities = self.entity_priority.get(intent, [])
         missing = []
         for entity in priorities:
@@ -194,7 +194,7 @@ class TextileAnalyzer:
         summary_str = ', '.join(collected_summary)
         return f"Review your request: {summary_str}. Confirm to proceed."
 
-    async def generate_ai_reply(self, language: str, intent: str, entities: dict, user_text: str, missing_entities: List[str]) -> str:
+    async def generate_ai_reply(self, language: str, intent: str, entities: dict, user_text: str, missing_entities: list[str]) -> str:
         lang_map = {"hi-IN": "Hindi", "gu-IN": "Gujarati", "en-IN": "English"}
         language_name = lang_map.get(language, "English")
         prompt = f"""

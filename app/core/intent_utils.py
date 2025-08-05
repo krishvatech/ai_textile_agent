@@ -5,7 +5,7 @@ import logging
 import os
 from typing import Tuple
 from dotenv import load_dotenv
-from lang_detect import detect_language # your own module assumed to be working!
+from app.core.lang_utils import detect_language # your own module assumed to be working!
 
 load_dotenv()
 
