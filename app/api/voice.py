@@ -10,6 +10,7 @@ import asyncio
 import logging
 import base64
 import time
+import re
 import asyncio
 
 router = APIRouter()
@@ -38,6 +39,37 @@ async def get_tenant_id_by_phone(phone_number: str, db):
     row = result.fetchone()
     if row:
         return row[0]
+    return None
+
+async def normalize_size(transcript: str) -> str | None:
+    text = transcript.lower().strip().replace('.', '')
+    
+    # Handle double XL variations including 'double ex' and 'double excel'
+    if re.search(r'double\s*(x{1,3}l|ex|excel)', text) or re.search(r'extra\s*extra\s*large', text):
+        return "XXL"
+    
+    if re.search(r'extra\s*large|excel', text):
+        return "XL"
+    
+    if re.search(r'large', text):
+        return "L"
+    
+    if re.search(r'medium|med', text):
+        return "M"
+    
+    if re.search(r'small|sm', text):
+        return "S"
+    
+    if re.search(r'extra\s*small|xs', text):
+        return "XS"
+    
+    if re.search(r'double\s*extra\s*small|xxs', text):
+        return "XXS"
+
+    sizes = ['xxs', 'xs', 's', 'm', 'l', 'xl', 'xxl', 'xxxl']
+    if text in sizes:
+        return text.upper()
+
     return None
 
 @router.websocket("/stream")
@@ -108,16 +140,22 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                 txt, is_final, lang = await asyncio.wait_for(stt.get_transcript(), timeout=0.2)
                 if is_final and txt:
                     logging.info(f"Final transcript: {txt}")
+                    normalized_size=await normalize_size(is_final)
+                    if normalized_size:
+                        logging.info(f"Detected size: {normalized_size}")
+                        tts_lang = lang  
+                    else:
+                        tts_lang = lang_code  # fallback to default language
                     last_activity = time.time()  # Reset silence timer
                     ai_reply = await analyzer.analyze_message(
                         text=txt,
                         tenant_id=tenant_id ,
                     )
-                    logging.info(f"🤖 AI Reply: {ai_reply}")
+                    logging.info(f"🤖 AI Reply In Dictionary : {ai_reply}")
                     answer_text = ai_reply.get('answer', '')
 
                     logging.info(f"AI Reply: {answer_text}")
-                    audio = await synthesize_text(answer_text, language_code=lang_code)
+                    audio = await synthesize_text(answer_text, language_code=tts_lang)
                     await speak_pcm(audio, websocket, stream_sid)
 
                 elif txt:
