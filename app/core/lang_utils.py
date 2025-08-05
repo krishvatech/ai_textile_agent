@@ -15,7 +15,7 @@ client = AsyncOpenAI(api_key=api_key)
 logging.basicConfig(level=logging.INFO)
 
 # Function to detect language using OpenAI API
-async def detect_language(text: str) -> Tuple[str, float]:
+async def detect_language(text: str,last_language: str) -> Tuple[str, float]:
     """
     Detect language using OpenAI API for textile bot
     Supports: Hindi, Gujarati, English (including Romanized)
@@ -32,11 +32,16 @@ You are a language detection expert for an Indian textile business WhatsApp bot.
 2. Consider textile business context and terminology
 3. For mixed language, choose the dominant language
 4. Account for common Indian English + local language mixing
+5. If the message contains common textile-related words such as "xl", "xxl", "wedding", "cotton" or similar,
+   do NOT classify the message as English based only on those words.
+   Instead, if the message is ambiguous or contains only these terms,
+   return the language as the last detected language: "{last_language}"
 **Examples**:
 - "muje lal saree chahiye" → Hindi (Romanized)
 - "લાલ લહેંગા કેટલાનો છે?" → Gujarati
 - "Do you have silk blouses?" → English
 - "saree ma embroidery che?" → Gujarati (Mixed)
+"xl size chahiye" → Use last detected language: "{last_language}"
 **Response Format** (JSON only):
 {{
     "language": "<hi-IN|gu-IN|en-IN>",
