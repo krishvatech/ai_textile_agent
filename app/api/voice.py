@@ -67,22 +67,26 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
         nonlocal db
         try:
             while True:
-                message = await websocket.receive_json()
+                data = await websocket.receive_text()
+                message = json.loads(data)
+                event_type = message.get("event")
                 if bot_is_speaking:
                     await stop_tts()
-                event_type = message.get("event")
+                
                 if event_type == "connected":
                     greeting = "How can I help you today?"
-                    phone = message.get("phone_number")
-                    logging.info(f"Final phone: {phone}")
-                    if phone:
-                        tenant_id = await get_tenant_id_by_phone(phone, db)
-                    logging.info(f"Tenant ID resolved: {tenant_id}")
                     audio = await synthesize_text(greeting, lang_code)
                     await speak_pcm(audio, websocket, stream_sid)
                     
                 elif event_type == "start":
                     stream_sid = message.get("stream_sid")
+                    start_payload = message.get("start", {})
+                    logging.info(f"start_payload : {start_payload}")
+                    phone_number = start_payload.get("from", "unknown")
+                    logging.info(f"Final phone: {phone_number}")
+                    if phone_number:
+                        tenant_id = await get_tenant_id_by_phone(phone_number, db)
+                    logging.info(f"Tenant ID resolved: {tenant_id}")
                     logging.info(f"stream_sid: {stream_sid}")
                     
                 elif event_type == "media":
