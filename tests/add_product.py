@@ -5,7 +5,12 @@ from openai import OpenAI
 from pinecone import Pinecone, ServerlessSpec
 import os
 from dotenv import load_dotenv
+import enum
 
+class RentalStatus(str, enum.Enum):
+    active = "active"
+    returned = "returned"
+    cancelled = "cancelled"
 load_dotenv()
 
 api_key = os.getenv("GPT_API_KEY")
@@ -155,8 +160,41 @@ def insert_product_and_variants():
         }
         upsert_variant_to_pinecone(variant_data)
         print("Product variant indexed in Pinecone.")
+        if is_rental:
+            print("This variant is rentable. Please enter rental availability periods.")
+            add_rentals = 'y'
+            while add_rentals.lower() == 'y':
+                rental_start_date_str = input("Rental start date (YYYY-MM-DD): ").strip()
+                rental_end_date_str = input("Rental end date (YYYY-MM-DD): ").strip()
+                rental_price_str = input("Rental price (optional, press enter to use variant rental price): ").strip()
+                rental_price = float(rental_price_str) if rental_price_str else variant_data["rental_price"]
 
-        add_more_variants = input("Add another variant? (y/n): ").strip()
+                status = RentalStatus.active.value  # or 'booked' or your logic
+
+                now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+                insert_rental_query = '''
+                INSERT INTO rentals (
+                    product_variant_id, rental_start_date, rental_end_date, rental_price, status, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id;
+                '''
+
+                cursor.execute(insert_rental_query, (
+                    variant_id,
+                    rental_start_date_str,
+                    rental_end_date_str,
+                    rental_price,
+                    status,
+                    now_str,
+                    now_str
+                ))
+                rental_id = cursor.fetchone()[0]
+                conn.commit()
+                print(f"Inserted rental availability record with ID: {rental_id}")
+
+                add_rentals = input("Add another rental availability period for this variant? (y/n): ").strip()
+                add_more_variants = input("Add another variant? (y/n): ").strip()
 
     close_db_connection(conn, cursor)
     print("All data inserted and indexed. Connection closed.")

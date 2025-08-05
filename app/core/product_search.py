@@ -2,8 +2,10 @@ import asyncio
 from app.vector.pinecone_client import get_index
 import openai
 import os
-import re  # For regex filter extraction
+from app.db.db_connection import get_db_connection, close_db_connection
 from dotenv import load_dotenv
+import psycopg2
+from datetime import datetime
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("GPT_API_KEY")
@@ -28,7 +30,7 @@ def is_valid_record(meta):
         bool: True if valid, False if invalid (e.g., missing product name or inactive).
     """
     
-    product_name = meta.get("product_name")
+    product_name = meta.get("product_name") or meta.get("name")
     is_active = meta.get("is_active", True)  # Default True if missing
     
     # Check for missing or invalid product name
@@ -41,8 +43,29 @@ def is_valid_record(meta):
 
     return True
 
+def normalize_date(date_str):
+    try:
+        dt = datetime.strptime(date_str, "%d-%m-%Y")
+        return dt.strftime("%Y-%m-%d")
+    except Exception as e:
+        print(f"Date parse error: {e}")
+        return None
+    
+def check_date_availability(conn, product_variant_id, requested_date):
+    with conn.cursor() as cur:
+        query = """
+            SELECT COUNT(*)
+            FROM public.rentals
+            WHERE product_variant_id = %s
+              AND status = 'active'
+              AND %s BETWEEN rental_start_date AND rental_end_date
+        """
+        cur.execute(query, (product_variant_id, requested_date))
+        count = cur.fetchone()[0]
+        return count == 0  # True if available, False if booked
+
 #for search product from pinecone
-async def search_products(query=None,filters=None,top_k=10000,namespace="ns1"):
+async def search_products(query=None,filters=None,top_k=10000,namespace="__default__"):
     
     if query:
         embedding = get_embeddings(query)
@@ -101,7 +124,7 @@ def get_session_state(session_id):
         }
     return session_storage[session_id]
 
-async def get_unique_filters(namespace="ns1"):
+async def get_unique_filters(namespace="__default__"):
     """
     Retrieve unique metadata values for filters (color, fabric, size, stock, rental status)
     from a sample of Pinecone index records.
@@ -155,7 +178,7 @@ async def load_metadata_cache():
     ALL_COLORS, ALL_FABRICS, ALL_SIZES, ALL_STOCKS, ALL_IS_RENTALS = await get_unique_filters()
 
 
-async def handle_user_input(session_id,tenant_id=None, entities=None):
+async def handle_user_input(session_id, entities=None, tenant_id=None, conn=None):
     """
     Handle user input by updating session filters and performing product search.
     Only the last key-value pair in 'entities' is applied as a filter update.
@@ -164,27 +187,28 @@ async def handle_user_input(session_id,tenant_id=None, entities=None):
 
     if tenant_id is not None:
         session["tenant_id"] = tenant_id
-        session["filters"]["tenant_id"] = {"$eq": float(tenant_id)}
+        session["filters"]["tenant_id"] = {"$eq": str(tenant_id)}
 
     # If entities is provided, directly set filters from it
-    if entities:
-        last_key = list(entities.keys())[-1]
-        last_value = entities[last_key]
-
-        if last_key == "product" and last_value:
-            session["filters"]["category"] = {"$eq": last_value.capitalize()}
-        elif last_key == "color" and last_value:
-            session["filters"]["color"] = {"$eq": last_value.capitalize()}
-        elif last_key == "fabric" and last_value:
-            session["filters"]["fabric"] = {"$eq": last_value.capitalize()}
-        elif last_key == "size" and last_value:
-            session["filters"]["size"] = {"$eq": last_value.capitalize()}
-        elif last_key == "stock" and last_value:
-            session["filters"]["stock"] = {"$eq": last_value.capitalize()}
-        elif last_key == "is_rental":
-            if last_value is True:
+    for key, value in entities.items():
+        if value is None or value == "":
+            continue
+        if key == "product":
+            session["filters"]["category"] = {"$eq": value.lower()}
+        elif key == "color":
+            session["filters"]["color"] = {"$eq": value.lower()}
+        elif key == "fabric":
+            session["filters"]["fabric"] = {"$eq": value.lower()}
+        elif key == "size":
+            session["filters"]["size"] = {"$eq": value.lower()}
+        elif key == "stock":
+            session["filters"]["stock"] = {"$eq": value.lower()}
+        elif key == "occasion":
+            session["filters"]["occasion"] = {"$eq": value.lower()}
+        elif key == "is_rental":
+            if value is True:
                 session["filters"]["is_rental"] = {"$eq": True}
-            elif last_value is False:
+            elif value is False:
                 session["filters"]["is_rental"] = {"$eq": False}
             else:
                 session["filters"].pop("is_rental", None)
@@ -192,6 +216,21 @@ async def handle_user_input(session_id,tenant_id=None, entities=None):
     results = await search_products(
         filters=session["filters"]
     )
+    print("Before date filtering, product count:", len(results)) 
+    rental_date_raw = entities.get("rental_date")
+    rental_date = normalize_date(rental_date_raw) if rental_date_raw else None
+
+    if rental_date and conn:
+        available_results = []
+        for product in results:
+            variant_id = 14
+            print("variant-id=",variant_id)
+            if variant_id is None or variant_id == "MISSING":
+                continue
+            if check_date_availability(conn, variant_id, rental_date):
+                available_results.append(product)
+        results = available_results
+        print("After date filtering, available count:", len(results))
     count = len(results)
     print("Count=", count)
     if count > 0:
@@ -199,6 +238,3 @@ async def handle_user_input(session_id,tenant_id=None, entities=None):
     else:
         print("No found")
     return results
-
-
-
