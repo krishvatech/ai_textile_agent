@@ -93,38 +93,34 @@ async def stream_audio(websocket: WebSocket):
                 if is_final and txt:
                     logging.info(f"Final transcript: {txt}")
                     last_activity = time.time()  # Reset silence timer
-                    extracted_attributes = extract_dynamic_attributes(txt)
-                    # Asynchronously detect the language
-                    lang_task = asyncio.create_task(detect_language(txt))
-                    # lang_code = detect_language(txt)
-                    # Wait for the language detection result
-                    lang_code,confidence = await lang_task
+                    # extracted_attributes = extract_dynamic_attributes(txt)
+                    # # Asynchronously detect the language
+                    # lang_task = asyncio.create_task(detect_language(txt))
+                    # # lang_code = detect_language(txt)
+                    # # Wait for the language detection result
+                    # lang_code,confidence = await lang_task
 
                     
-                    # Update context (as in your code)
-                    if 'color' in extracted_attributes:
-                        user_context['color'] = extracted_attributes['color']
-                    if 'fabric' in extracted_attributes:
-                        user_context['fabric'] = extracted_attributes['fabric']
+                    # # Update context (as in your code)
+                    # if 'color' in extracted_attributes:
+                    #     user_context['color'] = extracted_attributes['color']
+                    # if 'fabric' in extracted_attributes:
+                    #     user_context['fabric'] = extracted_attributes['fabric']
 
-                    user_context['lang_code'] = lang_code  # Store language for session
+                    # user_context['lang_code'] = lang_code  # Store language for session
 
-                    logging.info(f"Detected language: {lang_code}")
-                    intent, filtered_entities, intent_confidence = await detect_textile_intent_openai(txt, lang_code)
-                    logging.info(f"Detected Intent: {intent}")
+                    # logging.info(f"Detected language: {lang_code}")
+                    # intent, filtered_entities, intent_confidence = await detect_textile_intent_openai(txt, lang_code)
+                    # logging.info(f"Detected Intent: {intent}")
                     
-                    products = []
-                    shop_name = "Krishna Textiles"
-                    if intent == "product_search":
-                        products = await query_products(txt, lang=lang_code)
+                    # products = []
+                    # shop_name = "Krishna Textiles"
+                    # if intent == "product_search":
+                    #     products = await query_products(txt, lang=lang_code)
 
-                    ai_reply = await analyzer.generate_ai_reply(
+                    ai_reply = await analyzer.analyze_message(
                         user_query=txt,
-                        products=products,
-                        shop_name=shop_name,
-                        action=None,
-                        language=lang_code,
-                        intent=intent,
+                        tenant_id=12,
                     )
 
                     logging.info(f"AI Reply: {ai_reply}")

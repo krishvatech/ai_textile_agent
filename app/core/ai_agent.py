@@ -24,12 +24,12 @@ async def handle_user_message(user_id, message, tenant_id, shop_name, db, channe
 
     if any(w in message.lower() for w in ["buy", "order", "purchase"]):
         session["pending_action"] = "order"
-        reply_text = await analyzer.generate_ai_reply(message, products, shop_name, action="order", language=lang)
+        reply_text = await analyzer.analyze_message(message, products, shop_name, action="order", language=lang)
     elif any(w in message.lower() for w in ["rent", "rental", "book"]):
         session["pending_action"] = "rental"
-        reply_text = await analyzer.generate_ai_reply(message, products, shop_name, action="rental", language=lang)
+        reply_text = await analyzer.analyze_message(message, products, shop_name, action="rental", language=lang)
     else:
-        reply_text = await analyzer.generate_ai_reply(message, products, shop_name, language=lang)
+        reply_text = await analyzer.analyze_message(message, products, shop_name, language=lang)
         session["last_products"] = products
 
     await SessionManager.set_session(user_id, session)
