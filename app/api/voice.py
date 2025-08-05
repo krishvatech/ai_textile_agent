@@ -76,6 +76,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                 if event_type == "connected":
                     greeting = "How can I help you today?"
                     phone = message.get("phone_number")
+                    print("phone_number=",phone)
                     if phone:
                         tenant_id = await get_tenant_id_by_phone(phone, db)
                     logging.info(f"Tenant ID resolved: {tenant_id}")
