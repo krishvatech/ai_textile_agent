@@ -7,8 +7,6 @@ from typing import Dict, Any, List, Optional
 from openai import AsyncOpenAI
 import logging
 import re
-from app.core.lang_utils import detect_language
-from app.core.intent_utils import detect_textile_intent_openai
 
 load_dotenv()
 api_key = os.getenv("GPT_API_KEY")
@@ -101,15 +99,20 @@ class TextileAnalyzer:
             {"variant_id": "2", "name": "Blue Cotton Kurti - M", "type": "female", "category": "kurti", "occasion": "casual", "color": "blue", "fabric": "cotton", "size": "M", "is_rental": False}
         ]
 
-    async def analyze_message(self, text: str, tenant_id=None,language: str = "en-US") -> Dict[str, Any]:
+    async def analyze_message(self, text: str, tenant_id=None,language: str = "en-US",intent: str | None = None,new_entities: dict | None = None,intent_confidence: float = 0.0,) -> Dict[str, Any]:
         logging.info(f"Detected language in analyze_message: {language}")
-        language=language
-        logging.info(f"Detected language in analyze_message after assign: {language}")
-        intent, new_entities, intent_confidence = await detect_textile_intent_openai(text, language)
-        self.merge_entities(new_entities)
-        self.session_history.append({"role": "user", "content": text})
-        lang_for_prompt = self.choose_language(language)
+        
+        if new_entities:
+            self.merge_entities(new_entities)
+        if intent is None:
+            intent = "other"
+        self.last_intent = intent 
+        self.intent_confidence = intent_confidence
 
+        self.session_history.append({"role": "user", "content": text})
+        
+        lang_for_prompt = self.choose_language(language)
+        
         # GREETING
         if intent == "greeting" or (text.strip().lower() in ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]):
             self.clear_history()

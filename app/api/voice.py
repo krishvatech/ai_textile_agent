@@ -3,6 +3,7 @@ from app.db.session import get_db
 from app.utils.stt import SarvamSTTStreamHandler
 from app.utils.tts import synthesize_text 
 from app.core.lang_utils import detect_language
+from app.core.intent_utils import detect_textile_intent_openai
 from app.core.ai_reply import TextileAnalyzer
 from sqlalchemy import text
 from fastapi import Depends
@@ -67,7 +68,11 @@ async def normalize_size(transcript: str) -> str | None:
     # 'એક્સેલ' = XL, 'ડબલ એક્સેલ' = XXL, 'લાર્જ' = L, 'મીડિયમ' = M, 'સ્મોલ' = S, 'એક્સએસ' = XS, 'ડબલ એક્સએસ' = XXS
     if re.search(r'ડબલ\s*એક્સેલ|ડબલએક્સેલ', text):
         return "XXL"
+    if re.search(r'ડબલ\s*એક્સલ|ડબલએક્સલ.', text):
+        return "XXL"
     if re.search(r'એક્સેલ', text):
+        return "XL"
+    if re.search(r'એક્સલ', text):
         return "XL"
     if re.search(r'લાર્જ', text):
         return "L"
@@ -176,25 +181,24 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                     logging.info(f"Final transcript: {txt}")
                     lang,_ = await detect_language(txt,last_user_lang)
                     normalized_size=await normalize_size(txt)
+                    intent, new_entities, intent_confidence = await detect_textile_intent_openai(txt, lang)
                     if normalized_size:
-                        logging.info(f"Detected size: {normalized_size}")
-                        tts_lang = last_user_lang
-                    else:
-                        last_user_lang = lang if lang else last_user_lang
-                        logging.info(f"Detected language last_user_lang: {last_user_lang}")
-                        tts_lang = last_user_lang
-                        logging.info(f"Detected language tts_lang: {tts_lang}")
+                        new_entities['size'] = normalized_size
+                        logging.info(f"Overriding detected size with normalized size: {normalized_size}")
                     last_activity = time.time()  # Reset silence timer
                     ai_reply = await analyzer.analyze_message(
                         text=txt,
                         tenant_id=tenant_id ,
-                        language=tts_lang 
+                        language=lang,
+                        intent=intent,
+                        entities=new_entities,
+                        confidence=intent_confidence
                     )
                     logging.info(f"🤖 AI Reply In Dictionary : {ai_reply}")
                     answer_text = ai_reply.get('answer', '')
 
                     logging.info(f"AI Reply: {answer_text}")
-                    audio = await synthesize_text(answer_text, language_code=tts_lang)
+                    audio = await synthesize_text(answer_text, language_code=lang)
                     await speak_pcm(audio, websocket, stream_sid)
 
                 elif txt:
