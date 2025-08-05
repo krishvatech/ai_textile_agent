@@ -70,8 +70,6 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                 message = await websocket.receive_json()
                 if bot_is_speaking:
                     await stop_tts()
-                    
-                message = json.loads(message)
                 event_type = message.get("event")
                 if event_type == "connected":
                     greeting = "How can I help you today?"

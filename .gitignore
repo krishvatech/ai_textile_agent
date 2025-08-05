@@ -59,7 +59,7 @@ migrations/
 alembic.ini
 
 .env
-
+app_local.py
 # Frontend (React/Next.js etc.)
 frontend/node_modules/
 frontend/build/
