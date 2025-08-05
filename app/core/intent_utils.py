@@ -45,16 +45,7 @@ def process_all_entities(entities: dict) -> dict:
                 elif not isinstance(value, str):
                     all_entities[key] = value
             # If value is empty/None, keep it as None (don't filter out)
-            
-    # --- ADDED LOGIC: auto-set type if category is given and type is blank
-    cat = all_entities.get("category", "")
-    if cat and not all_entities["type"]:
-        cat_norm = cat.strip().lower()
-        if cat_norm in CATEGORY_TO_TYPE:
-            all_entities["type"] = CATEGORY_TO_TYPE[cat_norm]
     return all_entities
-    
-    # return all_entities
 
 async def detect_textile_intent_openai(text: str, detected_language: str) -> Tuple[str, dict, float]:
     """
