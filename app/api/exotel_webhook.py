@@ -10,7 +10,7 @@ router = APIRouter()
 
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept(origin=None)
+    await websocket.accept()
     logging.info("WebSocket connection accepted")
 
     try:

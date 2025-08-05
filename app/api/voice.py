@@ -43,7 +43,7 @@ async def get_tenant_id_by_phone(phone_number: str, db):
 @router.websocket("/stream")
 async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
     logging.info("Incoming WebSocket connection - before accept")
-    await websocket.accept(origin=None)
+    await websocket.accept()
     logging.info("✅ WebSocket connection accepted at /stream")
 
     stt = SarvamSTTStreamHandler()

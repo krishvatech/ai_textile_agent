@@ -61,7 +61,7 @@ analyzer = TextileAnalyzer()
 
 @app.websocket("/stream")
 async def stream_audio(websocket: WebSocket):
-    await websocket.accept(origin=None)
+    await websocket.accept()
     logging.info("✅ WebSocket connection accepted at /stream")
 
     stt = MockSTTStreamHandler()
