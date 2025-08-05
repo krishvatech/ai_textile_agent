@@ -42,7 +42,8 @@ async def get_tenant_id_by_phone(phone_number: str, db):
 
 @router.websocket("/stream")
 async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
-    await websocket.accept()
+    logging.info("Incoming WebSocket connection - before accept")
+    await websocket.accept(origin=None)
     logging.info("✅ WebSocket connection accepted at /stream")
 
     stt = SarvamSTTStreamHandler()
@@ -112,9 +113,10 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                         text=txt,
                         tenant_id=tenant_id ,
                     )
+                    answer_text = ai_reply.get('answer', '')
 
-                    logging.info(f"AI Reply: {ai_reply}")
-                    audio = await synthesize_text(ai_reply, language_code=lang_code)
+                    logging.info(f"AI Reply: {answer_text}")
+                    audio = await synthesize_text(answer_text, language_code=lang_code)
                     await speak_pcm(audio, websocket, stream_sid)
 
                 elif txt:
