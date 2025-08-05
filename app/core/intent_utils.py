@@ -340,7 +340,3 @@ async def main():
             break
         except Exception as e:
             print(f"Error: {e}\n")
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())
