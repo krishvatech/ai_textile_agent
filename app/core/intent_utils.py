@@ -8,7 +8,6 @@ from dotenv import load_dotenv
 from app.core.lang_utils import detect_language # your own module assumed to be working!
 
 load_dotenv()
-
 api_key = os.getenv("GPT_API_KEY")
 if not api_key:
     print("❌ Error: GPT_API_KEY not found in environment variables")
@@ -18,12 +17,12 @@ client = AsyncOpenAI(api_key=api_key)
 
 def process_all_entities(entities: dict) -> dict:
     """
-    Process all entities and return complete entity structure with both values and None
+    Return entity structure filling missing with None.
     """
-    # Define all possible entities based on your product schema
     all_entities = {
         "product_name": None,
         "category": None,
+        "type": None,
         "fabric": None,
         "color": None,
         "size": None,
@@ -32,10 +31,9 @@ def process_all_entities(entities: dict) -> dict:
         "quantity": None,
         "location": None,
         "occasion": None,
-        "is_rental": None
+        "is_rental": None,
+        "rental_date": None
     }
-    
-    # Update with extracted entities, cleaning empty values
     for key, value in entities.items():
         if key in all_entities:
             if value and value not in [None, "", "null", "None", "N/A", "n/a"]:
@@ -43,262 +41,227 @@ def process_all_entities(entities: dict) -> dict:
                     all_entities[key] = value.strip()
                 elif not isinstance(value, str):
                     all_entities[key] = value
-            # If value is empty/None, keep it as None (don't filter out)
-    
     return all_entities
 
 async def detect_textile_intent_openai(text: str, detected_language: str) -> Tuple[str, dict, float]:
     """
-    Detect customer intent for textile business using OpenAI
+    Detect customer intent and entities for textile business using OpenAI.
+    Infer "type" from product category using fashion/domain norms,
+    even if not explicitly mentioned in the message.
     """
     prompt = f"""
-You are an AI assistant for a textile business in India specializing in wholesale and retail.
+You are an AI assistant for an Indian textile business specializing in wholesale and retail.
 
-**Your Task**: Analyze the customer message and identify their business intent.
+**Your Task:** Analyze the customer message and fill as many of the below entities as possible.
 
-**Textile Business Intents**:
-1. **product_search** - Looking for clothes (saree, lehenga, kurti, suit, etc.)
-2. **price_inquiry** - Asking about price, cost, budget
-3. **color_preference** - Mentioning specific colors
-4. **size_query** - Size, measurement, fitting questions
-5. **fabric_inquiry** - Cotton, silk, georgette, chiffon, etc.
-6. **order_placement** - Ready to buy, place order
-7. **order_status** - Check existing order status
-8. **catalog_request** - Want to see catalog, images, new designs, collections, what's available
-9. **availability_check** - Stock availability
-10. **customization** - Tailoring, alterations, custom design
-11. **delivery_inquiry** - Delivery time, location, charges
-12. **payment_query** - Payment methods, EMI, refund
-13. **discount_inquiry** - Offers, deals, discounts
-14. **rental_inquiry** - Rental services, rental price
-15. **greeting** - Hello, hi, namaste
-16. **complaint** - Problems, issues, returns
-17. **other** - Anything else
+**Textile Business Intents:**
+1. product_search      - Looking for clothes (saree, lehenga, kurti, suit, etc.)
+2. price_inquiry       - Asking about price, cost, budget
+3. color_preference    - Mentioning specific colors
+4. size_query          - Size, measurement, fitting questions
+5. fabric_inquiry      - Cotton, silk, georgette, chiffon, etc.
+6. order_placement     - Ready to buy, place order
+7. order_status        - Check existing order status
+8. catalog_request     - Want to see catalog, images, what's available
+9. availability_check  - Stock availability
+10. customization      - Tailoring, alterations, custom design
+11. delivery_inquiry   - Delivery time, location, charges
+12. payment_query      - Payment methods, EMI, refund
+13. discount_inquiry   - Offers, deals, discounts
+14. rental_inquiry     - Rental services, rental price
+15. greeting           - Hello, hi, namaste
+16. complaint          - Problems, issues, returns
+17. other              - Anything else
 
-**CRITICAL: Price vs Quantity Recognition Patterns**:
-**GUJARATI PATTERNS**:
-- **Price**: "500 ni", "₹500 na", "500 ના ભાવે", "500 rate", "500 કિંમત"
-- **Quantity**: "1000 joia", "1000 જોઈએ", "1000 પીસ", "1000 sari", "જથ્થો"
-**HINDI PATTERNS**:
-- **Price**: "500 ka", "500 के", "₹500 में", "500 रुपए", "500 दाम"
-- **Quantity**: "1000 chahiye", "1000 चाहिए", "1000 pieces", "1000 साड़ी"
-**ENGLISH PATTERNS**:
-- **Price**: "₹500 each", "500 rupees", "at 500", "price 500"
-- **Quantity**: "1000 pieces", "need 1000", "want 1000", "1000 sarees"
-**MIXED LANGUAGE PATTERNS**:
-- "500 ni 1000 joia" = price: 500, quantity: 1000
-- "1000 saree 500 ka" = quantity: 1000, price: 500
-- "500 rate ma 1000 pieces" = price: 500, quantity: 1000
+**CRITICAL:**
+- Always extract (and normalize) these fields:
+  - **category**: Product category (saree, dress, kurti, suit, lehenga, shirt, t-shirt, frock, sherwani, etc.)
+  - **type**: Always infer based only on the product category if possible, *even if user does not specify*:
+    - These rules override any keyword-based guess:
+      - saree, lehenga, salwar suit, anarkali, kurti, skirt, gown, frock, blouse => type: "female"
+      - shirt, pant, kurta, sherwani, dhoti, pajama => type: "male"
+      - "child", "kids", "boys", "girls" explicit in message => type: "child"
+      - "t-shirt", "jacket", "coat", "blazer", "hoodie": type "unisex" unless user specifies gender/age group
+      - If the category is ambiguous, or no clear default, leave type blank.
+    - *DO NOT* require words like "ladies", "gents", "men", "women", "boys", "girls" for type – infer from category.
+- If in doubt, leave blank.
 
-**Entity Extraction Guidelines**:
-- **product**: Type of clothing mentioned
-- **color**: Always normalize color names to their standard English equivalent regardless of language or script.
-  For example:
-  - "lal", "लाल", "લાલ" → "red"
-  - "hara", "हरा", "હરું" → "green"
-  - "pila", "पीला", "પીળું" → "yellow"
-  - "neela", "नीला", "વાદળી" → "blue"
-  If unsure, pick the closest standard English color.
-
-- **fabric**: Recognize fabrics including regional or colloquial names like "resmi", "surti", "kanjeevaram", "mulmul", "mashru", etc.
-  Normalize these to common fabric types:
-  - "resmi" → "silk"
-  - "surti" → "silk"
-  - "mulmul" → "cotton"
-  - "mashru" → "silk-cotton blend"
-  Return the closest standard fabric if unsure.
-
-- **price_range**: Unit price/rate per piece (NOT total amount)
-- **size**: Size or measurement requested
-- **occasion**: Wedding, party, casual, festival, etc.
-- **quantity**: Number of pieces desired
-- **location**: Delivery location if mentioned
-
-**Customer Message**: "{text}"
-**Detected Language**: "{detected_language}"
-
-**Entity Extraction Guidelines**:
-- **product_name**: Specific product name (Banarasi Silk Saree, Cotton Kurti, etc.)
-- **category**: Product category (Saree, Lehenga, Kurti, Suit, etc.)
-- **fabric**: Fabric type (Silk, Cotton, Georgette, Chiffon, etc.)
-- **color**: Specific colors mentioned
-- **size**: Size requirements (Free Size, XL, L, etc.)
+**Other Entity Extraction Guidelines**:
+- **product_name**: e.g. Banarasi Silk Saree, Cotton Kurti
+- **fabric**: e.g. silk, cotton, georgette, etc.
+- **color**: Normalize color in English.
+- **size**: e.g. M, L, XL, kids, Free Size, etc.
 - **price_range**: Unit price/rate per piece (NOT total amount)
 - **rental_price**: Rental price if mentioned
 - **quantity**: Number of pieces needed
 - **location**: Delivery location
-- **occasion**: Wedding, party, casual, festival
+- **occasion**: Wedding, party, festival
 - **is_rental**: true/false if rental inquiry
+- **rental_date**: Any date/datetime phrase ("15 August", "next Tuesday", etc.)
 
-**Customer Message**: "{text}"
-**Detected Language**: "{detected_language}"
+**Customer Message:** "{text}"
+**Detected Language:** "{detected_language}"
 
 **Response Format** (JSON only):
 {{
-    "intent": "",
-    "entities": {{
-        "product_name": "",
-        "category": "",
-        "fabric": "",
-        "color": "",
-        "size": "",
-        "price_range": "",
-        "rental_price": "",
-        "quantity": "",
-        "location": "",
-        "occasion": "",
-        "is_rental": ""
-    }},
-    "confidence": <0.0-1.0>,
-    "is_question": <true/false>
+"intent": "",
+"entities": {{
+    "product_name": "",
+    "category": "",
+    "type": "",
+    "fabric": "",
+    "color": "",
+    "size": "",
+    "price_range": "",
+    "rental_price": "",
+    "quantity": "",
+    "location": "",
+    "occasion": "",
+    "is_rental": "",
+    "rental_date": ""
+}},
+"confidence": <0.0-1.0>,
+"is_question": <true/false>
 }}
 
-**EXAMPLES**:
+**SAMPLE EXAMPLES (demonstrate INFERENCE):**
 
-Message: "lal sari 500 ni 1000 joia"
+Message: "I want to buy a saree"
 Output: {{
   "intent": "product_search",
   "entities": {{
-    "product": "sari",
-    "color": "red",
-    "price_range": "500",
-    "quantity": "1000"
+     "product_name": "saree",
+     "category": "saree",
+     "type": "female"
   }},
-  "confidence": 0.90,
+  "confidence": 0.89,
   "is_question": false
 }}
 
-Message: "मुझे 1000 साड़ी चाहिए 500 के रेट में"
+Message: "need shirt for office"
 Output: {{
   "intent": "product_search",
   "entities": {{
-    "product": "साड़ी",
-    "price_range": "500",
-    "quantity": "1000"
+    "product_name": "shirt",
+    "category": "shirt",
+    "type": "male"
   }},
-  "confidence": 0.90,
+  "confidence": 0.87,
   "is_question": false
 }}
 
-Message: "1000 pieces saree at 500 rate"
+Message: "kurti, green cotton, free size"
 Output: {{
   "intent": "product_search",
   "entities": {{
-    "product": "saree",
-    "price_range": "500",
-    "quantity": "1000"
+      "product_name": "kurti",
+      "category": "kurti",
+      "type": "female",
+      "fabric": "cotton",
+      "color": "green",
+      "size": "Free Size"
   }},
-  "confidence": 0.90,
+  "confidence": 0.88,
   "is_question": false
 }}
 
-Message: "લાલ સાડી ₹500 ના ભાવે 2000 જોઈએ છે"
+Message: "2 frocks, red and yellow"
 Output: {{
   "intent": "product_search",
   "entities": {{
-    "product": "સાડી",
-    "color": "red",
-    "price_range": "₹500",
-    "quantity": "2000"
+      "product_name": "frock",
+      "category": "frock",
+      "type": "female",
+      "color": "red and yellow",
+      "quantity": "2"
   }},
-  "confidence": 0.90,
+  "confidence": 0.92,
   "is_question": false
 }}
 
-Message: "mane resmi saree 500 ni 1000 joia lal color"
+Message: "sherwani for marriage"
 Output: {{
   "intent": "product_search",
   "entities": {{
-    "product": "saree",
-    "fabric": "silk",
-    "price_range": "500",
-    "quantity": "1000",
-    "color": "red"
+      "product_name": "sherwani",
+      "category": "sherwani",
+      "type": "male",
+      "occasion": "marriage"
   }},
-  "confidence": 0.90,
+  "confidence": 0.85,
   "is_question": false
 }}
 
-Message: "any new design?"
+Message: "kids t-shirt for school"
 Output: {{
-  "intent": "catalog_request",
-  "entities": {{}},
-  "confidence": 0.90,
-  "is_question": true
+  "intent": "product_search",
+  "entities": {{
+      "product_name": "t-shirt",
+      "category": "t-shirt",
+      "type": "child"
+  }},
+  "confidence": 0.85,
+  "is_question": false
 }}
 
-Message: "kai navu che"
+Message: "jacket"
 Output: {{
-  "intent": "catalog_request",
-  "entities": {{}},
-  "confidence": 0.90,
-  "is_question": true
+  "intent": "product_search",
+  "entities": {{
+      "product_name": "jacket",
+      "category": "jacket",
+      "type": "unisex"
+  }},
+  "confidence": 0.84,
+  "is_question": false
 }}
 """
-
     try:
         response = await client.chat.completions.create(
-            model="gpt-4.1-mini",  # Updated model name
+            model="gpt-4.1-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=400
         )
-        
         content = response.choices[0].message.content.strip()
         if content.startswith("```"):
-            content = content.replace("```json", "").replace("```", "").strip()
-        
+            content = content.replace("```json", "").replace("```").strip()
         result = json.loads(content)
-        
-        # Process all entities (including None values)
         processed_entities = process_all_entities(result.get("entities", {}))
-        
         return result.get("intent", "other"), processed_entities, result.get("confidence", 0.1)
-        
     except Exception as e:
         logging.error(f"Intent detection failed: {e}")
-        # Return empty entity structure with all None values
         empty_entities = process_all_entities({})
         return "other", empty_entities, 0.1
 
 def format_entities(entities: dict) -> str:
-    """
-    Format entities for display, showing both populated and None values
-    """
     if not entities:
         return "None"
-    
     formatted_lines = []
     for k, v in entities.items():
-        if v is not None:
+        if v is not None and v != "":
             formatted_lines.append(f" ✓ {k}: {v}")
         else:
             formatted_lines.append(f" ○ {k}: None")
-    
     return "\n".join(formatted_lines)
 
 async def main():
     print("🧵 Textile Intent Detection Tester")
     print("📋 Product Schema: Banarasi Silk Saree, Cotton Kurti, etc.")
     print("Type 'q' or 'quit' to exit\n")
-    
     while True:
         try:
             user_input = input("Enter message: ").strip()
             if user_input.lower() in ["q", "quit"]:
                 print("Goodbye!")
                 break
-            
             if not user_input:
                 continue
-            
             print("🔄 Detecting language...")
             language, lang_conf = await detect_language(user_input)
             print(f"Detected Language: {language} (confidence: {lang_conf:.2f})")
-            
             print("🔄 Detecting intent...")
             intent, entities, conf = await detect_textile_intent_openai(user_input, language)
-            
             print("\n" + "=" * 70)
             print(f"📝 Input: {user_input}")
             print(f"🌐 Language: {language} - {lang_conf:.2f}")
@@ -307,13 +270,8 @@ async def main():
             print(format_entities(entities))
             print("=" * 70)
             print()
-            
         except KeyboardInterrupt:
             print("\nGoodbye!")
             break
         except Exception as e:
             print(f"Error: {e}\n")
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())
