@@ -113,6 +113,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                         text=txt,
                         tenant_id=tenant_id ,
                     )
+                    logging.info(f"🤖 AI Reply: {ai_reply}")
                     answer_text = ai_reply.get('answer', '')
 
                     logging.info(f"AI Reply: {answer_text}")
