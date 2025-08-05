@@ -93,7 +93,7 @@ class TextileAnalyzer:
             temperature=0.1,
             max_tokens=64
         )
-        return response.choices.message.content.strip()
+        return response.choices[0].message.content.strip()
 
     async def fetch_variants_from_pinecone(self, entities: dict) -> List[dict]:
         return [
