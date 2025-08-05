@@ -2,6 +2,7 @@ from fastapi import APIRouter, Request, BackgroundTasks, Depends, WebSocket, Web
 from app.db.session import get_db
 from app.utils.stt import SarvamSTTStreamHandler
 from app.utils.tts import synthesize_text 
+from app.core.lang_utils import detect_language
 from app.core.ai_reply import TextileAnalyzer
 from sqlalchemy import text
 from fastapi import Depends
@@ -141,6 +142,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                 txt, is_final, lang = await asyncio.wait_for(stt.get_transcript(), timeout=0.2)
                 if is_final and txt:
                     logging.info(f"Final transcript: {txt}")
+                    lang,_ = await detect_language(txt)
                     normalized_size=await normalize_size(txt)
                     if normalized_size:
                         logging.info(f"Detected size: {normalized_size}")
@@ -154,6 +156,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                     ai_reply = await analyzer.analyze_message(
                         text=txt,
                         tenant_id=tenant_id ,
+                        language=tts_lang 
                     )
                     logging.info(f"🤖 AI Reply In Dictionary : {ai_reply}")
                     answer_text = ai_reply.get('answer', '')

@@ -5,6 +5,7 @@ from dateutil import parser
 from dotenv import load_dotenv
 from typing import Dict, Any, List, Optional
 from openai import AsyncOpenAI
+import logging
 from app.core.lang_utils import detect_language
 from app.core.intent_utils import detect_textile_intent_openai
 
@@ -142,8 +143,10 @@ class TextileAnalyzer:
         # Default
         return "Please specify your choice."
 
-    async def analyze_message(self, text: str, tenant_id=None) -> Dict[str, Any]:
-        language, _ = await detect_language(text)
+    async def analyze_message(self, text: str, tenant_id=None,language: str = "en-US") -> Dict[str, Any]:
+        logging.info(f"Detected language in analyze_message: {language}")
+        language=language
+        logging.info(f"Detected language in analyze_message after assign: {language}")
         intent, new_entities, intent_confidence = await detect_textile_intent_openai(text, language)
         self.merge_entities(new_entities)
         self.session_history.append({"role": "user", "content": text})
