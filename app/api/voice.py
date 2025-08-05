@@ -135,6 +135,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
     async def process_transcripts():
         """Process STT transcripts, generate replies, and handle TTS"""
         last_activity = time.time()
+        last_user_lang = lang_code
         while True:
             try:
                 txt, is_final, lang = await asyncio.wait_for(stt.get_transcript(), timeout=0.2)
@@ -143,9 +144,10 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                     normalized_size=await normalize_size(txt)
                     if normalized_size:
                         logging.info(f"Detected size: {normalized_size}")
-                        tts_lang = lang  
+                        tts_lang = last_user_lang
                     else:
-                        tts_lang = lang_code  # fallback to default language
+                        last_user_lang = lang if lang else last_user_lang
+                        tts_lang = last_user_lang
                     last_activity = time.time()  # Reset silence timer
                     ai_reply = await analyzer.analyze_message(
                         text=txt,
