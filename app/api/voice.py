@@ -42,36 +42,68 @@ async def get_tenant_id_by_phone(phone_number: str, db):
         return row[0]
     return None
 
+import re
+
 async def normalize_size(transcript: str) -> str | None:
     text = transcript.lower().strip().replace('.', '')
-    
-    # Handle double XL variations including 'double ex' and 'double excel'
+
+    # English patterns (your existing ones)
     if re.search(r'double\s*(x{1,3}l|ex|excel)', text) or re.search(r'extra\s*extra\s*large', text):
         return "XXL"
-    
     if re.search(r'extra\s*large|excel', text):
         return "XL"
-    
     if re.search(r'large', text):
         return "L"
-    
     if re.search(r'medium|med', text):
         return "M"
-    
     if re.search(r'small|sm', text):
         return "S"
-    
     if re.search(r'extra\s*small|xs', text):
         return "XS"
-    
     if re.search(r'double\s*extra\s*small|xxs', text):
         return "XXS"
 
+    # Gujarati size words (Unicode strings)
+    # 'એક્સેલ' = XL, 'ડબલ એક્સેલ' = XXL, 'લાર્જ' = L, 'મીડિયમ' = M, 'સ્મોલ' = S, 'એક્સએસ' = XS, 'ડબલ એક્સએસ' = XXS
+    if re.search(r'ડબલ\s*એક્સેલ|ડબલએક્સેલ', text):
+        return "XXL"
+    if re.search(r'એક્સેલ', text):
+        return "XL"
+    if re.search(r'લાર્જ', text):
+        return "L"
+    if re.search(r'મીડિયમ', text):
+        return "M"
+    if re.search(r'સ્મોલ', text):
+        return "S"
+    if re.search(r'એક્સએસ', text):
+        return "XS"
+    if re.search(r'ડબલ\s*એક્સએસ|ડબલએક્સએસ', text):
+        return "XXS"
+
+    # Hindi size words (Unicode strings)
+    # 'डबल एक्सेल' = XXL, 'एक्सेल' = XL, 'लार्ज' = L, 'मीडियम' = M, 'स्माल' = S, 'एक्सएस' = XS, 'डबल एक्सएस' = XXS
+    if re.search(r'डबल\s*एक्सेल', text):
+        return "XXL"
+    if re.search(r'एक्सेल', text):
+        return "XL"
+    if re.search(r'लार्ज', text):
+        return "L"
+    if re.search(r'मीडियम', text):
+        return "M"
+    if re.search(r'स्माल', text):
+        return "S"
+    if re.search(r'एक्सएस', text):
+        return "XS"
+    if re.search(r'डबल\s*एक्सएस', text):
+        return "XXS"
+
+    # Also handle exact size code inputs like 'xl', 'xxl', etc.
     sizes = ['xxs', 'xs', 's', 'm', 'l', 'xl', 'xxl', 'xxxl']
     if text in sizes:
         return text.upper()
 
     return None
+
 
 @router.websocket("/stream")
 async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
