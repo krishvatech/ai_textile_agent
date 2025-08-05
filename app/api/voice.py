@@ -140,7 +140,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                 txt, is_final, lang = await asyncio.wait_for(stt.get_transcript(), timeout=0.2)
                 if is_final and txt:
                     logging.info(f"Final transcript: {txt}")
-                    normalized_size=await normalize_size(is_final)
+                    normalized_size=await normalize_size(txt)
                     if normalized_size:
                         logging.info(f"Detected size: {normalized_size}")
                         tts_lang = lang  
