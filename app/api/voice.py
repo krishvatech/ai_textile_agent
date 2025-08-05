@@ -2,11 +2,8 @@ from fastapi import APIRouter, Request, BackgroundTasks, Depends, WebSocket, Web
 from app.db.session import get_db
 from app.utils.stt import SarvamSTTStreamHandler
 from app.utils.tts import synthesize_text 
-from app.core.lang_utils import detect_language
 from app.core.ai_reply import TextileAnalyzer
-from app.core.intent_utils import detect_textile_intent_openai
-from app.utils.pinecone_utils import query_products
-from app.core.attribute_extraction import extract_dynamic_attributes
+from fastapi import Depends
 import json
 import asyncio
 import logging
@@ -34,9 +31,16 @@ async def speak_pcm(pcm_audio: bytes, websocket: WebSocket, stream_sid: str):
         })
         await asyncio.sleep(0.05)
 
+async def get_tenant_id_by_phone(phone_number: str, db):
+    query = "SELECT id FROM tenants WHERE phone_number = %s AND is_active = true LIMIT 1"
+    await db.execute(query, (phone_number,))
+    row = await db.fetchone()
+    if row:
+        return row[0]
+    return None
 
 @router.websocket("/stream")
-async def stream_audio(websocket: WebSocket):
+async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
     await websocket.accept()
     logging.info("✅ WebSocket connection accepted at /stream")
 
@@ -45,6 +49,7 @@ async def stream_audio(websocket: WebSocket):
     lang_code = 'en-IN'  # Default language
     bot_is_speaking = False
     tts_task = None
+    tenant_id = None
     
     async def stop_tts():
         """Stop TTS if bot is speaking"""
@@ -58,6 +63,8 @@ async def stream_audio(websocket: WebSocket):
     async def receive_messages():
         """Receive WebSocket messages and feed audio to STT"""
         nonlocal stream_sid
+        nonlocal tenant_id
+        nonlocal db
         try:
             while True:
                 message = await websocket.receive_text()
@@ -68,6 +75,10 @@ async def stream_audio(websocket: WebSocket):
                 event_type = message.get("event")
                 if event_type == "connected":
                     greeting = "How can I help you today?"
+                    phone = message.get("phone_number")
+                    if phone:
+                        tenant_id = await get_tenant_id_by_phone(phone, db)
+                    logging.info(f"Tenant ID resolved: {tenant_id}")
                     audio = await synthesize_text(greeting, lang_code)
                     await speak_pcm(audio, websocket, stream_sid)
                     
@@ -93,34 +104,9 @@ async def stream_audio(websocket: WebSocket):
                 if is_final and txt:
                     logging.info(f"Final transcript: {txt}")
                     last_activity = time.time()  # Reset silence timer
-                    # extracted_attributes = extract_dynamic_attributes(txt)
-                    # # Asynchronously detect the language
-                    # lang_task = asyncio.create_task(detect_language(txt))
-                    # # lang_code = detect_language(txt)
-                    # # Wait for the language detection result
-                    # lang_code,confidence = await lang_task
-
-                    
-                    # # Update context (as in your code)
-                    # if 'color' in extracted_attributes:
-                    #     user_context['color'] = extracted_attributes['color']
-                    # if 'fabric' in extracted_attributes:
-                    #     user_context['fabric'] = extracted_attributes['fabric']
-
-                    # user_context['lang_code'] = lang_code  # Store language for session
-
-                    # logging.info(f"Detected language: {lang_code}")
-                    # intent, filtered_entities, intent_confidence = await detect_textile_intent_openai(txt, lang_code)
-                    # logging.info(f"Detected Intent: {intent}")
-                    
-                    # products = []
-                    # shop_name = "Krishna Textiles"
-                    # if intent == "product_search":
-                    #     products = await query_products(txt, lang=lang_code)
-
                     ai_reply = await analyzer.analyze_message(
-                        user_query=txt,
-                        tenant_id=12,
+                        text=txt,
+                        tenant_id=tenant_id ,
                     )
 
                     logging.info(f"AI Reply: {ai_reply}")
