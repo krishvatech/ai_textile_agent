@@ -21,13 +21,30 @@ def get_embedding(text):
     response = openai_client.embeddings.create(input=[text], model="text-embedding-3-small")
     return response.data[0].embedding
 
+
+def get_or_create_occasion_id(cursor, occasion_name):
+    # Check if occasion exists
+    cursor.execute("SELECT id FROM occasions WHERE name = %s", (occasion_name,))
+    result = cursor.fetchone()
+    if result:
+        return result[0]
+    else:
+        # Insert new occasion if not exists
+        cursor.execute(
+            "INSERT INTO occasions (name) VALUES (%s) RETURNING id",
+            (occasion_name,)
+        )
+        occasion_id = cursor.fetchone()[0]
+        print(f"Inserted new occasion '{occasion_name}' with ID {occasion_id}")
+        return occasion_id
+
 def upsert_variant_to_pinecone(variant_data):
     """
     variant_data: dict with keys
       variant_id, product_id, tenant_id, name, color, size, fabric, category,
       price, rental_price, available_stock, image_url, is_rental, is_active
     """
-    text_for_embedding = f"{variant_data['name']} {variant_data['color']} {variant_data['fabric']} {variant_data['category']} {variant_data.get('type', '')}"
+    text_for_embedding = f"{variant_data['name']} {variant_data['color']} {variant_data['fabric']} {variant_data['category']} {variant_data.get('type', '')} {variant_data.get('occasion', '')}"
     embedding = get_embedding(text_for_embedding)
 
     metadata = {
@@ -39,6 +56,8 @@ def upsert_variant_to_pinecone(variant_data):
         "size": variant_data["size"],
         "fabric": variant_data["fabric"],
         "category": variant_data["category"],
+        "type": variant_data.get("type", ""), 
+        "occasion": variant_data.get("occasion", ""),
         "price": float(variant_data["price"]) if variant_data["price"] else None,
         "rental_price": float(variant_data["rental_price"]) if variant_data["rental_price"] else None,
         "available_stock": variant_data["available_stock"],
@@ -78,6 +97,7 @@ def insert_product_and_variants():
         print("\nEnter Product Variant details:")
         color = input("Color: ").strip()
         size = input("Size: ").strip()
+        occasion = input("Occasion (e.g. Wedding, Casual, Party): ").strip()
         fabric = input("Fabric: ").strip()
         price = input("Price: ").strip()
         available_stock = input("Available stock (integer): ").strip()
@@ -91,10 +111,10 @@ def insert_product_and_variants():
         INSERT INTO product_variants (
             product_id, color, size, fabric, price, available_stock, 
             is_rental, rental_price, image_url, created_at, updated_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,%s, %s) RETURNING id;
+        ) VALUES (%s, %s, %s, %s, %s, %s , %s, %s, %s,%s, %s) RETURNING id;
         '''
         cursor.execute(insert_variant_query, (
-            product_id, color, size, fabric, 
+            product_id, color, size, fabric,
             float(price) if price else None, 
             int(available_stock) if available_stock else 0,
             is_rental,
@@ -106,7 +126,14 @@ def insert_product_and_variants():
         variant_id = cursor.fetchone()[0]
         conn.commit()
         print(f"Product variant inserted with ID: {variant_id}")
+        occasion_id = get_or_create_occasion_id(cursor, occasion)
 
+        cursor.execute('''
+            INSERT INTO product_variant_occasions (variant_id, occasion_id)
+            VALUES (%s, %s)
+        ''', (variant_id, occasion_id))
+        conn.commit()
+        print(f"Linked variant {variant_id} to occasion ID {occasion_id}")
         # Now immediately upsert this variant to Pinecone with embedding
         variant_data = {
             "variant_id": variant_id,
@@ -118,6 +145,7 @@ def insert_product_and_variants():
             "fabric": fabric,
             "category": category,
             "type": type_,
+            "occasion": occasion,
             "price": float(price) if price else None,
             "rental_price": float(rental_price) if rental_price else None,
             "available_stock": int(available_stock) if available_stock else 0,
