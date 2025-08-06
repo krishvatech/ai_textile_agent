@@ -117,7 +117,10 @@ Normalize all values to the following standardized forms:
   - "large", "l", "big" → "L"
   - "extra large", "xl", "x large", "bada", "double large" → "XL", "એક્સએસ" → "XL","एक्सेल" → "XL"
   - "extra extra large", "xxl", "xx large" → "XXL","ડબલ એક્સેલ" → "XXL","डबल एक्सेल" → "XXL"
-  - "free size", "freesize", "universal", "one size fits all" → "Freesize"
+  Saree Size Normalization Rule:
+  - If the product's category or name is "saree" (regardless of language/script or spelling), always set the extracted size to "Freesize".
+  - Override any other size provided in the message (even if a different size like "XL", "M", or "kids" is mentioned with saree).
+  For all non-saree products, apply standard size normalization rules.
   - "kids", "children", "child" → "Child"
   - If unsure or a numeric measurement is given (e.g., "42", "36", "chest 40"), return the exact value as size.
   For sarees, only use "Freesize".
