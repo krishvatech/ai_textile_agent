@@ -261,6 +261,14 @@ Output: {{
   "confidence": 0.90,
   "is_question": true
 }}
+**Entity Extraction Guidelines**:
+      Additionally, correct common misspellings or mishearings to the correct fabric, for example:  
+      - "oton", "koton", "cottn", "cotn" → "cotton"  
+      - "silke", "silkk", "sillk" → "silk"  
+      - "georget", "jorjet" → "georgette"  
+      - "chifon", "chifton" → "chiffon"  
+
+      Always output the normalized fabric name in English.
 """
 
     try:
