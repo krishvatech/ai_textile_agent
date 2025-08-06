@@ -115,7 +115,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
     logging.info("Incoming WebSocket connection - before accept")
     await websocket.accept()
     logging.info("✅ WebSocket connection accepted at /stream")
-
+    analyzer.reset()  # <-- you need to add this method inside TextileAnalyzer
     stt = SarvamSTTStreamHandler()
     stream_sid = None
     lang_code = 'en-IN'  # Default language

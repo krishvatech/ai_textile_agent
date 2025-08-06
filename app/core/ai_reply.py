@@ -38,6 +38,16 @@ class TextileAnalyzer:
         self.asking_rental_date: bool = False
         self.gpt_client = AsyncOpenAI(api_key=api_key)
         self.logger = logging.getLogger("TextileAnalyzer")
+        
+    def reset(self):
+        self.session_history.clear()
+        self.collected_entities.clear()
+        self.last_intent = None
+        self.confirmation_pending = False
+        self.shown_variants = None
+        self.selected_variant = None
+        self.asking_variant_selection = False
+        self.asking_rental_date = False
 
     def clear_history(self):
         self.session_history = []
