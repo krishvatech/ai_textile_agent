@@ -182,11 +182,18 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                     if re.fullmatch(r'[\W_]+', txt.strip()):
                         logging.info("Transcript only punctuation, ignoring")
                         continue
-
+                    start_lang = time.perf_counter()
                     lang,_ = await detect_language(txt,last_user_lang)
+                    elapsed_lang = (time.perf_counter() - start_lang) * 1000
+                    logging.info(f"detect_language took {elapsed_lang:.2f} ms")
                     last_user_lang = lang  # <-- add this line
                     normalized_size=await normalize_size(txt)
+                    
+                    start_intent = time.perf_counter()
                     intent, new_entities, intent_confidence = await detect_textile_intent_openai(txt, lang)
+                    elapsed_intent = (time.perf_counter() - start_intent) * 1000
+                    logging.info(f"detect_textile_intent_openai took {elapsed_intent:.2f} ms")
+                    
                     if intent_confidence < 0.5:
                         logging.info(f"Ignoring transcript due to low intent confidence: {intent_confidence}")
                         continue  # Skip processing
@@ -194,6 +201,8 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                         new_entities['size'] = normalized_size
                         logging.info(f"Overriding detected size with normalized size: {normalized_size}")
                     last_activity = time.time()  # Reset silence timer
+                    
+                    start_analyzer = time.perf_counter()
                     ai_reply = await analyzer.analyze_message(
                         text=txt,
                         tenant_id=tenant_id ,
@@ -202,6 +211,11 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                         new_entities=new_entities,         # correct keyword
                         intent_confidence=intent_confidence # correct keyword
                     )
+                    elapsed_analyzer = (time.perf_counter() - start_analyzer) * 1000
+                    logging.info(f"analyzer.analyze_message took {elapsed_analyzer:.2f} ms")
+
+                    last_activity = time.time()
+                    
                     logging.info(f"🤖 AI Reply In Dictionary : {ai_reply}")
                     answer_text = ai_reply.get('answer', '')
 
