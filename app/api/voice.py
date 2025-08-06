@@ -201,7 +201,37 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                         new_entities['size'] = normalized_size
                         logging.info(f"Overriding detected size with normalized size: {normalized_size}")
                     last_activity = time.time()  # Reset silence timer
-                    
+                    if analyzer.shown_variants:
+                        user_input = txt.strip().lower()
+                        selected_product = None
+
+                        # Check if input is a number selecting a variant
+                        if user_input.isdigit():
+                            idx = int(user_input) - 1
+                            if 0 <= idx < len(analyzer.shown_variants):
+                                selected_product = analyzer.shown_variants[idx]
+
+                        # Else check if user said product name
+                        if not selected_product:
+                            for v in analyzer.shown_variants:
+                                if v['name'].lower() in user_input:
+                                    selected_product = v
+                                    break
+
+                        if selected_product:
+                            # Clear variants since user made a selection
+                            analyzer.shown_variants = None
+                            analyzer.asking_variant_selection = False
+
+                            answer = f"Yes, we have available this product."
+                            logging.info(f"User selected product: {answer}")
+
+                            audio = await synthesize_text(answer, language_code=lang)
+                            await speak_pcm(audio, websocket, stream_sid)
+
+                            last_activity = time.time()
+                            continue  # Skip further processing and wait for next input
+
                     start_analyzer = time.perf_counter()
                     ai_reply = await analyzer.analyze_message(
                         text=txt,
