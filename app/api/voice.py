@@ -179,9 +179,16 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                 txt, is_final, lang = await asyncio.wait_for(stt.get_transcript(), timeout=0.2)
                 if is_final and txt:
                     logging.info(f"Final transcript: {txt}")
+                    if re.fullmatch(r'[\W_]+', txt.strip()):
+                        logging.info("Transcript only punctuation, ignoring")
+                        continue
+
                     lang,_ = await detect_language(txt,last_user_lang)
                     normalized_size=await normalize_size(txt)
                     intent, new_entities, intent_confidence = await detect_textile_intent_openai(txt, lang)
+                    if intent_confidence < 0.5:
+                        logging.info(f"Ignoring transcript due to low intent confidence: {intent_confidence}")
+                        continue  # Skip processing
                     if normalized_size:
                         new_entities['size'] = normalized_size
                         logging.info(f"Overriding detected size with normalized size: {normalized_size}")

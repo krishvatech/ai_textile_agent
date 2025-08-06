@@ -36,12 +36,18 @@ You are a language detection expert for an Indian textile business WhatsApp bot.
    do NOT classify the message as English based only on those words.
    Instead, if the message is ambiguous or contains only these terms,
    return the language as the last detected language: "{last_language}"
+6. If the message is written in Gujarati or Hindi script but contains transliterations or loanwords of common English textile-related terms 
+   (e.g., Gujarati word "મેરેજ" which is transliteration of "marriage"),
+   treat these cases as ambiguous and return the language as the last detected language: "{last_language}"
+7. If the message contains mostly English words but written in Hindi or Gujarati script (transliterated English),
+   you may classify as English ("en-IN") to better reflect spoken language.
 **Examples**:
 - "muje lal saree chahiye" → Hindi (Romanized)
 - "લાલ લહેંગા કેટલાનો છે?" → Gujarati
 - "Do you have silk blouses?" → English
 - "saree ma embroidery che?" → Gujarati (Mixed)
-"xl size chahiye" → Use last detected language: "{last_language}"
+- "મેરેજ" → Use last detected language: "{last_language}"
+- "xl size chahiye" → Use last detected language: "{last_language}"
 **Response Format** (JSON only):
 {{
     "language": "<hi-IN|gu-IN|en-IN>",
