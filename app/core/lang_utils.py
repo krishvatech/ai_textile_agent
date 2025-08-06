@@ -20,45 +20,35 @@ async def detect_language(text: str,last_language: str) -> Tuple[str, float]:
     Detect language using OpenAI API for textile bot
     Supports: Hindi, Gujarati, English (including Romanized)
     """
-    prompt = f"""
-You are a language detection expert for an Indian textile business WhatsApp bot.
-**Task**: Detect the language of the customer message below.
-**Supported Languages**:
-- Hindi (Devanagari script or Romanized)
-- Gujarati (Gujarati script or Romanized)
+    prompt = f"""You are a language detection expert for an Indian textile business WhatsApp bot.
+**Task**: Detect the language of the customer's message below. Supported languages are:
+- Hindi (including Devanagari script and Romanized Hindi)
+- Gujarati (including Gujarati script and Romanized Gujarati)
 - English (Indian English)
 **Special Instructions**:
-1. Handle Romanized Hindi/Gujarati (written in English letters)
-2. Consider textile business context and terminology
-3. For mixed language, choose the dominant language
-4. Account for common Indian English + local language mixing
-5. If the message contains common textile-related words such as "xl", "xxl", "wedding", "cotton" or similar,
-   do NOT classify the message as English based only on those words.
-   Instead, if the message is ambiguous or contains only these terms,
-   return the language as the last detected language: "{last_language}"
-6. If the message is written in Gujarati or Hindi script but contains transliterations or loanwords of common English textile-related terms 
-   (e.g., Gujarati word "મેરેજ" which is transliteration of "marriage"),
-   treat these cases as ambiguous and return the language as the last detected language: "{last_language}"
-7. If the message contains mostly English words but written in Hindi or Gujarati script (transliterated English),
-   you may classify as English ("en-IN") to better reflect spoken language.
+1. If the message is a simple greeting or chit-chat like "hello", "hi", "how are you", do NOT finalize the language based on this message. Instead, treat this as neutral and wait for a meaningful message.
+2. For the first meaningful message after greetings (such as textile-related requests), detect the language properly and consider this the conversation's fixed language.
+3. After the conversation language is fixed, assume all subsequent messages are in that language unless explicitly switched.
+4. Handle Romanized inputs accurately. For example, "muje sadi chahiye" is Hindi (Romanized), "mare sadi joi che" is Gujarati (Romanized).
+5. For mixed or code-switched messages, choose the dominant language.
 **Examples**:
+- "hello" → return language as `"neutral"` or indicate language not finalized
 - "muje lal saree chahiye" → Hindi (Romanized)
-- "લાલ લહેંગા કેટલાનો છે?" → Gujarati
+- "mare sadi joi che" → Gujarati (Romanized)
 - "Do you have silk blouses?" → English
 - "saree ma embroidery che?" → Gujarati (Mixed)
-- "મેરેજ" → Use last detected language: "{last_language}"
-- "xl size chahiye" → Use last detected language: "{last_language}"
 **Response Format** (JSON only):
 {{
-    "language": "<hi-IN|gu-IN|en-IN>",
-    "confidence": <0.0-1.0>,
-    "reasoning": "<brief explanation>"
+  "language": "<hi-IN|gu-IN|en-IN|neutral>",
+  "confidence": <0.0-1.0>,
+  "reasoning": "<brief explanation>"
 }}
+
 **Customer Message**: "{text}"
 """
     try:
         response = await client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=150
@@ -74,3 +64,4 @@ You are a language detection expert for an Indian textile business WhatsApp bot.
     except Exception as e:
         logging.error(f"Language detection failed: {e}")
         return "en-IN", 0.5
+    

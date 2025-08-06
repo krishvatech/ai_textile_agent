@@ -13,11 +13,9 @@ import logging
 import base64
 import time
 import re
-import asyncio
 
 router = APIRouter()
 
-user_context = {}
 analyzer = TextileAnalyzer()
 
 async def speak_pcm(pcm_audio: bytes, websocket: WebSocket, stream_sid: str):
@@ -43,72 +41,6 @@ async def get_tenant_id_by_phone(phone_number: str, db):
         return row[0]
     return None
 
-import re
-
-async def normalize_size(transcript: str) -> str | None:
-    text = transcript.lower().strip().replace('.', '')
-
-    # English patterns (your existing ones)
-    if re.search(r'double\s*(x{1,3}l|ex|excel)', text) or re.search(r'extra\s*extra\s*large', text):
-        return "XXL"
-    if re.search(r'extra\s*large|excel', text):
-        return "XL"
-    if re.search(r'large', text):
-        return "L"
-    if re.search(r'medium|med', text):
-        return "M"
-    if re.search(r'small|sm', text):
-        return "S"
-    if re.search(r'extra\s*small|xs', text):
-        return "XS"
-    if re.search(r'double\s*extra\s*small|xxs', text):
-        return "XXS"
-
-    # Gujarati size words (Unicode strings)
-    # 'એક્સેલ' = XL, 'ડબલ એક્સેલ' = XXL, 'લાર્જ' = L, 'મીડિયમ' = M, 'સ્મોલ' = S, 'એક્સએસ' = XS, 'ડબલ એક્સએસ' = XXS
-    if re.search(r'ડબલ\s*એક્સેલ|ડબલએક્સેલ', text):
-        return "XXL"
-    if re.search(r'ડબલ\s*એક્સલ|ડબલએક્સલ.', text):
-        return "XXL"
-    if re.search(r'એક્સેલ', text):
-        return "XL"
-    if re.search(r'એક્સલ', text):
-        return "XL"
-    if re.search(r'લાર્જ', text):
-        return "L"
-    if re.search(r'મીડિયમ', text):
-        return "M"
-    if re.search(r'સ્મોલ', text):
-        return "S"
-    if re.search(r'એક્સએસ', text):
-        return "XS"
-    if re.search(r'ડબલ\s*એક્સએસ|ડબલએક્સએસ', text):
-        return "XXS"
-
-    # Hindi size words (Unicode strings)
-    # 'डबल एक्सेल' = XXL, 'एक्सेल' = XL, 'लार्ज' = L, 'मीडियम' = M, 'स्माल' = S, 'एक्सएस' = XS, 'डबल एक्सएस' = XXS
-    if re.search(r'डबल\s*एक्सेल', text):
-        return "XXL"
-    if re.search(r'एक्सेल', text):
-        return "XL"
-    if re.search(r'लार्ज', text):
-        return "L"
-    if re.search(r'मीडियम', text):
-        return "M"
-    if re.search(r'स्माल', text):
-        return "S"
-    if re.search(r'एक्सएस', text):
-        return "XS"
-    if re.search(r'डबल\s*एक्सएस', text):
-        return "XXS"
-
-    # Also handle exact size code inputs like 'xl', 'xxl', etc.
-    sizes = ['xxs', 'xs', 's', 'm', 'l', 'xl', 'xxl', 'xxxl']
-    if text in sizes:
-        return text.upper()
-
-    return None
-
 
 @router.websocket("/stream")
 async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
@@ -121,6 +53,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
     lang_code = 'en-IN'  # Default language
     bot_is_speaking = False
     tts_task = None
+    current_language = None
     tenant_id = None
     
     async def stop_tts():
@@ -134,9 +67,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                 await tts_task  #
     async def receive_messages():
         """Receive WebSocket messages and feed audio to STT"""
-        nonlocal stream_sid
-        nonlocal tenant_id
-        nonlocal db
+        nonlocal stream_sid, tenant_id, db
         try:
             while True:
                 data = await websocket.receive_text()
@@ -147,7 +78,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                 
                 if event_type == "connected":
                     greeting = "How can I help you today?"
-                    audio = await synthesize_text(greeting, lang_code)
+                    audio = await synthesize_text(greeting, 'en-IN')
                     await speak_pcm(audio, websocket, stream_sid)
                     
                 elif event_type == "start":
@@ -172,6 +103,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
             
     async def process_transcripts():
         """Process STT transcripts, generate replies, and handle TTS"""
+        nonlocal current_language
         last_activity = time.time()
         last_user_lang = lang_code
         while True:
@@ -182,17 +114,35 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                     if re.fullmatch(r'[\W_]+', txt.strip()):
                         logging.info("Transcript only punctuation, ignoring")
                         continue
+                    start_lang = time.perf_counter()
+                    detected_lang,_ = await detect_language(txt, last_user_lang)
 
-                    lang,_ = await detect_language(txt,last_user_lang)
-                    normalized_size=await normalize_size(txt)
+                    # Fix conversation language once set, but update if neutral or English greetings only
+                    if current_language is None:
+                        current_language = detected_lang
+                        logging.info(f"Conversation language set to {current_language}")
+                    else:
+                        # If current_language is neutral or en-IN (greeting), update to detected_lang if meaningful
+                        if current_language in ['neutral', 'en-IN'] and detected_lang in ['hi-IN', 'gu-IN']:
+                            current_language = detected_lang
+                            logging.info(f"Conversation language updated to {current_language}")
+                        else:
+                            logging.info(f"Conversation language remains as {current_language}")
+
+                    lang = current_language
+                    last_user_lang = current_language
+                    
+                    start_intent = time.perf_counter()
                     intent, new_entities, intent_confidence = await detect_textile_intent_openai(txt, lang)
+                    elapsed_intent = (time.perf_counter() - start_intent) * 1000
+                    logging.info(f"detect_textile_intent_openai took {elapsed_intent:.2f} ms")
+                    
                     if intent_confidence < 0.5:
                         logging.info(f"Ignoring transcript due to low intent confidence: {intent_confidence}")
                         continue  # Skip processing
-                    if normalized_size:
-                        new_entities['size'] = normalized_size
-                        logging.info(f"Overriding detected size with normalized size: {normalized_size}")
                     last_activity = time.time()  # Reset silence timer
+                    
+                    start_analyzer = time.perf_counter()
                     ai_reply = await analyzer.analyze_message(
                         text=txt,
                         tenant_id=tenant_id ,
@@ -201,11 +151,19 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                         new_entities=new_entities,         # correct keyword
                         intent_confidence=intent_confidence # correct keyword
                     )
+                    elapsed_analyzer = (time.perf_counter() - start_analyzer) * 1000
+                    logging.info(f"analyzer.analyze_message took {elapsed_analyzer:.2f} ms")
+
+                    last_activity = time.time()
+                    
                     logging.info(f"🤖 AI Reply In Dictionary : {ai_reply}")
                     answer_text = ai_reply.get('answer', '')
-
-                    logging.info(f"AI Reply: {answer_text}")
-                    audio = await synthesize_text(answer_text, language_code=lang)
+                    
+                    if lang == "neutral":
+                        tts_lang = 'en-IN'  # or set your preferred default language
+                    else:
+                        tts_lang = lang
+                    audio = await synthesize_text(answer_text, language_code=tts_lang)
                     await speak_pcm(audio, websocket, stream_sid)
 
                 elif txt:
