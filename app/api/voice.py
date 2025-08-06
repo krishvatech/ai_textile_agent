@@ -13,11 +13,9 @@ import logging
 import base64
 import time
 import re
-import asyncio
 
 router = APIRouter()
 
-user_context = {}
 analyzer = TextileAnalyzer()
 
 async def speak_pcm(pcm_audio: bytes, websocket: WebSocket, stream_sid: str):
@@ -55,6 +53,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
     lang_code = 'en-IN'  # Default language
     bot_is_speaking = False
     tts_task = None
+    current_language = None
     tenant_id = None
     
     async def stop_tts():
@@ -68,9 +67,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                 await tts_task  #
     async def receive_messages():
         """Receive WebSocket messages and feed audio to STT"""
-        nonlocal stream_sid
-        nonlocal tenant_id
-        nonlocal db
+        nonlocal stream_sid, tenant_id, db
         try:
             while True:
                 data = await websocket.receive_text()
@@ -81,7 +78,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                 
                 if event_type == "connected":
                     greeting = "How can I help you today?"
-                    audio = await synthesize_text(greeting, lang_code)
+                    audio = await synthesize_text(greeting, 'en-IN')
                     await speak_pcm(audio, websocket, stream_sid)
                     
                 elif event_type == "start":
@@ -106,6 +103,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
             
     async def process_transcripts():
         """Process STT transcripts, generate replies, and handle TTS"""
+        nonlocal current_language
         last_activity = time.time()
         last_user_lang = lang_code
         while True:
@@ -117,10 +115,22 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                         logging.info("Transcript only punctuation, ignoring")
                         continue
                     start_lang = time.perf_counter()
-                    lang,_ = await detect_language(txt,last_user_lang)
-                    elapsed_lang = (time.perf_counter() - start_lang) * 1000
-                    logging.info(f"detect_language took {elapsed_lang:.2f} ms")
-                    last_user_lang = lang  # <-- add this line
+                    detected_lang,_ = await detect_language(txt, last_user_lang)
+
+                    # Fix conversation language once set, but update if neutral or English greetings only
+                    if current_language is None:
+                        current_language = detected_lang
+                        logging.info(f"Conversation language set to {current_language}")
+                    else:
+                        # If current_language is neutral or en-IN (greeting), update to detected_lang if meaningful
+                        if current_language in ['neutral', 'en-IN'] and detected_lang in ['hi-IN', 'gu-IN']:
+                            current_language = detected_lang
+                            logging.info(f"Conversation language updated to {current_language}")
+                        else:
+                            logging.info(f"Conversation language remains as {current_language}")
+
+                    lang = current_language
+                    last_user_lang = current_language
                     
                     start_intent = time.perf_counter()
                     intent, new_entities, intent_confidence = await detect_textile_intent_openai(txt, lang)
@@ -148,22 +158,12 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                     
                     logging.info(f"🤖 AI Reply In Dictionary : {ai_reply}")
                     answer_text = ai_reply.get('answer', '')
-                    detected_intent = ai_reply.get('detected_intent', '')
-                    lang_prefix = last_user_lang.split("-")[0] if last_user_lang else "en"
-
-                    response_map = {
-                        "gu": "હા, અમને તે ઉત્પાદન ઉપલબ્ધ છે. કૃપા કરીને નંબર કે વર્ણનથી પસંદ કરો.",
-                        "hi": "हाँ, हमारे पास वह उत्पाद उपलब्ध है। कृपया नंबर या विवरण से चुनें।",
-                        "en": "Yes, we have that product available. Please select by number or description."
-                    }
-
-                    # Check if the intent is 'size_query' and the answer contains a product list (you can check for new lines + numbers)
-                    if detected_intent == 'size_query' and '\n1.' in answer_text:
-                        tts_text = response_map.get(lang_prefix, response_map["en"])
+                    
+                    if lang == "neutral":
+                        tts_lang = 'en-IN'  # or set your preferred default language
                     else:
-                        tts_text = answer_text
-                    logging.info(f"AI Reply: {answer_text}")
-                    audio = await synthesize_text(tts_text, language_code=last_user_lang)
+                        tts_lang = lang
+                    audio = await synthesize_text(answer_text, language_code=tts_lang)
                     await speak_pcm(audio, websocket, stream_sid)
 
                 elif txt:
