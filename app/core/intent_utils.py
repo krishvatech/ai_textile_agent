@@ -53,9 +53,7 @@ async def detect_textile_intent_openai(text: str, detected_language: str) -> Tup
     """
     prompt = f"""
 You are an AI assistant for a textile business in India specializing in wholesale and retail.
-
 **Your Task**: Analyze the customer message and identify their business intent.
-
 **Textile Business Intents**:
 1. **product_search** - Looking for clothes (saree, lehenga, kurti, suit, etc.)
 2. **price_inquiry** - Asking about price, cost, budget
@@ -74,7 +72,6 @@ You are an AI assistant for a textile business in India specializing in wholesal
 15. **greeting** - Hello, hi, namaste
 16. **complaint** - Problems, issues, returns
 17. **other** - Anything else
-
 **CRITICAL: Price vs Quantity Recognition Patterns**:
 **GUJARATI PATTERNS**:
 - **Price**: "500 ni", "₹500 na", "500 ના ભાવે", "500 rate", "500 કિંમત"
@@ -89,7 +86,6 @@ You are an AI assistant for a textile business in India specializing in wholesal
 - "500 ni 1000 joia" = price: 500, quantity: 1000
 - "1000 saree 500 ka" = quantity: 1000, price: 500
 - "500 rate ma 1000 pieces" = price: 500, quantity: 1000
-
 **Entity Extraction Guidelines**:
 - **product**: Type of clothing mentioned
 - **color**: Always normalize color names to their standard English equivalent regardless of language or script.
@@ -99,44 +95,63 @@ You are an AI assistant for a textile business in India specializing in wholesal
   - "pila", "पीला", "પીળું" → "yellow"
   - "neela", "नीला", "વાદળી" → "blue"
   If unsure, pick the closest standard English color.
-
 - **fabric**: Recognize fabrics including regional or colloquial names like "resmi", "surti", "kanjeevaram", "mulmul", "mashru", etc.
   Normalize these to common fabric types:
   - "resmi" → "silk"
   - "surti" → "silk"
   - "mulmul" → "cotton"
   - "mashru" → "silk-cotton blend"
+-**Entity Extraction Guidelines**:
+  Additionally, correct common misspellings or mishearings to the correct fabric, for example:  
+  - "oton", "koton", "cottn", "cotn" → "cotton"  
+  - "silke", "silkk", "sillk" → "silk"  
+  - "georget", "jorjet" → "georgette"  
+  - "chifon", "chifton" → "chiffon"  
+  Always output the normalized fabric name in English.
   Return the closest standard fabric if unsure.
-
 - **price_range**: Unit price/rate per piece (NOT total amount)
 - **size**: Recognize any mention of size or measurement using full names, abbreviations, numbers, or common variants (such as "small," "S," "medium," "M," "large," "L," "extra large," "XL," "free size," "freesize," "universal," "kids," "children," etc.).
 Normalize all values to the following standardized forms:
   - "small", "sm", "s" → "S"
   - "medium", "med", "m", "midium" → "M"
   - "large", "l", "big" → "L"
-  - "extra large", "xl", "x large", "bada", "double large" → "XL"
-  - "extra extra large", "xxl", "xx large" → "XXL"
+  - "extra large", "xl", "x large", "bada", "double large" → "XL", "એક્સએસ" → "XL","एक्सेल" → "XL"
+  - "extra extra large", "xxl", "xx large" → "XXL","ડબલ એક્સેલ" → "XXL","डबल एक्सेल" → "XXL"
   - "free size", "freesize", "universal", "one size fits all" → "Freesize"
   - "kids", "children", "child" → "Child"
   - If unsure or a numeric measurement is given (e.g., "42", "36", "chest 40"), return the exact value as size.
   For sarees, only use "Freesize".
   Return the closest standard size if the intent is clear.
-
-
 - **occasion**: Recognize occasion-related words, including regional, slang, or colloquial expressions (such as "shaadi," "shadi," "biye," "vivaah," "pary," "daily wear," "navratri," "pooja," etc.).
-  - "shaadi," "shadi," "vivaah," "biye," "wedding ceremony," "fera," "dulhan" → "wedding"
+  - "shaadi," "shadi," "vivaah," "biye," "wedding ceremony," "fera," "sadi," "saadi," "dulhan" → "wedding"
   - "reception," "party," "sangeet," "birthday," "anniversary" → "party"
   - "festival," "navratri," "diwali," "holi," "eid," "pooja," "raksha bandhan" → "festival"
   - "regular," "daily wear," "office," "work," "casual," "rozaana" → "casual"
   - "haldi," "mehendi" → "wedding" (since they are wedding sub-events)
 Return the closest standard occasion (wedding, party, festival, casual) if unsure.
-
 - **quantity**: Number of pieces desired
 - **location**: Delivery location if mentioned
-
+- **is_rental**: Recognize rental-related words
+  - English: "for rent," "on rent," "rental," "rented," "rent price," "renting," "rent available"
+  - Hindi: "किराए पर," "किराया," "रेंटल," "उधार पर," "भाड़ा"
+  - Gujarati: "કિરાયે પર," "દાડા પર," "ભાડે," "રેન્ટ માટે"
+  Example buy/purchase words:
+  - English: "buy", "purchase", "want to buy", "order", "purchase price"
+  - Hindi: "खरीदना", "लेना है", "खरीदेंगे", "ऑर्डर", "खरीद", "खरीदना है"
+  - Gujarati: "ખરીદવું છે", " ઓર્ડર", "લૈસ", " ખરીદી"
+  EXAMPLES:
+    "Can I get these sarees for rent?" → is_rental: true
+    "I want to buy 10 lehengas" → is_rental: false
+    "I want dress" → is_rental:None
+    "Send me your catalog" → is_rental: None
+    "કિראયે પર લોંગા?" → is_rental: true
+    "મને ઓર્ડર કરવું છે" → is_rental: false
+  Always return is_rental as one of:
+      true (for rental inquiry)
+      false (for buy/purchase inquiry)
+      None (if cannot determine)
 **Customer Message**: "{text}"
 **Detected Language**: "{detected_language}"
-
 **Entity Extraction Guidelines**:
 - **product_name**: Specific product name (Banarasi Silk Saree, Cotton Kurti, etc.)
 - **category**: Product category (Saree, Lehenga, Kurti, Suit, etc.)
@@ -150,10 +165,8 @@ Return the closest standard occasion (wedding, party, festival, casual) if unsur
 - **location**: Delivery location
 - **occasion**: Wedding, party, casual, festival
 - **is_rental**: true/false if rental inquiry
-
 **Customer Message**: "{text}"
 **Detected Language**: "{detected_language}"
-
 **Response Format** (JSON only):
 {{
     "intent": "",
@@ -174,9 +187,7 @@ Return the closest standard occasion (wedding, party, festival, casual) if unsur
     "confidence": <0.0-1.0>,
     "is_question": <true/false>
 }}
-
 **EXAMPLES**:
-
 Message: "lal sari 500 ni 1000 joia"
 Output: {{
   "intent": "product_search",
@@ -190,7 +201,6 @@ Output: {{
   "confidence": 0.90,
   "is_question": false
 }}
-
 Message: "मुझे 1000 साड़ी चाहिए 500 के रेट में"
 Output: {{
   "intent": "product_search",
@@ -203,7 +213,6 @@ Output: {{
   "confidence": 0.90,
   "is_question": false
 }}
-
 Message: "1000 pieces saree at 500 rate"
 Output: {{
   "intent": "product_search",
@@ -216,7 +225,6 @@ Output: {{
   "confidence": 0.90,
   "is_question": false
 }}
-
 Message: "લાલ સાડી ₹500 ના ભાવે 2000 જોઈએ છે"
 Output: {{
   "intent": "product_search",
@@ -230,7 +238,6 @@ Output: {{
   "confidence": 0.90,
   "is_question": false
 }}
-
 Message: "mane resmi saree 500 ni 1000 joia lal color"
 Output: {{
   "intent": "product_search",
@@ -245,7 +252,6 @@ Output: {{
   "confidence": 0.90,
   "is_question": false
 }}
-
 Message: "any new design?"
 Output: {{
   "intent": "catalog_request",
@@ -253,7 +259,6 @@ Output: {{
   "confidence": 0.90,
   "is_question": true
 }}
-
 Message: "kai navu che"
 Output: {{
   "intent": "catalog_request",
@@ -261,16 +266,7 @@ Output: {{
   "confidence": 0.90,
   "is_question": true
 }}
-**Entity Extraction Guidelines**:
-      Additionally, correct common misspellings or mishearings to the correct fabric, for example:  
-      - "oton", "koton", "cottn", "cotn" → "cotton"  
-      - "silke", "silkk", "sillk" → "silk"  
-      - "georget", "jorjet" → "georgette"  
-      - "chifon", "chifton" → "chiffon"  
-
-      Always output the normalized fabric name in English.
 """
-
     try:
         response = await client.chat.completions.create(
             model="gpt-4.1-mini",  # Updated model name
