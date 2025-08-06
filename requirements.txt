@@ -22,3 +22,10 @@ langdetect
 aiofiles
 greenlet
 ngrok
+pillow
+torch 
+torchvision 
+transformers
+requests
+ultralytics
+open-clip-torch

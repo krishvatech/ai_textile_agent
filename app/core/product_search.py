@@ -6,19 +6,29 @@ from app.db.db_connection import get_db_connection, close_db_connection
 from dotenv import load_dotenv
 import psycopg2
 from datetime import datetime
+from app.vector.pinecone_client import get_image_index
+from ultralytics import solutions
+from app.core.image_clip import get_image_clip_embedding, get_text_clip_embedding
+from app.vector.pinecone_client import get_image_index
 
 load_dotenv()
+
+IMAGE_INDEX_NAME = os.getenv("PINECONE_IMAGE_INDEX", "textile-products-image")
+NAMESPACE = os.getenv("PINECONE_NAMESPACE")
+
 OPENAI_API_KEY = os.getenv("GPT_API_KEY")
 openai.api_key = OPENAI_API_KEY
 
+IMAGE_INDEX_NAME = os.getenv("PINECONE_IMAGE_INDEX", "textile-products-image")
 
 def get_embeddings(text):
     
     """
     Generate an embedding vector for the input text using OpenAI embeddings API.
     """
-    resp = openai.embeddings.create(input=[text], model="text-embedding-3-small")
-    return resp.data[0].embedding
+    # resp = openai.embeddings.create(input=[text], model="text-embedding-3-small")
+    # return resp.data[0].embedding
+    return get_text_clip_embedding(text)
 
 def is_valid_record(meta):
     
@@ -65,7 +75,7 @@ def check_date_availability(conn, product_variant_id, requested_date):
         return count == 0  # True if available, False if booked
 
 #for search product from pinecone
-async def search_products(query=None,filters=None,top_k=10000,namespace="__default__"):
+async def search_products(query=None,filters=None,top_k=10000,namespace=NAMESPACE):
     
     if query:
         embedding = get_embeddings(query)
@@ -238,3 +248,25 @@ async def handle_user_input(session_id, entities=None, tenant_id=None, conn=None
     else:
         print("No found")
     return results
+
+async def search_products_by_image(image_url, top_k=5, namespace=NAMESPACE):
+    img_emb = get_image_clip_embedding(image_url)  # This will be 512-dim if using ViT-B-32
+    index = get_image_index()
+    print('index :', index.describe_index_stats())
+    res = index.query(
+        vector=img_emb,
+        top_k=top_k,
+        include_metadata=True,
+        namespace=namespace
+    )
+    print('res..................122522', res)
+    products = []
+    for match in res.get("matches", []):
+        meta = match.get("metadata", {})
+        products.append({
+            "id": meta.get("id", "MISSING"),
+            "product_name": meta.get("product_name", "MISSING"),
+            "image_url": meta.get("image_url", "MISSING"),
+            "score": match.get("score", 0)
+        })
+    return products

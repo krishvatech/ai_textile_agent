@@ -3,32 +3,34 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
+
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 INDEX_NAME = os.getenv("PINECONE_INDEX", "textile-products")
+IMAGE_INDEX_NAME = os.getenv("PINECONE_IMAGE_INDEX", "textile-products-image")
 
-# Initialize Pinecone client
 pinecone = Pinecone(api_key=PINECONE_API_KEY)
 
-def get_index():
-    # Get list of existing indexes
-    existing_indexes = [idx["name"] for idx in pinecone.list_indexes()]
-    
-    if INDEX_NAME in existing_indexes:
-        # If index exists, just connect to it without deleting
-        print(f"Index '{INDEX_NAME}' already exists. Connecting to it.")
-    else:
-        # Create new index if it doesn't exist
-        print(f"Creating new index '{INDEX_NAME}'.")
-        pinecone.create_index(
-            name=INDEX_NAME,
-            dimension=1536,
-            metric="cosine",
-            spec=ServerlessSpec(cloud="aws", region="us-east-1")
-        )
-    
-    # Return the index object
-    return pinecone.Index(INDEX_NAME)
+def get_index(index_name=INDEX_NAME):
+    """Connect to an existing Pinecone index by name."""
+    return pinecone.Index(index_name)
+
+def get_image_index():
+    """Connect to the existing image index."""
+    image_index_name = os.getenv("PINECONE_IMAGE_INDEX", "textile-products-image")
+    return pinecone.Index(image_index_name)
 
 if __name__ == "__main__":
-    index = get_index()
-    print(f"Successfully got index: {index}")
+    # Just connect (not create!) to ensure indexes are live
+    try:
+        text_index = get_index()
+        print(f"Text index connected: {text_index}")
+    except Exception as e:
+        print(f"Failed to connect to text index: {e}")
+
+    try:
+        image_index = get_image_index()
+        print(f"Image index connected: {image_index}")
+    except Exception as e:
+        print(f"Failed to connect to image index: {e}")
+
+    print("Available indexes:", [i['name'] for i in pinecone.list_indexes()])
