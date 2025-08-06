@@ -13,6 +13,8 @@ import logging
 import base64
 import time
 import re
+import os
+
 
 router = APIRouter()
 
@@ -68,6 +70,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
     async def receive_messages():
         """Receive WebSocket messages and feed audio to STT"""
         nonlocal stream_sid, tenant_id, db
+        is_outbound_call = None  # Track call type
         try:
             while True:
                 data = await websocket.receive_text()
@@ -76,8 +79,9 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                 if bot_is_speaking:
                     await stop_tts()
                 
+                
                 if event_type == "connected":
-                    greeting = "How can I help you today?"
+                    greeting = "Hello..I am From Krishvatech"
                     audio = await synthesize_text(greeting, 'en-IN')
                     await speak_pcm(audio, websocket, stream_sid)
                     
@@ -87,6 +91,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                     logging.info(f"start_payload : {start_payload}")
                     phone_number = start_payload.get("to", "unknown")
                     logging.info(f"Final phone: {phone_number}")
+                    
                     if phone_number:
                         tenant_id = await get_tenant_id_by_phone(phone_number, db)
                     logging.info(f"Tenant ID resolved: {tenant_id}")
