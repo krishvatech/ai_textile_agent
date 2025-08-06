@@ -79,7 +79,6 @@ htmlcov/
 .cache
 pytest_cache/
 
-services/
 
 # PyInstaller
 *.spec
