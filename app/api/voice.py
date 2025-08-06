@@ -184,6 +184,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                         continue
 
                     lang,_ = await detect_language(txt,last_user_lang)
+                    last_user_lang = lang  # <-- add this line
                     normalized_size=await normalize_size(txt)
                     intent, new_entities, intent_confidence = await detect_textile_intent_openai(txt, lang)
                     if intent_confidence < 0.5:
