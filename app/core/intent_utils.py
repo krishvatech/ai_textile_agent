@@ -269,7 +269,7 @@ Output: {{
 """
     try:
         response = await client.chat.completions.create(
-            model="gpt-4.1-mini",  # Updated model name
+            model="gpt-4o-mini",  # Updated model name
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=400

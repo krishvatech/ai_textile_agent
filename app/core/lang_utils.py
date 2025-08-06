@@ -61,7 +61,7 @@ You are a language detection expert for an Indian textile business WhatsApp bot.
 """
     try:
         response = await client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=150
