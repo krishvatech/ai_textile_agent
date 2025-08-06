@@ -33,9 +33,12 @@ You are a language detection expert for an Indian textile business WhatsApp bot.
 3. For mixed language, choose the dominant language
 4. Account for common Indian English + local language mixing
 5. If the message contains common textile-related words such as "xl", "xxl", "wedding", "cotton" or similar,
+   and the rest of the message is mostly in a local language (Hindi or Gujarati),
    do NOT classify the message as English based only on those words.
-   Instead, if the message is ambiguous or contains only these terms,
-   return the language as the last detected language: "{last_language}"
+   However, if the message is clearly written in English grammar and vocabulary (e.g. "I need for cotton"),
+   classify it as English ("en-IN").
+5.a. If the message contains any color names (e.g., "red", "blue", "green", "yellow", "pink", etc.),
+     treat these cases as ambiguous and return the language as the last detected language: "{last_language}".
 6. If the message is written in Gujarati or Hindi script but contains transliterations or loanwords of common English textile-related terms 
    (e.g., Gujarati word "મેરેજ" which is transliteration of "marriage"),
    treat these cases as ambiguous and return the language as the last detected language: "{last_language}"
@@ -74,3 +77,18 @@ You are a language detection expert for an Indian textile business WhatsApp bot.
     except Exception as e:
         logging.error(f"Language detection failed: {e}")
         return "en-IN", 0.5
+    
+async def main():
+    last_language = "en-IN"  # default initial last language
+    print("Textile Bot Language Detector (type 'exit' to quit)")
+    while True:
+        transcript = input("\nEnter transcript: ").strip()
+        if transcript.lower() == "exit":
+            print("Exiting...")
+            break
+        lang, conf = await detect_language(transcript, last_language)
+        print(f"Detected Language: {lang}, Confidence: {conf:.2f}")
+        last_language = lang  # update last detected language for next input
+
+if __name__ == "__main__":
+    asyncio.run(main())
