@@ -78,17 +78,3 @@ You are a language detection expert for an Indian textile business WhatsApp bot.
         logging.error(f"Language detection failed: {e}")
         return "en-IN", 0.5
     
-async def main():
-    last_language = "en-IN"  # default initial last language
-    print("Textile Bot Language Detector (type 'exit' to quit)")
-    while True:
-        transcript = input("\nEnter transcript: ").strip()
-        if transcript.lower() == "exit":
-            print("Exiting...")
-            break
-        lang, conf = await detect_language(transcript, last_language)
-        print(f"Detected Language: {lang}, Confidence: {conf:.2f}")
-        last_language = lang  # update last detected language for next input
-
-if __name__ == "__main__":
-    asyncio.run(main())

@@ -201,64 +201,6 @@ Output: {{
   "confidence": 0.90,
   "is_question": false
 }}
-Message: "मुझे 1000 साड़ी चाहिए 500 के रेट में"
-Output: {{
-  "intent": "product_search",
-  "entities": {{
-    "product": "साड़ी",
-    "price_range": "500",
-    "quantity": "1000",
-    "type": "female"
-  }},
-  "confidence": 0.90,
-  "is_question": false
-}}
-Message: "1000 pieces saree at 500 rate"
-Output: {{
-  "intent": "product_search",
-  "entities": {{
-    "product": "saree",
-    "price_range": "500",
-    "quantity": "1000",
-    "type": "female"
-  }},
-  "confidence": 0.90,
-  "is_question": false
-}}
-Message: "લાલ સાડી ₹500 ના ભાવે 2000 જોઈએ છે"
-Output: {{
-  "intent": "product_search",
-  "entities": {{
-    "product": "સાડી",
-    "color": "red",
-    "price_range": "₹500",
-    "type": "female",
-    "quantity": "2000"
-  }},
-  "confidence": 0.90,
-  "is_question": false
-}}
-Message: "mane resmi saree 500 ni 1000 joia lal color"
-Output: {{
-  "intent": "product_search",
-  "entities": {{
-    "product": "saree",
-    "fabric": "silk",
-    "price_range": "500",
-    "quantity": "1000",
-    "type": "female",
-    "color": "red"
-  }},
-  "confidence": 0.90,
-  "is_question": false
-}}
-Message: "any new design?"
-Output: {{
-  "intent": "catalog_request",
-  "entities": {{}},
-  "confidence": 0.90,
-  "is_question": true
-}}
 Message: "kai navu che"
 Output: {{
   "intent": "catalog_request",
@@ -307,40 +249,3 @@ def format_entities(entities: dict) -> str:
             formatted_lines.append(f" ○ {k}: None")
     
     return "\n".join(formatted_lines)
-
-async def main():
-    print("🧵 Textile Intent Detection Tester")
-    print("📋 Product Schema: Banarasi Silk Saree, Cotton Kurti, etc.")
-    print("Type 'q' or 'quit' to exit\n")
-    
-    while True:
-        try:
-            user_input = input("Enter message: ").strip()
-            if user_input.lower() in ["q", "quit"]:
-                print("Goodbye!")
-                break
-            
-            if not user_input:
-                continue
-            
-            print("🔄 Detecting language...")
-            language, lang_conf = await detect_language(user_input)
-            print(f"Detected Language: {language} (confidence: {lang_conf:.2f})")
-            
-            print("🔄 Detecting intent...")
-            intent, entities, conf = await detect_textile_intent_openai(user_input, language)
-            
-            print("\n" + "=" * 70)
-            print(f"📝 Input: {user_input}")
-            print(f"🌐 Language: {language} - {lang_conf:.2f}")
-            print(f"🎯 Intent: {intent} - {conf:.2f}")
-            print("📋 All Entities (✓ = with value, ○ = None):")
-            print(format_entities(entities))
-            print("=" * 70)
-            print()
-            
-        except KeyboardInterrupt:
-            print("\nGoodbye!")
-            break
-        except Exception as e:
-            print(f"Error: {e}\n")
