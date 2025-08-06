@@ -43,72 +43,6 @@ async def get_tenant_id_by_phone(phone_number: str, db):
         return row[0]
     return None
 
-import re
-
-async def normalize_size(transcript: str) -> str | None:
-    text = transcript.lower().strip().replace('.', '')
-
-    # English patterns (your existing ones)
-    if re.search(r'double\s*(x{1,3}l|ex|excel)', text) or re.search(r'extra\s*extra\s*large', text):
-        return "XXL"
-    if re.search(r'extra\s*large|excel', text):
-        return "XL"
-    if re.search(r'large', text):
-        return "L"
-    if re.search(r'medium|med', text):
-        return "M"
-    if re.search(r'small|sm', text):
-        return "S"
-    if re.search(r'extra\s*small|xs', text):
-        return "XS"
-    if re.search(r'double\s*extra\s*small|xxs', text):
-        return "XXS"
-
-    # Gujarati size words (Unicode strings)
-    # 'એક્સેલ' = XL, 'ડબલ એક્સેલ' = XXL, 'લાર્જ' = L, 'મીડિયમ' = M, 'સ્મોલ' = S, 'એક્સએસ' = XS, 'ડબલ એક્સએસ' = XXS
-    if re.search(r'ડબલ\s*એક્સેલ|ડબલએક્સેલ', text):
-        return "XXL"
-    if re.search(r'ડબલ\s*એક્સલ|ડબલએક્સલ.', text):
-        return "XXL"
-    if re.search(r'એક્સેલ', text):
-        return "XL"
-    if re.search(r'એક્સલ', text):
-        return "XL"
-    if re.search(r'લાર્જ', text):
-        return "L"
-    if re.search(r'મીડિયમ', text):
-        return "M"
-    if re.search(r'સ્મોલ', text):
-        return "S"
-    if re.search(r'એક્સએસ', text):
-        return "XS"
-    if re.search(r'ડબલ\s*એક્સએસ|ડબલએક્સએસ', text):
-        return "XXS"
-
-    # Hindi size words (Unicode strings)
-    # 'डबल एक्सेल' = XXL, 'एक्सेल' = XL, 'लार्ज' = L, 'मीडियम' = M, 'स्माल' = S, 'एक्सएस' = XS, 'डबल एक्सएस' = XXS
-    if re.search(r'डबल\s*एक्सेल', text):
-        return "XXL"
-    if re.search(r'एक्सेल', text):
-        return "XL"
-    if re.search(r'लार्ज', text):
-        return "L"
-    if re.search(r'मीडियम', text):
-        return "M"
-    if re.search(r'स्माल', text):
-        return "S"
-    if re.search(r'एक्सएस', text):
-        return "XS"
-    if re.search(r'डबल\s*एक्सएस', text):
-        return "XXS"
-
-    # Also handle exact size code inputs like 'xl', 'xxl', etc.
-    sizes = ['xxs', 'xs', 's', 'm', 'l', 'xl', 'xxl', 'xxxl']
-    if text in sizes:
-        return text.upper()
-
-    return None
-
 
 @router.websocket("/stream")
 async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
@@ -187,7 +121,6 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                     elapsed_lang = (time.perf_counter() - start_lang) * 1000
                     logging.info(f"detect_language took {elapsed_lang:.2f} ms")
                     last_user_lang = lang  # <-- add this line
-                    normalized_size=await normalize_size(txt)
                     
                     start_intent = time.perf_counter()
                     intent, new_entities, intent_confidence = await detect_textile_intent_openai(txt, lang)
@@ -197,41 +130,8 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                     if intent_confidence < 0.5:
                         logging.info(f"Ignoring transcript due to low intent confidence: {intent_confidence}")
                         continue  # Skip processing
-                    if normalized_size:
-                        new_entities['size'] = normalized_size
-                        logging.info(f"Overriding detected size with normalized size: {normalized_size}")
                     last_activity = time.time()  # Reset silence timer
-                    if analyzer.shown_variants:
-                        user_input = txt.strip().lower()
-                        selected_product = None
-
-                        # Check if input is a number selecting a variant
-                        if user_input.isdigit():
-                            idx = int(user_input) - 1
-                            if 0 <= idx < len(analyzer.shown_variants):
-                                selected_product = analyzer.shown_variants[idx]
-
-                        # Else check if user said product name
-                        if not selected_product:
-                            for v in analyzer.shown_variants:
-                                if v['name'].lower() in user_input:
-                                    selected_product = v
-                                    break
-
-                        if selected_product:
-                            # Clear variants since user made a selection
-                            analyzer.shown_variants = None
-                            analyzer.asking_variant_selection = False
-
-                            answer = f"Yes, we have available this product."
-                            logging.info(f"User selected product: {answer}")
-
-                            audio = await synthesize_text(answer, language_code=lang)
-                            await speak_pcm(audio, websocket, stream_sid)
-
-                            last_activity = time.time()
-                            continue  # Skip further processing and wait for next input
-
+                    
                     start_analyzer = time.perf_counter()
                     ai_reply = await analyzer.analyze_message(
                         text=txt,
@@ -248,9 +148,22 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                     
                     logging.info(f"🤖 AI Reply In Dictionary : {ai_reply}")
                     answer_text = ai_reply.get('answer', '')
+                    detected_intent = ai_reply.get('detected_intent', '')
+                    lang_prefix = last_user_lang.split("-")[0] if last_user_lang else "en"
 
+                    response_map = {
+                        "gu": "હા, અમને તે ઉત્પાદન ઉપલબ્ધ છે. કૃપા કરીને નંબર કે વર્ણનથી પસંદ કરો.",
+                        "hi": "हाँ, हमारे पास वह उत्पाद उपलब्ध है। कृपया नंबर या विवरण से चुनें।",
+                        "en": "Yes, we have that product available. Please select by number or description."
+                    }
+
+                    # Check if the intent is 'size_query' and the answer contains a product list (you can check for new lines + numbers)
+                    if detected_intent == 'size_query' and '\n1.' in answer_text:
+                        tts_text = response_map.get(lang_prefix, response_map["en"])
+                    else:
+                        tts_text = answer_text
                     logging.info(f"AI Reply: {answer_text}")
-                    audio = await synthesize_text(answer_text, language_code=lang)
+                    audio = await synthesize_text(tts_text, language_code=last_user_lang)
                     await speak_pcm(audio, websocket, stream_sid)
 
                 elif txt:
