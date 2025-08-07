@@ -33,7 +33,7 @@ for var_name, var_value in required_vars.items():
         raise ValueError(f"{var_name} environment variable is missing")
 
 BASE_URL = f"https://api.exotel.com/v1/Accounts/{EXOTEL_SID}/Calls/connect.json"
-EXOTEL_URL = f"https://71257898ad6d.ngrok-free.app/voice/start_voice/{APP_ID}"
+EXOTEL_URL = f"https://my.exotel.com/{EXOTEL_SID}/exoml/start_voice/{APP_ID}"
 
 retry_lock = threading.Lock()
 MAX_RETRIES = 2

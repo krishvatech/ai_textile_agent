@@ -18,34 +18,7 @@ import os
 
 router = APIRouter()
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-@router.post("/start_voice/{app_id}")
-async def start_voice(app_id: str, request: Request):
-    logger.info(f"Endpoint hit for app_id: {app_id} at {datetime.now()}")
-    try:
-        form_data = await request.form()
-        call_sid = form_data.get("CallSid", "unknown")
-        caller_number = form_data.get("From", "unknown")  # Use Exotel data for personalization
-        logger.info(f"In start_voice - App ID: {app_id}, Call SID: {call_sid}, Caller: {caller_number} at {datetime.now()}")
-
-        # Dynamic XML with loop for testing (repeat message if needed)
-        twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say voice="alice">Welcome to the call, {caller_number}. Please wait while we connect you.</Say>
-    <Pause length="10" />
-    <Dial>+919876543210</Dial> <!-- Replace with valid Assam agent number, e.g., your test mobile -->
-    <!-- Optional: Loop if no answer -->
-    <Say voice="alice">Connecting failed. Trying again.</Say>
-</Response>"""
-        return Response(content=twiml_response, media_type="text/xml")
-    except Exception as e:
-        logger.error(f"Error in start_voice: {e}")
-        error_response = """<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say voice="alice">Sorry, an error occurred. Goodbye.</Say>
-</Response>"""
-        return Response(content=error_response, media_type="text/xml")  
       
 analyzer = TextileAnalyzer()
 
@@ -114,7 +87,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                     audio = await synthesize_text(greeting, 'en-IN')
                     await speak_pcm(audio, websocket, stream_sid)
                     
-                elif event_type == "start":
+                if event_type == "start":
                     stream_sid = message.get("stream_sid")
                     start_payload = message.get("start", {})
                     logging.info(f"start_payload : {start_payload}")
@@ -125,11 +98,24 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                         tenant_id = await get_tenant_id_by_phone(phone_number, db)
                     logging.info(f"Tenant ID resolved: {tenant_id}")
                     logging.info(f"stream_sid: {stream_sid}")
-                    
-                elif event_type == "media":
+                    custom_params = start_payload.get("custom_parameters", {})
+                    print("custom_params=",custom_params)
+                    is_outbound = False
+                    if custom_params:
+                        key = list(custom_params.keys())[0]
+                        parts = key.split("|")
+                        if parts:
+                            call_type = parts[0]  # e.g., 'outbound'
+                            is_outbound = call_type == "outbound"  # ✅ set flag properly
+
+                        if len(parts) > 1:
+                            database = parts[1] 
+                        if len(parts) > 2:
+                            call_session_id = parts[2]  # ✅ Set it here!
+                if event_type == "media":
                     pcm = base64.b64decode(message["media"]["payload"])
                     await stt.send_audio_chunk(pcm)  # Feed chunk to STT (non-blocking)
-                elif event_type == "stop":
+                if event_type == "stop":
                     logging.info("Call ended.")
                     break
         except WebSocketDisconnect:
