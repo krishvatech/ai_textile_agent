@@ -48,9 +48,11 @@ async def get_tenant_id_by_phone(phone_number: str, db):
 
 @router.websocket("/stream")
 async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
+    print("Incoming WebSocket connection - before accept")
     logging.info("Incoming WebSocket connection - before accept")
     await websocket.accept()
     logging.info("✅ WebSocket connection accepted at /stream")
+    print("✅ WebSocket connection accepted at /stream")
     analyzer.reset()  # <-- you need to add this method inside TextileAnalyzer
     stt = SarvamSTTStreamHandler()
     stream_sid = None
