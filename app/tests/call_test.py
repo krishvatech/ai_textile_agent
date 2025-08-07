@@ -93,7 +93,7 @@ async def stream_audio(websocket: WebSocket):
 
                 event_type = message.get("event")
                 if event_type == "connected":
-                    greeting = "How can I help you today?"
+                    greeting = "How are you?"
                     # No DB lookup here
                     audio = await synthesize_text(greeting, lang_code)
                     await speak_pcm(audio, websocket, stream_sid)

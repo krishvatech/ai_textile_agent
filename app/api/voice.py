@@ -83,7 +83,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                 
                 
                 if event_type == "connected":
-                    greeting = "Hello..I am From Krishvatech"
+                    greeting = "Hello..I am From Krishvatech Texttile"
                     audio = await synthesize_text(greeting, 'en-IN')
                     await speak_pcm(audio, websocket, stream_sid)
                     
