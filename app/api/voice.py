@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, BackgroundTasks, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Request, BackgroundTasks, Depends, WebSocket, WebSocketDisconnect,Response
 from app.db.session import get_db
 from app.utils.stt import SarvamSTTStreamHandler
 from app.utils.tts import synthesize_text 
@@ -7,6 +7,7 @@ from app.core.intent_utils import detect_textile_intent_openai
 from app.core.ai_reply import TextileAnalyzer
 from sqlalchemy import text
 from fastapi import Depends
+from datetime import datetime
 import json
 import asyncio
 import logging
@@ -15,9 +16,37 @@ import time
 import re
 import os
 
-
 router = APIRouter()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
+@router.post("/start_voice/{app_id}")
+async def start_voice(app_id: str, request: Request):
+    logger.info(f"Endpoint hit for app_id: {app_id} at {datetime.now()}")
+    try:
+        form_data = await request.form()
+        call_sid = form_data.get("CallSid", "unknown")
+        caller_number = form_data.get("From", "unknown")  # Use Exotel data for personalization
+        logger.info(f"In start_voice - App ID: {app_id}, Call SID: {call_sid}, Caller: {caller_number} at {datetime.now()}")
+
+        # Dynamic XML with loop for testing (repeat message if needed)
+        twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="alice">Welcome to the call, {caller_number}. Please wait while we connect you.</Say>
+    <Pause length="10" />
+    <Dial>+919876543210</Dial> <!-- Replace with valid Assam agent number, e.g., your test mobile -->
+    <!-- Optional: Loop if no answer -->
+    <Say voice="alice">Connecting failed. Trying again.</Say>
+</Response>"""
+        return Response(content=twiml_response, media_type="text/xml")
+    except Exception as e:
+        logger.error(f"Error in start_voice: {e}")
+        error_response = """<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="alice">Sorry, an error occurred. Goodbye.</Say>
+</Response>"""
+        return Response(content=error_response, media_type="text/xml")  
+      
 analyzer = TextileAnalyzer()
 
 async def speak_pcm(pcm_audio: bytes, websocket: WebSocket, stream_sid: str):
