@@ -7,6 +7,7 @@ from sqlalchemy import text
 from app.db.session import get_db
 from app.core.lang_utils import detect_language
 from app.core.intent_utils import detect_textile_intent_openai
+from app.core.ai_reply import analyze_message
 
 # Load environment variables
 load_dotenv()
@@ -28,6 +29,7 @@ app = FastAPI()
 
 # Simple in-memory deduplication for processed incoming message SIDs
 processed_message_sids = set()
+mode = "chat"
 
 async def get_tenant_id_by_phone(phone_number: str, db):
     """
@@ -115,18 +117,52 @@ async def receive_whatsapp_message(request: Request):
         break  # Only use one DB session
 
     # Run language/entity detection (awaiting)
-    language = await detect_language(text)
-    intent_type, entities, confidence = await detect_textile_intent_openai(text, language)
+    lang_code = 'en-IN'  # Default language
+    current_language = None
+    last_user_lang = lang_code
+    language = await detect_language(text,last_user_lang)
+    if isinstance(language, tuple):
+        language = language[0]
+    else:
+        language = language
+    # Fix conversation language once set, but update if neutral or English greetings only
+    if current_language is None:
+        current_language = language
+        logging.info(f"Conversation language set to {current_language}")
+    else:
+        # If current_language is neutral or en-IN (greeting), update to detected_lang if meaningful
+        if current_language in ['neutral', 'en-IN'] and language in ['hi-IN', 'gu-IN']:
+            current_language = language
+            logging.info(f"Conversation language updated to {current_language}")
+        else:
+            logging.info(f"Conversation language remains as {current_language}")
+
+    lang = current_language
+    last_user_lang = current_language
+    intent_type, entities, confidence = await detect_textile_intent_openai(text, lang)
     logging.info(f"intent_type : {intent_type}")
     logging.info(f"Entities : {entities}")
     logging.info(f"confidence : {confidence}")
 
-    reply_text = (
-        f"You said: {text}\n"
-        f"Language: {language}\n"
-        f"Entities: {entities}\n"
-        f"Your tenant ID is: {tenant_id if tenant_id else 'not found'}"
-    )
+
+    # ---- AI-Driven Reply ----
+    reply_text = ""
+    try:
+        reply = await analyze_message(
+            text=text,
+            tenant_id=tenant_id,
+            language=language,
+            intent=intent_type,
+            new_entities=entities,
+            intent_confidence=confidence,
+            mode="chat"   # Because it's WhatsApp
+        )
+        # select appropriate response key; fallback to something plain if unexpected
+        reply_text = reply.get("followup_reply") or reply.get("answer") or "Sorry, I could not process your request right now."
+    except Exception as e:
+        logging.error(f"AI analyze_message failed: {e}")
+        reply_text = "Sorry, our assistant is having trouble responding at the moment. We'll get back to you soon!"
+
 
     await send_whatsapp_reply(to=from_number, body=reply_text)
     return {"status": "received"}

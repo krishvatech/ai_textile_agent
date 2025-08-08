@@ -69,13 +69,13 @@ async def generate_product_pitch_prompt(language: str, entities: Dict[str, Any],
 
     client = AsyncOpenAI(api_key=api_key)
     completion = await client.chat.completions.create(
-        model="gpt-5-mini",
+        model="gpt-4.1-mini",
         messages=[
             {"role": "system", "content": sys_msg},
             {"role": "user", "content": prompt},
         ],
-        temperature=0.4,
-        max_completion_tokens=90,
+        temperature=1,
+        max_tokens=90,
     )
     return completion.choices[0].message.content.strip()
 
@@ -142,13 +142,13 @@ async def FollowUP_Question(
 
     client = AsyncOpenAI(api_key=api_key)
     completion = await client.chat.completions.create(
-        model="gpt-5-mini",  # Or your available model
+        model="gpt-4.1-mini",  # Or your available model
         messages=[
             {"role": "system", "content": "You are an expert, concise, friendly assistant."},
             {"role": "user", "content": prompt}
         ],
-        temperature=0.3,
-        max_completion_tokens=70
+        temperature=1,
+        max_tokens=70
     )
     questions = completion.choices[0].message.content.strip()
     return questions
@@ -166,13 +166,13 @@ async def generate_greeting_reply(language, session_history=None) -> str:
     try:
         client = AsyncOpenAI(api_key=api_key)
         completion = await client.chat.completions.create(
-            model="gpt-5-mini",
+            model="gpt-4.1-mini",
             messages=[
                 {"role": "system", "content": "You are an expert conversation starter and friendly textile assistant."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.6,
-            max_completion_tokens=60
+            temperature=1,
+            max_tokens=60
         )
         reply = completion.choices[0].message.content.strip()
         if reply:

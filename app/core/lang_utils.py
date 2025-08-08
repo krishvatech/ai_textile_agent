@@ -48,10 +48,10 @@ async def detect_language(text: str,last_language: str) -> Tuple[str, float]:
 """
     try:
         response = await client.chat.completions.create(
-            model="gpt-5-mini",
+            model="gpt-4.1-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_completion_tokens=150
+            temperature=1,
+            max_tokens=150
         )
         content = response.choices[0].message.content.strip()
         

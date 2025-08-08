@@ -19,7 +19,7 @@ def extract_dynamic_attributes(txt):
     try:
         # Send the request to OpenAI API (GPT-3 or GPT-4)
         response = client.chat.completions.create(
-            model="gpt-5-mini",  # Use GPT-4 or another compatible model
+            model="gpt-4.1-mini",  # Use GPT-4 or another compatible model
             messages=[
                 {"role": "system", "content": "You are an assistant that extracts colors and fabrics from sentences."},
                 {"role": "user", "content": prompt}
