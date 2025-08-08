@@ -1,12 +1,12 @@
-import asyncio
-import logging
-import os
-from dateutil import parser
 from dotenv import load_dotenv
+import os
+import logging
 from typing import Dict, Any, List, Optional
 from openai import AsyncOpenAI
-import logging
-import re
+import asyncio
+import random
+from app.core.lang_utils import detect_language
+from app.core.intent_utils import detect_textile_intent_openai
 
 load_dotenv()
 api_key = os.getenv("GPT_API_KEY")
@@ -14,302 +14,304 @@ if not api_key:
     print("❌ Error: GPT_API_KEY not found in environment variables")
     exit(1)
 
-def is_valid_rental_date(date_str: str) -> bool:
+# --- In-memory session stores
+session_memory: Dict[Any, List[Dict[str, str]]] = {}  # Conversation history
+session_entities: Dict[Any, Dict[str, Any]] = {}       # Merged entities per session
+last_main_intent_by_session: Dict[Any, str] = {}       # Remember last main intent
+
+
+
+MAIN_INTENTS = {
+    "product_search", "catalog_request", "order_placement", "order_status",
+    "price_inquiry", "discount_inquiry", "availability_check"
+}
+REFINEMENT_INTENTS = {
+    "rental_inquiry", "color_preference", "size_query", "fabric_inquiry",
+    "delivery_inquiry", "payment_query"
+}
+
+def filter_non_empty_entities(entities: dict) -> dict:
+    """
+    Returns a dict of only non-empty (not None, '', [], or {}) entity fields.
+    """
+    return {k: v for k, v in entities.items()
+            if v not in [None, '', [], {}]}
+
+async def pinecone_fetch_records(entities: Dict) -> str:
+    # Replace this with your real Pinecone search logic!
+    return "Similar data from Pinecone based on collected entities: " + str(entities)
+
+async def generate_product_pitch_prompt(language: str, entities: Dict[str, Any], products: Optional[list] = None) -> str:
+    """
+    Use GPT to produce a short, natural, TTS-friendly pitch in the caller's language.
+    - language: BCP-47 like 'gu-IN', 'hi-IN', 'kn-IN', 'en-IN'
+    - entities: merged collected entities
+    - products: optional list[dict] with keys like name/category/color/fabric/size/price/rental_price
+    """
+    sys_msg = (
+        "You are a retail assistant for a textile shop. "
+        "Write a very short spoken pitch (max 2 sentences, no emojis, no numbering, no bullets). "
+        "Natural tone, suitable for voice. Do not invent facts. "
+        f"Respond EXCLUSIVELY in the language of the locale {language} (e.g., Gujarati for 'gu-IN', no mixing with Hindi or English)."
+    )
+
+    # Filter non-empty entities directly
+    filtered_entities = {k: v for k, v in (entities or {}).items() if v not in [None, "", [], {}]}
+
+    # Build prompt with integrated context
+    prompt = (
+        f"Reply ONLY in the exact locale given by {language} (same script, no transliteration). "
+        "If products exist, briefly pitch up to 3 options (color/fabric/category, size if present, and price or rental price); "
+        "otherwise, compose a single-sku pitch from these collected entities: " + str(filtered_entities) + ". "
+        f"Products: {products[:3] if products else None}. "
+        "Keep it under ~30 words total. "
+    )
+
+    client = AsyncOpenAI(api_key=api_key)
+    completion = await client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": sys_msg},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.4,
+        max_tokens=90,
+    )
+    return completion.choices[0].message.content.strip()
+
+
+async def FollowUP_Question(
+    intent_type: str,
+    entities: Dict[str, Any],
+    language: Optional[str] = "en",
+    session_history: Optional[List[Dict[str, str]]] = None
+) -> str:
+    """
+    Generates a short, merged follow-up question asking for only the top 2-3 missing entities.
+    """
+    # Find missing fields (consider empty as missing)
+    missing_fields = [k for k, v in entities.items()
+                      if v is None or v == "" or (isinstance(v, (list, dict)) and not v)]
+    if not missing_fields:
+        return "Thank you. I have all the information I need for your request!"
+
+    # Priority for asking
+    entity_priority = [
+        "is_rental", "rental_price", "price", "fabric",
+        "size", "color", "category", "product_name",
+        "quantity", "location", "occasion", "type"
+    ]
+    field_display_names = {
+        "is_rental": "rental",
+        "rental_price": "rental price",
+        "price": "price",
+        "fabric": "fabric",
+        "size": "size",
+        "color": "color",
+        "category": "category",
+        "product_name": "product",
+        "quantity": "quantity",
+        "location": "location",
+        "occasion": "occasion",
+        "type": "gender/type"
+    }
+    # Sort and select only top 2 or 3 missing fields
+    missing_sorted = sorted(missing_fields, key=lambda x: entity_priority.index(x) if x in entity_priority else 999)
+    max_fields = 3
+    missing_short = missing_sorted[:max_fields]
+    merged_fields = ", ".join([field_display_names.get(f, f) for f in missing_short])
+
+    # Recent session for context (optional, helps GPT personalize)
+    session_text = ""
+    if session_history:
+        relevant_history = session_history[-5:]
+        conv_lines = [f"{m['role'].capitalize()}: {m['content']}" for m in relevant_history]
+        session_text = "Conversation so far:\n" + "\n".join(conv_lines) + "\n"
+
+    # Prompt instructing GPT to only ask about these N fields
+    prompt = (
+        f"You are a friendly WhatsApp assistant for a textile and clothing shop.\n"
+        f"{session_text}"
+        f"Collected details so far: { {k: v for k, v in entities.items() if v} }\n"
+        f"Still missing: {merged_fields}.\n"
+        f"Ask for ONLY these {len(missing_short)} details in a single, short, conversational question, e.g., 'Want to filter by rental or fabric?' "
+        f"Do not mention any other fields. Keep it very brief. "
+        f"Reply in {language.upper()}. Only output the question."
+        f"Reply EXCLUSIVELY in the locale {language.upper()} (no mixing with other languages like Hindi). Only output the question."
+    )
+
+    client = AsyncOpenAI(api_key=api_key)
+    completion = await client.chat.completions.create(
+        model="gpt-4.1-mini",  # Or your available model
+        messages=[
+            {"role": "system", "content": "You are an expert, concise, friendly assistant."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.3,
+        max_tokens=70
+    )
+    questions = completion.choices[0].message.content.strip()
+    return questions
+
+async def generate_greeting_reply(language, session_history=None) -> str:
+    # More concise, shop-aware greeting prompt
+    prompt = (
+        f"You are a friendly WhatsApp assistant for our textile and clothing business.\n"
+        f"{'Recent conversation: ' + str(session_history) if session_history else ''}\n"
+        f"Greet the customer in a warm, short (1-2 sentences), conversational way in {language.upper()}. "
+        f"If this is the first message, welcome them to our shop. "
+        f"If ongoing, give a friendly brief follow-up. Use emojis if you like. "
+        f"Only output the greeting, no product suggestions."
+    )
     try:
-        if not re.search(r"\b\d{4}\b", date_str):
-            return False
-        _ = parser.parse(date_str, fuzzy=True, dayfirst=True)
-        return True
-    except Exception:
-        return False
-
-class TextileAnalyzer:
-    def __init__(self):
-        self.entity_priority = [
-            "type", "category", "occasion", "is_rental", "fabric", "color", "size"
-        ]
-        self.session_history: List[Dict[str, str]] = []
-        self.collected_entities: Dict[str, Any] = {}
-        self.last_intent: Optional[str] = None
-        self.confirmation_pending: bool = False
-        self.shown_variants: Optional[List[dict]] = None
-        self.selected_variant: Optional[dict] = None
-        self.asking_variant_selection: bool = False
-        self.asking_rental_date: bool = False
-        self.gpt_client = AsyncOpenAI(api_key=api_key)
-        self.logger = logging.getLogger("TextileAnalyzer")
-        
-    def reset(self):
-        self.session_history.clear()
-        self.collected_entities.clear()
-        self.last_intent = None
-        self.confirmation_pending = False
-        self.shown_variants = None
-        self.selected_variant = None
-        self.asking_variant_selection = False
-        self.asking_rental_date = False
-
-    def clear_history(self):
-        self.session_history = []
-        self.collected_entities = {}
-        self.last_intent = None
-        self.confirmation_pending = False
-        self.shown_variants = None
-        self.selected_variant = None
-        self.asking_variant_selection = False
-        self.asking_rental_date = False
-
-    def merge_entities(self, new_entities: dict):
-        newly_gathered = {}
-        for k, v in new_entities.items():
-            if v and v not in ["", None, "null", "None"]:
-                if self.collected_entities.get(k) != v:
-                    newly_gathered[k] = v
-                    self.collected_entities[k] = v
-        if newly_gathered:
-            gathered_str = ", ".join([f"{k}={v}" for k, v in newly_gathered.items()])
-            self.logger.info(f"[INFO] New details gathered: {gathered_str}")
-
-    def next_missing_entity(self):
-        for field in self.entity_priority:
-            if not self.collected_entities.get(field):
-                return field
-        return None
-
-    def choose_language(self, detected_language: str) -> str:
-        if detected_language.startswith("gu"):
-            return "Gujarati"
-        elif detected_language.startswith("hi"):
-            return "Hindi"
-        else:
-            return "English"
-
-    async def gpt_prompt_for_missing_entity(self, missing_entity: str, filled_entities: dict, conversation_language: str) -> str:
-        lang_map = {"English": "English", "Hindi": "Hindi", "Gujarati": "Gujarati"}
-        prompt = (
-            f"You are a textile rental shop assistant in India. "
-            f"Always reply ONLY in {lang_map.get(conversation_language, 'English')}. "
-            f"Do NOT greet or thank. "
-            f"Collected entity info so far (in English): {filled_entities}. "
-            f"The next required info is: '{missing_entity}'. "
-            f"Ask a concise, single question to collect ONLY this info from the user—in the user's language. "
-            f"Do NOT ask about anything else. Just output the question."
+        client = AsyncOpenAI(api_key=api_key)
+        completion = await client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": "You are an expert conversation starter and friendly textile assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.6,
+            max_tokens=60
         )
-        response = await self.gpt_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "system", "content": prompt}],
-            temperature=0.1,
-            max_tokens=64
-        )
-        return response.choices[0].message.content.strip()
+        reply = completion.choices[0].message.content.strip()
+        if reply:
+            return reply
+    except Exception as e:
+        print("GPT error, falling back to random greeting. (Error:", str(e), ")")
+    greetings = [
+        "Hello! 👋 Welcome to our textile shop.",
+        "Hi there! 😊 How can I help you with fabrics or clothing?",
+        "Welcome! Let me know what you're searching for today.",
+        "Hello! What are you looking for in clothing or textiles?"
+    ]
+    return random.choice(greetings)
 
-    async def fetch_variants_from_pinecone(self, entities: dict) -> List[dict]:
-        return [
-            {"variant_id": "1", "name": "Red Silk Saree - Free Size", "type": "female", "category": "saree", "occasion": "wedding", "color": "red", "fabric": "silk", "size": "Free Size", "is_rental": True},
-            {"variant_id": "2", "name": "Blue Cotton Kurti - M", "type": "female", "category": "kurti", "occasion": "casual", "color": "blue", "fabric": "cotton", "size": "M", "is_rental": False}
-        ]
+async def analyze_message(text: str, tenant_id=None,language: str = "en-US",intent: str | None = None,new_entities: dict | None = None,intent_confidence: float = 0.0,mode: str = "call") -> Dict[str, Any]:
+    language = language
+    logging.info(f"Detected language in analyze_message: {language}")
+    intent_type=intent
+    logging.info(f"Detected intent_type in analyze_message: {intent_type}")
+    entities=new_entities
+    logging.info(f"Detected entities in analyze_message: {entities}")
+    confidence=intent_confidence
+    logging.info(f"Detected confidence in analyze_message: {confidence}")
+    
+    history = session_memory.get(tenant_id, [])
+    acc_entities = session_entities.get(tenant_id, None)
+    last_main_intent = last_main_intent_by_session.get(tenant_id, None)
+    history.append({"role": "user", "content": text})
+    # --- Merge entities
+    if acc_entities is None:
+        acc_entities = entities.copy()
+    else:
+        for k, v in entities.items():
+            if v not in [None, '', [], {}]:
+                acc_entities[k] = v
 
-    async def analyze_message(self, text: str, tenant_id=None,language: str = "en-US",intent: str | None = None,new_entities: dict | None = None,intent_confidence: float = 0.0,) -> Dict[str, Any]:
-        logging.info(f"Detected language in analyze_message: {language}")
-        
-        if new_entities:
-            self.merge_entities(new_entities)
-        if intent is None:
-            intent = "other"
-        self.last_intent = intent 
-        self.intent_confidence = intent_confidence
+    # --- Rental/Purchase logic
+    is_rental = acc_entities.get("is_rental")
 
-        self.session_history.append({"role": "user", "content": text})
-        
-        lang_for_prompt = self.choose_language(language)
-        
-        # GREETING
-        if intent == "greeting" or (text.strip().lower() in ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]):
-            self.clear_history()
-            greet_map = {
-                "English": "What clothing product are you interested in today?",
-                "Hindi": "आज आप किस कपड़े के उत्पाद में रुचि रखते हैं?",
-                "Gujarati": "આજે તમે કયા કપડાની ઉત્પાદનમાં રસ રાખો છો?"
-            }
-            return {
-                "input_text": text,
-                "language": language,
-                "detected_intent": intent,
-                "answer": greet_map[lang_for_prompt]
-            }
+    if is_rental is True:
+        acc_entities.pop("price", None)        # Remove 'price' if present
+    elif is_rental is False:
+        acc_entities.pop("rental_price", None) # Remove 'rental_price' if present
 
-        # DYNAMIC GPT ENTITY QUESTION
-        missing_entity = self.next_missing_entity()
-        if missing_entity:
-            answer = await self.gpt_prompt_for_missing_entity(
-                missing_entity, self.collected_entities, lang_for_prompt
-            )
-            return {
-                "input_text": text,
-                "language": language,
-                "detected_intent": intent,
-                "entities": dict(self.collected_entities),
-                "intent_confidence": intent_confidence,
-                "answer": answer
-            }
 
-        # Show variants
-        if self.shown_variants is None:
-            variants = await self.fetch_variants_from_pinecone(self.collected_entities)
-            if not variants:
-                self.clear_history()
-                sorry_map = {
-                    "English": "Sorry, no matching products found. Let's start again!",
-                    "Hindi": "क्षमा करें, कोई उपयुक्त उत्पाद नहीं मिला। चलिए फिर से शुरू करते हैं!",
-                    "Gujarati": "માફ કરો, મેળ ખાતા ઉત્પાદનો મળ્યા નથી. ફરી શરૂ કરીએ!"
-                }
-                return {
-                    "input_text": text,
-                    "language": language,
-                    "detected_intent": intent,
-                    "answer": sorry_map[lang_for_prompt]
-                }
-            self.shown_variants = variants
-            self.asking_variant_selection = True
-            lines = {
-                "English": ["Here are some matching products:"],
-                "Hindi": ["यहाँ कुछ उपयुक्त उत्पाद हैं:"],
-                "Gujarati": ["અહીં કેટલીક મેળ ખાતી ઉત્પાદનો છે:"]
-            }[lang_for_prompt]
-            for idx, v in enumerate(variants, 1):
-                lines.append(
-                    f"{idx}. {v['name']} - {v.get('fabric', '')} - {v.get('color', '')}{' (Rental available)' if v.get('is_rental') else ''}"
-                )
-            select_map = {
-                "English": "Which product are you interested in? Please select by number or describe.",
-                "Hindi": "आप कौन सा उत्पाद चुनना चाहते हैं? कृपया नंबर से या विवरण से चुनें।",
-                "Gujarati": "તમે કયું ઉત્પાદન પસંદ કરવું છે? કૃપા કરીને નંબર કે વર્ણનથી પસંદ કરો."
-            }
-            lines.append(select_map[lang_for_prompt])
-            answer = "\n".join(lines)
-            return {
-                "input_text": text,
-                "language": language,
-                "detected_intent": intent,
-                "entities": dict(self.collected_entities),
-                "intent_confidence": intent_confidence,
-                "answer": answer
-            }
+    session_entities[tenant_id] = acc_entities
 
-        # Product selection
-        if self.asking_variant_selection:
-            sel = self._parse_variant_selection(text)
-            if sel is not None and 0 <= sel < len(self.shown_variants):
-                self.selected_variant = self.shown_variants[sel]
-                self.asking_variant_selection = False
-                if self.selected_variant.get("is_rental"):
-                    self.asking_rental_date = True
-                    reply_map = {
-                        "English": "This product is available for rent. Please provide the complete rental date (day, month, year).",
-                        "Hindi": "यह उत्पाद किराए के लिए उपलब्ध है। कृपया पूरी तारीख (दिन, महीना, वर्ष) बताएं।",
-                        "Gujarati": "આ ઉત્પાદન ભાડે માટે ઉપલબ્ધ છે. કૃપા કરીને સંપૂર્ણ ભાડાની તારીખ (દિન, મહિનો, વર્ષ) આપો."
-                    }
-                    reply = reply_map[lang_for_prompt]
-                    return {
-                        "input_text": text,
-                        "language": language,
-                        "detected_intent": intent,
-                        "entities": dict(self.collected_entities),
-                        "intent_confidence": intent_confidence,
-                        "answer": reply
-                    }
-                else:
-                    confirm_map = {
-                        "English": f"You have selected: {self.selected_variant['name']}. Please confirm to proceed with the purchase.",
-                        "Hindi": f"आपने चुना है: {self.selected_variant['name']}. कृपया खरीदारी आगे बढ़ाने के लिए पुष्टि करें।",
-                        "Gujarati": f"તમે પસંદ કર્યું છે: {self.selected_variant['name']}. ખરીદી પૂરું પાડવા માટે કૃપા કરીને પુષ્ટિ કરો."
-                    }
-                    return {
-                        "input_text": text,
-                        "language": language,
-                        "detected_intent": intent,
-                        "entities": dict(self.collected_entities),
-                        "intent_confidence": intent_confidence,
-                        "answer": confirm_map[lang_for_prompt]
-                    }
-            else:
-                sorry_map = {
-                    "English": "Sorry, I didn't understand your selection. Please enter the product number or describe your choice.",
-                    "Hindi": "माफ़ कीजिए, मैं आपका चयन नहीं समझ पाया। कृपया उत्पाद का नंबर या विवरण दर्ज करें।",
-                    "Gujarati": "માફ કરો, મેં તમારો પસંદગીઓ સમજ્યો નથી. કૃપા કરીને પસંદગીઓનો નંબર કે વર્ણન લખો."
-                }
-                return {
-                    "input_text": text,
-                    "language": language,
-                    "detected_intent": intent,
-                    "entities": dict(self.collected_entities),
-                    "intent_confidence": intent_confidence,
-                    "answer": sorry_map[lang_for_prompt]
-                }
+    # === INTENT STICKY LOGIC ===
+    if intent_type in REFINEMENT_INTENTS and last_main_intent:
+        intent_type = last_main_intent  # Don't leave main flow for refinement
+    if intent_type in MAIN_INTENTS:
+        last_main_intent_by_session[tenant_id] = intent_type
 
-        # Rental date
-        if self.asking_rental_date:
-            if is_valid_rental_date(text):
-                self.collected_entities["rental_date"] = text
-                self.asking_rental_date = False
-                confirm_map = {
-                    "English": f"Rental confirmed for {self.selected_variant['name']} on {text}. Please confirm your order.",
-                    "Hindi": f"{self.selected_variant['name']} का किराया {text} के लिए पक्का। कृपया अपना ऑर्डर कन्फर्म करें।",
-                    "Gujarati": f"{self.selected_variant['name']}નું ભાડું {text} માટે પુષ્ટિ થયેલ છે. કૃપા કરીને ઓર્ડર કનફર્મ કરો."
-                }
-                reply = confirm_map[lang_for_prompt]
-                return {
-                    "input_text": text,
-                    "language": language,
-                    "detected_intent": intent,
-                    "entities": dict(self.collected_entities),
-                    "intent_confidence": intent_confidence,
-                    "answer": reply
-                }
-            else:
-                answer = await self.gpt_prompt_for_missing_entity(
-                    "rental_date", self.collected_entities, lang_for_prompt
-                )
-                return {
-                    "input_text": text,
-                    "language": language,
-                    "detected_intent": intent,
-                    "entities": dict(self.collected_entities),
-                    "intent_confidence": intent_confidence,
-                    "answer": answer
-                }
-        fallback_map = {
-            "English": "What would you like to do next?",
-            "Hindi": "अब आप क्या करना चाहते हैं?",
-            "Gujarati": "હવે તમે શું કરવું ઇચ્છો છો?"
-        }
+    # --- Respond
+    if intent_type == "greeting":
+        reply = await generate_greeting_reply(language, session_history=history)
+        history.append({"role": "assistant", "content": reply})
+        session_memory[tenant_id] = history
         return {
             "input_text": text,
             "language": language,
-            "detected_intent": intent,
-            "entities": dict(self.collected_entities),
-            "intent_confidence": intent_confidence,
-            "answer": fallback_map[lang_for_prompt]
+            "intent_type": intent_type,
+            "followup_reply": reply,
+            "history": history,
+            "collected_entities": acc_entities
         }
+    elif intent_type == "product_search":
+        filtered_entities = filter_non_empty_entities(acc_entities)
+        pinecone_data = await pinecone_fetch_records(filtered_entities)
+        followup = await FollowUP_Question(intent_type, acc_entities, language, session_history=history)
+        if mode == "call":
+            # Generate and speak full response
+            spoken_pitch = await generate_product_pitch_prompt(language, acc_entities, pinecone_data)
+            voice_response = f"{spoken_pitch} {followup}"
+            history.append({"role": "assistant", "content": voice_response})
+            session_memory[tenant_id] = history
+            return {
+                "pinecone_data": pinecone_data,
+                "intent_type": intent_type,
+                "language": language,
+                "tenant_id": tenant_id,
+                "history": history,
+                "collected_entities": acc_entities,
+                "answer": voice_response,  # For TTS in call
+                "followup_reply": followup,
+            }
+        elif mode== "chat":
+            history.append({"role": "assistant", "content": followup})
+            session_memory[tenant_id] = history
+            return {
+                "pinecone_data": pinecone_data,
+                "intent_type": intent_type,
+                "language": language,
+                "tenant_id": tenant_id,
+                "history": history,
+                "collected_entities": acc_entities,
+                "followup_reply": followup,
+            }
+    else:
+        return "<--> Upcoming Modules Are Under Development <-->"
+    
+async def main():
+    # Sample test data
+    test_tenant_id = "test_user_123"
+    test_text = "I'm looking for a red shirt"
+    test_language = "gu-IN"  # English (India); change to 'as-IN' for Assamese testing
+    test_intent = "product_search"
+    test_entities = {
+        "color": "red",
+        "category": "shirt",
+        "size": None,  # Intentionally missing for follow-up testing
+        "price": None
+    }
+    test_confidence = 0.85
+    test_mode = "call"  # Test "chat" or "call" here
 
-    def _parse_variant_selection(self, text: str) -> Optional[int]:
-        match = re.match(r"\D*(\d+)", text.strip())
-        if match:
-            idx = int(match.group(1)) - 1
-            return idx
-        return None
+    try:
+        # Simulate analysis
+        result = await analyze_message(
+            text=test_text,
+            tenant_id=test_tenant_id,
+            language=test_language,
+            intent=test_intent,
+            new_entities=test_entities,
+            intent_confidence=test_confidence,
+            mode=test_mode  # Added for mode-specific testing
+        )
 
-    async def run_cli(self):
-        print("Welcome to Textile Rental Assistant!")
-        while True:
-            try:
-                user_input = input("You: ").strip()
-                if user_input.lower() in ["q", "quit"]:
-                    print("Assistant: Goodbye!")
-                    break
-                result = await self.analyze_message(user_input, tenant_id="your-tenant-id")
-                print(f"Assistant: {result['answer']}")
-            except KeyboardInterrupt:
-                print("\nSession ended. Bye!")
-                break
+        # Print results for inspection
+        print("\n--- Local Test Results ---")
+        print(f"Mode: {test_mode}")
+        print(f"Intent Type: {result.get('intent_type')}")
+        print(f"Collected Entities: {result.get('collected_entities')}")
+        print(f"Pinecone Data: {result.get('pinecone_data')}")
+        print(f"Spoken Pitch (Answer): {result.get('answer')}")
+        print(f"Follow-up Reply: {result.get('followup_reply')}")
+        print(f"History: {result.get('history')}")
+    except Exception as e:
+        print(f"Error during test: {str(e)}")
 
+if __name__ == "__main__":
+    asyncio.run(main())

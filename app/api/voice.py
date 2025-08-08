@@ -4,7 +4,7 @@ from app.utils.stt import SarvamSTTStreamHandler
 from app.utils.tts import synthesize_text 
 from app.core.lang_utils import detect_language
 from app.core.intent_utils import detect_textile_intent_openai
-from app.core.ai_reply import TextileAnalyzer
+from app.core.ai_reply import analyze_message
 from sqlalchemy import text
 from fastapi import Depends
 from datetime import datetime
@@ -17,10 +17,15 @@ import re
 import os
 
 router = APIRouter()
-logging.basicConfig(level=logging.INFO)
-
+logging.basicConfig()
+logging.getLogger('sqlalchemy').setLevel(logging.ERROR)
+logging.getLogger('sqlalchemy.engine').setLevel(logging.ERROR)
+logging.getLogger("sqlalchemy.pool").setLevel(logging.ERROR)
+logging.getLogger("uvicorn.access").setLevel(logging.ERROR)
+logging.getLogger("uvicorn.error").setLevel(logging.ERROR)
+logging.getLogger("fastapi").setLevel(logging.ERROR)
+logging.getLogger('sqlalchemy.engine.Engine').disabled = True
       
-analyzer = TextileAnalyzer()
 
 async def speak_pcm(pcm_audio: bytes, websocket: WebSocket, stream_sid: str):
     """Send TTS audio in chunks over WebSocket"""
@@ -52,14 +57,14 @@ async def new_stt_stream() -> SarvamSTTStreamHandler:
 
 @router.websocket("/stream")
 async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
-    print("Incoming WebSocket connection - before accept")
     logging.info("Incoming WebSocket connection - before accept")
     await websocket.accept()
     logging.info("✅ WebSocket connection accepted at /stream")
     print("✅ WebSocket connection accepted at /stream")
-    analyzer.reset()  # <-- you need to add this method inside TextileAnalyzer
+    # analyze_message.reset()  # <-- you need to add this method inside TextileAnalyzer
     stt = await new_stt_stream()
     stream_sid = None
+    mode="call"
     lang_code = 'en-IN'  # Default language
     bot_is_speaking = False
     tts_task = None
@@ -89,6 +94,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                 
                 
                 if event_type == "connected":
+                    print("greetings")
                     greeting = "Hello..I am From Krishvatech Texttile"
                     audio = await synthesize_text(greeting, 'en-IN')
                     await speak_pcm(audio, websocket, stream_sid)
@@ -106,18 +112,6 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                     logging.info(f"stream_sid: {stream_sid}")
                     custom_params = start_payload.get("custom_parameters", {})
                     print("custom_params=",custom_params)
-                    is_outbound = False
-                    if custom_params:
-                        key = list(custom_params.keys())[0]
-                        parts = key.split("|")
-                        if parts:
-                            call_type = parts[0]  # e.g., 'outbound'
-                            is_outbound = call_type == "outbound"  # ✅ set flag properly
-
-                        if len(parts) > 1:
-                            database = parts[1] 
-                        if len(parts) > 2:
-                            call_session_id = parts[2]  # ✅ Set it here!
                 if event_type == "media":
                     pcm = base64.b64decode(message["media"]["payload"])
                     await stt.send_audio_chunk(pcm)  # Feed chunk to STT (non-blocking)
@@ -136,6 +130,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
             try:
                 txt, is_final, lang = await asyncio.wait_for(stt.get_transcript(), timeout=0.2)
                 if is_final and txt:
+                    print(f"Final Transcript={txt}")
                     logging.info(f"Final transcript: {txt}")
                     if re.fullmatch(r'[\W_]+', txt.strip()):
                         logging.info("Transcript only punctuation, ignoring")
@@ -169,22 +164,29 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                     last_activity = time.time()  # Reset silence timer
                     
                     start_analyzer = time.perf_counter()
-                    ai_reply = await analyzer.analyze_message(
+                    ai_reply = await analyze_message(
                         text=txt,
                         tenant_id=tenant_id ,
                         language=lang,
                         intent=intent,
                         new_entities=new_entities,         # correct keyword
-                        intent_confidence=intent_confidence # correct keyword
+                        intent_confidence=intent_confidence, # correct keyword
+                        mode=mode
                     )
+                    print("ai-reply=",ai_reply)
                     elapsed_analyzer = (time.perf_counter() - start_analyzer) * 1000
                     logging.info(f"analyzer.analyze_message took {elapsed_analyzer:.2f} ms")
 
                     last_activity = time.time()
                     
                     logging.info(f"🤖 AI Reply In Dictionary : {ai_reply}")
-                    answer_text = ai_reply.get('answer', '')
-                    
+                    if isinstance(ai_reply, dict):
+                        answer_text = ai_reply.get('answer', '') or ai_reply.get("followup_reply") or ai_reply.get("reply") or ""
+                    else:
+                        # Handle string case: perhaps it's an error message or fallback
+                        answer_text = str(ai_reply)  # Or set a default like "Sorry, this feature is under development."
+                        logging.warning(f"ai_reply is not a dict: {ai_reply}")
+
                     if lang == "neutral":
                         tts_lang = 'en-IN'  # or set your preferred default language
                     else:

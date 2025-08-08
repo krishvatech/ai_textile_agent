@@ -113,7 +113,7 @@ def make_outbound_call(to_number: str, is_retry=False):
                         call_detail_url = f"https://{EXOTEL_API_KEY}:{EXOTEL_API_TOKEN}@api.exotel.com/v1/Accounts/{EXOTEL_SID}/Calls/{call_sid}.xml"
                         detail_response = requests.get(call_detail_url)
                         if detail_response.status_code == 200:
-                            logger.info(f"Detail Response: {detail_response.text}")
+                            # logger.info(f"Detail Response: {detail_response.text}")
                             detail_root = ET.fromstring(detail_response.text)
                             status_element = detail_root.find(".//Status")
                             poll_status = status_element.text if status_element is not None else "failed"
