@@ -51,7 +51,7 @@ async def detect_language(text: str,last_language: str) -> Tuple[str, float]:
             model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_tokens=150
+            max_completion_tokens=150
         )
         content = response.choices[0].message.content.strip()
         

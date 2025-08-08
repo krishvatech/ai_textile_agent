@@ -308,7 +308,7 @@ Output: {{
             model="gpt-5-mini",  # Updated model name
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_tokens=400
+            max_completion_tokens=400
         )
         
         content = response.choices[0].message.content.strip()

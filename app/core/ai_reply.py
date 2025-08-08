@@ -75,7 +75,7 @@ async def generate_product_pitch_prompt(language: str, entities: Dict[str, Any],
             {"role": "user", "content": prompt},
         ],
         temperature=0.4,
-        max_tokens=90,
+        max_completion_tokens=90,
     )
     return completion.choices[0].message.content.strip()
 
@@ -148,7 +148,7 @@ async def FollowUP_Question(
             {"role": "user", "content": prompt}
         ],
         temperature=0.3,
-        max_tokens=70
+        max_completion_tokens=70
     )
     questions = completion.choices[0].message.content.strip()
     return questions
@@ -172,7 +172,7 @@ async def generate_greeting_reply(language, session_history=None) -> str:
                 {"role": "user", "content": prompt}
             ],
             temperature=0.6,
-            max_tokens=60
+            max_completion_tokens=60
         )
         reply = completion.choices[0].message.content.strip()
         if reply:
