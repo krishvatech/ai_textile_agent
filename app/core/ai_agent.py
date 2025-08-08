@@ -1,4 +1,4 @@
-from app.core.product_search import search_products
+from app.core.product_search import pinecone_fetch_records
 from app.core.ai_reply import analyze_message,generate_greeting_reply
 from app.core.session_manager import SessionManager
 from app.core.lang_utils import detect_language
@@ -14,7 +14,7 @@ async def handle_user_message(user_id, message, tenant_id, shop_name, db, channe
         await SessionManager.clear_session(user_id)
         return reply_text, [], session
 
-    results = search_products(message, tenant_id, top_k=3)
+    results = pinecone_fetch_records(message, tenant_id)
     # Fetch products from DB (pseudo-code):
     # products = [await db.get(Product, r["product_id"]) for r in results]
     # Here, products must be dicts with name, price, color, image_url
