@@ -27,6 +27,7 @@ class SarvamSTTStreamHandler:
             SARVAM_URL,
             extra_headers={"api-subscription-key": SARVAM_KEY}
         )
+        print("✅ Connected to Sarvam WebSocket")
         logging.info("✅ Connected to Sarvam WebSocket")
         asyncio.create_task(self._receive_transcripts())
         
