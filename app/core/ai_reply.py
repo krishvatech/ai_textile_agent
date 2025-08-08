@@ -69,7 +69,7 @@ async def generate_product_pitch_prompt(language: str, entities: Dict[str, Any],
 
     client = AsyncOpenAI(api_key=api_key)
     completion = await client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model="gpt-5-mini",
         messages=[
             {"role": "system", "content": sys_msg},
             {"role": "user", "content": prompt},
@@ -142,7 +142,7 @@ async def FollowUP_Question(
 
     client = AsyncOpenAI(api_key=api_key)
     completion = await client.chat.completions.create(
-        model="gpt-4.1-mini",  # Or your available model
+        model="gpt-5-mini",  # Or your available model
         messages=[
             {"role": "system", "content": "You are an expert, concise, friendly assistant."},
             {"role": "user", "content": prompt}
@@ -166,7 +166,7 @@ async def generate_greeting_reply(language, session_history=None) -> str:
     try:
         client = AsyncOpenAI(api_key=api_key)
         completion = await client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model="gpt-5-mini",
             messages=[
                 {"role": "system", "content": "You are an expert conversation starter and friendly textile assistant."},
                 {"role": "user", "content": prompt}

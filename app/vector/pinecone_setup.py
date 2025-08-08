@@ -65,6 +65,7 @@ product_data = [
         "rental_price": 600,
         "is_rental": True,
         "available_stock": 10,
+        "type": "female",
         "image_url": "https://cdn.example.com/saree1.jpg",
         "is_active": True
     },
@@ -83,6 +84,7 @@ product_data = [
         "rental_price": None,
         "is_rental": False,
         "available_stock": 5,
+        "type": "female",
         "image_url": "https://cdn.example.com/saree2.jpg",
         "is_active": True
     },
@@ -101,6 +103,7 @@ product_data = [
         "rental_price": None,
         "is_rental": False,
         "available_stock": 20,
+        "type": "female",
         "image_url": "https://cdn.example.com/saree3.jpg",
         "is_active": True
     },
@@ -119,6 +122,7 @@ product_data = [
         "rental_price": 300,
         "is_rental": True,
         "available_stock": 12,
+        "type": "female",
         "image_url": "https://cdn.example.com/saree4.jpg",
         "is_active": True
     },
@@ -137,6 +141,7 @@ product_data = [
         "rental_price": None,
         "is_rental": False,
         "available_stock": 0,
+        "type": "female",
         "image_url": "https://cdn.example.com/saree5.jpg",
         "is_active": False
     },
@@ -156,6 +161,7 @@ product_data = [
         "rental_price": 200,
         "is_rental": True,
         "available_stock": 8,
+        "type": "female",
         "image_url": "https://cdn.example.com/dress1.jpg",
         "is_active": True
     },
@@ -174,6 +180,7 @@ product_data = [
         "rental_price": 350,
         "is_rental": True,
         "available_stock": 4,
+        "type": "female",
         "image_url": "https://cdn.example.com/dress2.jpg",
         "is_active": True
     },
@@ -192,6 +199,7 @@ product_data = [
         "rental_price": None,
         "is_rental": False,
         "available_stock": 10,
+        "type": "female",
         "image_url": "https://cdn.example.com/dress3.jpg",
         "is_active": True
     },
@@ -210,6 +218,7 @@ product_data = [
         "rental_price": 400,
         "is_rental": True,
         "available_stock": 7,
+        "type": "female",
         "image_url": "https://cdn.example.com/dress4.jpg",
         "is_active": True
     },
@@ -228,6 +237,7 @@ product_data = [
         "rental_price": None,
         "is_rental": False,
         "available_stock": 0,
+        "type": "female",
         "image_url": "https://cdn.example.com/dress5.jpg",
         "is_active": False
     },
@@ -247,6 +257,7 @@ product_data = [
         "rental_price": 140,
         "is_rental": True,
         "available_stock": 9,
+        "type": "female",
         "image_url": "https://cdn.example.com/choli1.jpg",
         "is_active": True
     },
@@ -265,6 +276,7 @@ product_data = [
         "rental_price": None,
         "is_rental": False,
         "available_stock": 6,
+        "type": "female",
         "image_url": "https://cdn.example.com/choli2.jpg",
         "is_active": True
     },
@@ -283,6 +295,7 @@ product_data = [
         "rental_price": 120,
         "is_rental": True,
         "available_stock": 14,
+        "type": "female",
         "image_url": "https://cdn.example.com/choli3.jpg",
         "is_active": True
     },
@@ -301,6 +314,7 @@ product_data = [
         "rental_price": None,
         "is_rental": False,
         "available_stock": 17,
+        "type": "female",
         "image_url": "https://cdn.example.com/choli4.jpg",
         "is_active": True
     },
@@ -319,6 +333,7 @@ product_data = [
         "rental_price": 180,
         "is_rental": True,
         "available_stock": 0,
+        "type": "female",
         "image_url": "https://cdn.example.com/choli5.jpg",
         "is_active": False
     },
@@ -338,6 +353,7 @@ product_data = [
         "rental_price": 2500,
         "is_rental": True,
         "available_stock": 2,
+        "type": "female",
         "image_url": "https://cdn.example.com/lehnga1.jpg",
         "is_active": True
     },
@@ -356,6 +372,7 @@ product_data = [
         "rental_price": 1200,
         "is_rental": True,
         "available_stock": 4,
+        "type": "female",
         "image_url": "https://cdn.example.com/lehnga2.jpg",
         "is_active": True
     },
@@ -374,6 +391,7 @@ product_data = [
         "rental_price": None,
         "is_rental": False,
         "available_stock": 7,
+        "type": "female",
         "image_url": "https://cdn.example.com/lehnga3.jpg",
         "is_active": True
     },
@@ -392,6 +410,7 @@ product_data = [
         "rental_price": 1000,
         "is_rental": True,
         "available_stock": 3,
+        "type": "female",
         "image_url": "https://cdn.example.com/lehnga4.jpg",
         "is_active": True
     },
@@ -410,6 +429,7 @@ product_data = [
         "rental_price": None,
         "is_rental": False,
         "available_stock": 5,
+        "type": "female",
         "image_url": "https://cdn.example.com/lehnga5.jpg",
         "is_active": True
     },
@@ -429,6 +449,7 @@ product_data = [
         "rental_price": None,
         "is_rental": False,
         "available_stock": 12,
+        "type": "female",
         "image_url": "https://cdn.example.com/shirt1.jpg",
         "is_active": True
     },
@@ -447,6 +468,7 @@ product_data = [
         "rental_price": 180,
         "is_rental": True,
         "available_stock": 8,
+        "type": "female",
         "image_url": "https://cdn.example.com/shirt2.jpg",
         "is_active": True
     },
@@ -465,6 +487,7 @@ product_data = [
         "rental_price": None,
         "is_rental": False,
         "available_stock": 0,
+        "type": "female",
         "image_url": "https://cdn.example.com/shirt3.jpg",
         "is_active": False
     },
@@ -483,6 +506,7 @@ product_data = [
         "rental_price": None,
         "is_rental": False,
         "available_stock": 19,
+        "type": "female",
         "image_url": "https://cdn.example.com/shirt4.jpg",
         "is_active": True
     },
@@ -501,6 +525,7 @@ product_data = [
         "rental_price": 160,
         "is_rental": True,
         "available_stock": 33,
+        "type": "female",
         "image_url": "https://cdn.example.com/shirt5.jpg",
         "is_active": True
     }
