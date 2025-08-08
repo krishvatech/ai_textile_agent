@@ -17,6 +17,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO
 )
+logging.info(f"Conversation language remains as")
 
 # Exotel Credentials from environment
 EXOTEL_SID = os.getenv("EXOTEL_SID")
@@ -158,7 +159,7 @@ async def receive_whatsapp_message(request: Request):
             mode="chat"   # Because it's WhatsApp
         )
         # select appropriate response key; fallback to something plain if unexpected
-        reply_text = reply.get("followup_reply") or reply.get("answer") or "Sorry, I could not process your request right now."
+        reply_text = reply.get("reply_text") or reply.get("answer") or "Sorry, I could not process your request right now."
     except Exception as e:
         logging.error(f"AI analyze_message failed: {e}")
         reply_text = "Sorry, our assistant is having trouble responding at the moment. We'll get back to you soon!"

@@ -5,8 +5,7 @@ from typing import Dict, Any, List, Optional
 from openai import AsyncOpenAI
 import asyncio
 import random
-from app.core.lang_utils import detect_language
-from app.core.intent_utils import detect_textile_intent_openai
+from app.core.product_search import pinecone_fetch_records
 
 load_dotenv()
 api_key = os.getenv("GPT_API_KEY")
@@ -37,9 +36,6 @@ def filter_non_empty_entities(entities: dict) -> dict:
     return {k: v for k, v in entities.items()
             if v not in [None, '', [], {}]}
 
-async def pinecone_fetch_records(entities: Dict) -> str:
-    # Replace this with your real Pinecone search logic!
-    return "Similar data from Pinecone based on collected entities: " + str(entities)
 
 async def generate_product_pitch_prompt(language: str, entities: Dict[str, Any], products: Optional[list] = None) -> str:
     """
@@ -153,6 +149,18 @@ async def FollowUP_Question(
     questions = completion.choices[0].message.content.strip()
     return questions
 
+
+def normalize_entities(entities):
+    new_entities = {}
+    for k, v in entities.items():
+        if isinstance(v, str):
+            new_entities[k] = v.lower().replace(" ", "")
+        else:
+            new_entities[k] = v
+    return new_entities
+
+
+
 async def generate_greeting_reply(language, session_history=None) -> str:
     # More concise, shop-aware greeting prompt
     prompt = (
@@ -241,8 +249,30 @@ async def analyze_message(text: str, tenant_id=None,language: str = "en-US",inte
         }
     elif intent_type == "product_search":
         filtered_entities = filter_non_empty_entities(acc_entities)
-        pinecone_data = await pinecone_fetch_records(filtered_entities)
+        filtered_entities_norm = normalize_entities(filtered_entities)
+        pinecone_data = await pinecone_fetch_records(filtered_entities_norm,tenant_id)
+        # Format product results and extra info
+        product_lines = []
+        for product in pinecone_data or []:
+            name = product.get("product_name", "Unnamed Product")
+            details = []
+            if product.get("is_rental","rentals"):
+                details.append("(Rental available)")
+            # You can add more details below for more richness:
+            # fabric = product.get("fabric")
+            # if fabric: details.append(f"Fabric: {fabric}")
+            product_lines.append(f"{name} {' '.join(details).strip()}")
+        
+        if product_lines:
+            category = filtered_entities.get("color") or filtered_entities.get("category") or "products"
+            products_text = f"Here are our {category}:\n" + "\n".join(product_lines)
+        else:
+            products_text = "Sorry, no products match your search so far."
+
+        
         followup = await FollowUP_Question(intent_type, acc_entities, language, session_history=history)
+        # Final consolidated reply string for this turn
+        reply_text = f"{products_text}\n{followup}"
         if mode == "call":
             # Generate and speak full response
             spoken_pitch = await generate_product_pitch_prompt(language, acc_entities, pinecone_data)
@@ -258,9 +288,10 @@ async def analyze_message(text: str, tenant_id=None,language: str = "en-US",inte
                 "collected_entities": acc_entities,
                 "answer": voice_response,  # For TTS in call
                 "followup_reply": followup,
+                "reply_text": reply_text
             }
         elif mode== "chat":
-            history.append({"role": "assistant", "content": followup})
+            history.append({"role": "assistant", "content": reply_text})
             session_memory[tenant_id] = history
             return {
                 "pinecone_data": pinecone_data,
@@ -270,6 +301,7 @@ async def analyze_message(text: str, tenant_id=None,language: str = "en-US",inte
                 "history": history,
                 "collected_entities": acc_entities,
                 "followup_reply": followup,
+                "reply_text": reply_text
             }
     else:
         return "<--> Upcoming Modules Are Under Development <-->"
