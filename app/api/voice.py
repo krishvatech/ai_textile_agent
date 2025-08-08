@@ -17,7 +17,7 @@ import re
 import os
 
 router = APIRouter()
-logging.basicConfig()
+logging.basicConfig(level=logging.INFO)
 logging.getLogger('sqlalchemy').setLevel(logging.ERROR)
 logging.getLogger('sqlalchemy.engine').setLevel(logging.ERROR)
 logging.getLogger("sqlalchemy.pool").setLevel(logging.ERROR)
