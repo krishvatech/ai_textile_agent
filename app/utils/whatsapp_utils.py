@@ -152,7 +152,7 @@ async def receive_whatsapp_message(request: Request):
         reply = await analyze_message(
             text=text,
             tenant_id=tenant_id,
-            language=language,
+            language=last_user_lang,
             intent=intent_type,
             new_entities=entities,
             intent_confidence=confidence,

@@ -195,7 +195,11 @@ async def generate_greeting_reply(language, session_history=None) -> str:
     ]
     return random.choice(greetings)
 
-async def analyze_message(text: str, tenant_id=None,language: str = "en-US",intent: str | None = None,new_entities: dict | None = None,intent_confidence: float = 0.0,mode: str = "call") -> Dict[str, Any]:
+
+def clean_entities_for_pinecone(entities):
+    return {k:v for k,v in entities.items() if v not in [None, '', [], {}]}
+
+async def analyze_message(text: str, tenant_id: int,language: str = "en-US",intent: str | None = None,new_entities: dict | None = None,intent_confidence: float = 0.0,mode: str = "call") -> Dict[str, Any]:
     language = language
     logging.info(f"Detected language in analyze_message: {language}")
     intent_type=intent
@@ -204,6 +208,8 @@ async def analyze_message(text: str, tenant_id=None,language: str = "en-US",inte
     logging.info(f"Detected entities in analyze_message: {entities}")
     confidence=intent_confidence
     logging.info(f"Detected confidence in analyze_message: {confidence}")
+    tenant_id=tenant_id
+    logging.info(f"Tenant id ==== {tenant_id}======")
     
     history = session_memory.get(tenant_id, [])
     acc_entities = session_entities.get(tenant_id, None)
@@ -243,14 +249,16 @@ async def analyze_message(text: str, tenant_id=None,language: str = "en-US",inte
             "input_text": text,
             "language": language,
             "intent_type": intent_type,
-            "followup_reply": reply,
+            "reply_text": reply,
             "history": history,
             "collected_entities": acc_entities
         }
     elif intent_type == "product_search":
         filtered_entities = filter_non_empty_entities(acc_entities)
         filtered_entities_norm = normalize_entities(filtered_entities)
-        pinecone_data = await pinecone_fetch_records(filtered_entities_norm,tenant_id)
+        # ADD THIS LINE:
+        filtered_entities_norm = clean_entities_for_pinecone(filtered_entities_norm)
+        pinecone_data = await pinecone_fetch_records(filtered_entities_norm, tenant_id)
         # Format product results and extra info
         product_lines = []
         for product in pinecone_data or []:
@@ -293,6 +301,9 @@ async def analyze_message(text: str, tenant_id=None,language: str = "en-US",inte
         elif mode== "chat":
             history.append({"role": "assistant", "content": reply_text})
             session_memory[tenant_id] = history
+            print("="*20)
+            print(reply_text)
+            print("="*20)
             return {
                 "pinecone_data": pinecone_data,
                 "intent_type": intent_type,

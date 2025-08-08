@@ -5,9 +5,6 @@ import logging
 import os
 from typing import Tuple
 from dotenv import load_dotenv
-
-
-
 load_dotenv()
 
 api_key = os.getenv("GPT_API_KEY")
@@ -32,8 +29,8 @@ def process_all_entities(entities: dict) -> dict:
         "quantity": None,
         "location": None,
         "occasion": None,
-        "is_rental": None,
-        "type": None    # <-- NEW FIELD
+        "is_rental": None
+        # "type": None    # <-- NEW FIELD
     }
     
     # Update with extracted entities, cleaning empty values
@@ -113,13 +110,13 @@ You are an AI assistant for a textile business in India specializing in wholesal
 - **price**: Unit price/rate per piece (NOT total amount)
 Example:
     Input: "Find me red gorgette dress with large size for rent for wedding 2 in 10000"
-    (Assume is_rental = true)
+    (Assume is_rental = 'true')
     Output: ( "price": 0, "rental_price": 10000 )
 
 - **rental_price**: Rent price/rate per peace
 Example:
     Input: "Red anarkali suit, Rs. 2500"
-    (Assume is_rental = false)
+    (Assume is_rental = 'false')
     Output: ( "price": 2500, "rental_price": 0 )
 
 
@@ -163,16 +160,16 @@ Return the closest standard occasion (wedding, party, festival, casual) if unsur
   - Gujarati: "ખરીદવું છે", " ઓર્ડર", "લૈસ", " ખરીદી"
   
   EXAMPLES:
-    "Can I get these sarees for rent?" → is_rental: true
-    "I want to buy 10 lehengas" → is_rental: false
+    "Can I get these sarees for rent?" → is_rental: 'true'
+    "I want to buy 10 lehengas" → is_rental: 'false'
     "I want dress" → is_rental:None
     "Send me your catalog" → is_rental: None
-    "કિראયે પર લોંગા?" → is_rental: true
-    "મને ઓર્ડર કરવું છે" → is_rental: false
+    "કિראયે પર લોંગા?" → is_rental: 'true'
+    "મને ઓર્ડર કરવું છે" → is_rental: 'false'
   
   Always return is_rental as one of:
-      true (for rental inquiry)
-      false (for buy/purchase inquiry)
+      'true' (for rental inquiry)
+      'false' (for buy/purchase inquiry)
       None (if cannot determine)
   
   
@@ -181,7 +178,6 @@ Return the closest standard occasion (wedding, party, festival, casual) if unsur
 
 **Entity Extraction Guidelines**:
 - **category**: Product category (Saree, Lehenga, Kurti, Suit, etc.)
--**type**: Gender/age for category: ("female" for saree, lehenga, kurti, salwar suit, etc.; "male" for kurta, sherwani, dhoti, etc.; "child" for kids categories. Return "None" if unclear.)
 - **fabric**: Fabric type (Silk, Cotton, Georgette, Chiffon, etc.)
 - **color**: Specific colors mentioned
 - **size**: Size requirements (Free Size, XL, L, etc.)
@@ -200,7 +196,6 @@ Return the closest standard occasion (wedding, party, festival, casual) if unsur
     "intent": "",
     "entities": {{
         "category": "",
-        "type": "",
         "fabric": "",
         "color": "",
         "size": "",
@@ -224,8 +219,7 @@ Output: {{
     "product": "sari",
     "color": "red",
     "price": "500",
-    "quantity": "1000",
-    "type": "female"
+    "quantity": "1000"
   }},
   "confidence": 0.90,
   "is_question": false
@@ -237,8 +231,7 @@ Output: {{
   "entities": {{
     "product": "साड़ी",
     "price": "500",
-    "quantity": "1000",
-    "type": "female"
+    "quantity": "1000"
   }},
   "confidence": 0.90,
   "is_question": false
@@ -250,8 +243,7 @@ Output: {{
   "entities": {{
     "product": "saree",
     "price": "500",
-    "quantity": "1000",
-    "type": "female"
+    "quantity": "1000"
   }},
   "confidence": 0.90,
   "is_question": false
@@ -264,7 +256,6 @@ Output: {{
     "product": "સાડી",
     "color": "red",
     "price": "₹500",
-    "type": "female",
     "quantity": "2000"
   }},
   "confidence": 0.90,
@@ -279,7 +270,6 @@ Output: {{
     "fabric": "silk",
     "price": "500",
     "quantity": "1000",
-    "type": "female",
     "color": "red"
   }},
   "confidence": 0.90,
@@ -307,7 +297,7 @@ Output: {{
         response = await client.chat.completions.create(
             model="gpt-4.1-mini",  # Updated model name
             messages=[{"role": "user", "content": prompt}],
-            temperature=1,
+            temperature=0.2,
             max_tokens=400
         )
         
