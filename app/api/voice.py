@@ -181,7 +181,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                     
                     logging.info(f"🤖 AI Reply In Dictionary : {ai_reply}")
                     if isinstance(ai_reply, dict):
-                        answer_text = ai_reply.get('answer', '') or ai_reply.get("followup_reply") or ai_reply.get("reply") or ""
+                        answer_text = ai_reply.get('answer', '') or ai_reply.get("reply_text") or ai_reply.get("reply") or ai_reply.get("followup_reply")or ""
                     else:
                         # Handle string case: perhaps it's an error message or fallback
                         answer_text = str(ai_reply)  # Or set a default like "Sorry, this feature is under development."

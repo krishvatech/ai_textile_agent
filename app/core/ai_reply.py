@@ -4,6 +4,7 @@ import logging
 from typing import Dict, Any, List, Optional
 from openai import AsyncOpenAI
 import asyncio
+from app.core.central_system_prompt import Textile_Prompt 
 import random
 from app.core.product_search import pinecone_fetch_records
 
@@ -44,34 +45,39 @@ async def generate_product_pitch_prompt(language: str, entities: Dict[str, Any],
     - entities: merged collected entities
     - products: optional list[dict] with keys like name/category/color/fabric/size/price/rental_price
     """
+    lang_root = (language or "en-IN").split("-")[0].lower()
+    lang_hint = {
+        "en": "English (India) — use English words only. No Hindi, no Hinglish.",
+        "hi": "Hindi in Devanagari script only. No English words or transliteration.",
+        "gu": "Gujarati sentences, but keep product NAMES exactly as provided (no translation or transliteration of names). No Hindi/Punjabi/English words except the product names."
+    }.get(lang_root, f"the exact locale {language}")
     sys_msg = (
         "You are a retail assistant for a textile shop. "
-        "Write a very short spoken pitch (max 2 sentences, no emojis, no numbering, no bullets). "
-        "Natural tone, suitable for voice. Do not invent facts. "
-        f"Respond EXCLUSIVELY in the language of the locale {language} (e.g., Gujarati for 'gu-IN', no mixing with Hindi or English)."
+        "Write a very short spoken pitch (max 2 sentences). Natural tone, for voice. "
+        "Mention every provided product name exactly once, without changing, translating, or transliterating it. "
+        "Do not invent facts. Obey language instructions exactly."
     )
 
     # Filter non-empty entities directly
     filtered_entities = {k: v for k, v in (entities or {}).items() if v not in [None, "", [], {}]}
 
     # Build prompt with integrated context
-    prompt = (
-        f"Reply ONLY in the exact locale given by {language} (same script, no transliteration). "
-        "If products exist, briefly pitch up to 3 options (color/fabric/category, size if present, and price or rental price); "
+    prompt = Textile_Prompt + (
+        f"Reply ONLY in the exact locale given by {lang_hint} (same script, no transliteration). "
+        "If products exist, mention all of the given product NAMES (exactly as provided); "
         "otherwise, compose a single-sku pitch from these collected entities: " + str(filtered_entities) + ". "
-        f"Products: {products[:3] if products else None}. "
-        "Keep it under ~30 words total. "
+        f"Products: {products if products else None}. "
+        "Keep it under ~60-80 words total. "
     )
 
     client = AsyncOpenAI(api_key=api_key)
     completion = await client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model="gpt-5-mini",
         messages=[
             {"role": "system", "content": sys_msg},
             {"role": "user", "content": prompt},
         ],
-        temperature=1,
-        max_tokens=90,
+        # gpt-5-mini: do not send temperature/max_tokens
     )
     return completion.choices[0].message.content.strip()
 
@@ -79,7 +85,7 @@ async def generate_product_pitch_prompt(language: str, entities: Dict[str, Any],
 async def FollowUP_Question(
     intent_type: str,
     entities: Dict[str, Any],
-    language: Optional[str] = "en",
+    language: Optional[str] = "en-IN",
     session_history: Optional[List[Dict[str, str]]] = None
 ) -> str:
     """
@@ -117,6 +123,13 @@ async def FollowUP_Question(
     missing_short = missing_sorted[:max_fields]
     merged_fields = ", ".join([field_display_names.get(f, f) for f in missing_short])
 
+    lang_root = (language or "en-IN").split("-")[0].lower()
+    lang_hint = {
+        "en": "English (India) — English only, no Hindi/Hinglish",
+        "hi": "Hindi in Devanagari script — no English/Hinglish",
+        "gu": "Gujarati script — no Hindi/English",
+    }.get(lang_root, f"the exact locale {language}")
+    
     # Recent session for context (optional, helps GPT personalize)
     session_text = ""
     if session_history:
@@ -125,29 +138,28 @@ async def FollowUP_Question(
         session_text = "Conversation so far:\n" + "\n".join(conv_lines) + "\n"
 
     # Prompt instructing GPT to only ask about these N fields
-    prompt = (
-        f"You are a friendly WhatsApp assistant for a textile and clothing shop.\n"
+    prompt = Textile_Prompt + (
+        f"You are a friendly assistant for a textile and clothing shop.\n"
         f"{session_text}"
         f"Collected details so far: { {k: v for k, v in entities.items() if v} }\n"
         f"Still missing: {merged_fields}.\n"
-        f"Ask for ONLY these {len(missing_short)} details in a single, short, conversational question, e.g., 'Want to filter by rental or fabric?' "
+        f"Ask naturally and politely for ONLY these, like 'Would you like to rent or buy? Any preferred price or fabric?'\n"
         f"Do not mention any other fields. Keep it very brief. "
         f"Reply in {language.upper()}. Only output the question."
-        f"Reply EXCLUSIVELY in the locale {language.upper()} (no mixing with other languages like Hindi). Only output the question."
+        f"Write in {lang_hint}. Output only one question."
+
     )
 
     client = AsyncOpenAI(api_key=api_key)
     completion = await client.chat.completions.create(
-        model="gpt-4.1-mini",  # Or your available model
+        model="gpt-5-mini",
         messages=[
-            {"role": "system", "content": "You are an expert, concise, friendly assistant."},
+            {"role": "system", "content": "You are an expert, concise, friendly assistant. Respect language instructions strictly."},
             {"role": "user", "content": prompt}
-        ],
-        temperature=1,
-        max_tokens=70
+        ]
+        # gpt-5-mini: don't pass temperature/max_tokens
     )
-    questions = completion.choices[0].message.content.strip()
-    return questions
+    return completion.choices[0].message.content.strip()
 
 
 def normalize_entities(entities):
@@ -159,28 +171,26 @@ def normalize_entities(entities):
             new_entities[k] = v
     return new_entities
 
-
-
-async def generate_greeting_reply(language, session_history=None) -> str:
-    # More concise, shop-aware greeting prompt
-    prompt = (
+async def generate_greeting_reply(language, session_history=None,mode: str = "call") -> str:
+    # More concise, shop-aware greeting 
+    emoji_instruction = "Do not use emojis." if mode == "call" else "Use emojis if you like."
+    prompt = Textile_Prompt + (
         f"You are a friendly WhatsApp assistant for our textile and clothing business.\n"
         f"{'Recent conversation: ' + str(session_history) if session_history else ''}\n"
         f"Greet the customer in a warm, short (1-2 sentences), conversational way in {language.upper()}. "
         f"If this is the first message, welcome them to our shop. "
-        f"If ongoing, give a friendly brief follow-up. Use emojis if you like. "
+        f"If ongoing, give a friendly brief follow-up. {emoji_instruction} "
         f"Only output the greeting, no product suggestions."
     )
     try:
         client = AsyncOpenAI(api_key=api_key)
         completion = await client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model="gpt-5-mini",
             messages=[
                 {"role": "system", "content": "You are an expert conversation starter and friendly textile assistant."},
                 {"role": "user", "content": prompt}
-            ],
-            temperature=1,
-            max_tokens=60
+            ]
+            # gpt-5-mini: don't pass temperature/max_tokens
         )
         reply = completion.choices[0].message.content.strip()
         if reply:
@@ -210,7 +220,7 @@ async def analyze_message(text: str, tenant_id: int,language: str = "en-US",inte
     logging.info(f"Detected confidence in analyze_message: {confidence}")
     tenant_id=tenant_id
     logging.info(f"Tenant id ==== {tenant_id}======")
-    
+    mode=mode
     history = session_memory.get(tenant_id, [])
     acc_entities = session_entities.get(tenant_id, None)
     last_main_intent = last_main_intent_by_session.get(tenant_id, None)
@@ -242,7 +252,7 @@ async def analyze_message(text: str, tenant_id: int,language: str = "en-US",inte
 
     # --- Respond
     if intent_type == "greeting":
-        reply = await generate_greeting_reply(language, session_history=history)
+        reply = await generate_greeting_reply(language, session_history=history,mode=mode)
         history.append({"role": "assistant", "content": reply})
         session_memory[tenant_id] = history
         return {
@@ -259,18 +269,51 @@ async def analyze_message(text: str, tenant_id: int,language: str = "en-US",inte
         # ADD THIS LINE:
         filtered_entities_norm = clean_entities_for_pinecone(filtered_entities_norm)
         pinecone_data = await pinecone_fetch_records(filtered_entities_norm, tenant_id)
-        # Format product results and extra info
+        # --- Format product results and extra info (improved) ---
         product_lines = []
-        for product in pinecone_data or []:
-            name = product.get("product_name", "Unnamed Product")
-            details = []
-            if product.get("is_rental","rentals"):
-                details.append("(Rental available)")
-            # You can add more details below for more richness:
-            # fabric = product.get("fabric")
-            # if fabric: details.append(f"Fabric: {fabric}")
-            product_lines.append(f"{name} {' '.join(details).strip()}")
-        
+        for product in (pinecone_data or []):
+            name = product.get("product_name") or "Unnamed Product"
+
+            # Treat is_rental explicitly; don't default to truthy
+            is_rental = product.get("is_rental")
+            availability = "Available For Rent" if is_rental is True else "Available For Sale"
+
+            # Optional attributes
+            fabric = (product.get("fabric") or "").strip()
+            color = (product.get("color") or "").strip()
+            size = (product.get("size") or "").strip()
+
+            # Prices
+            rental_price = product.get("rental_price")
+            price = product.get("price")
+
+            details = [availability]
+
+            # Meta details
+            meta_bits = []
+            if fabric:
+                meta_bits.append(f"{fabric}")
+            if color:
+                meta_bits.append(f"{color}")
+            if size:
+                meta_bits.append(f"{size}")
+            if meta_bits:
+                details.append(" | ".join(meta_bits))
+
+            # Pricing details (adjust currency as needed)
+            price_bits = []
+            if is_rental is True and rental_price not in [None, "", 0]:
+                price_bits.append(f"Rent: ₹{rental_price}")
+            if (is_rental is False or is_rental is None) and price not in [None, "", 0]:
+                price_bits.append(f"Price: ₹{price}")
+            if price_bits:
+                details.append(" | ".join(price_bits))
+
+            # Final formatted line
+            line = f"{name} — {' • '.join(details)}"
+            product_lines.append(line)
+
+        # Build the products text
         if product_lines:
             category = filtered_entities.get("color") or filtered_entities.get("category") or "products"
             products_text = f"Here are our {category}:\n" + "\n".join(product_lines)

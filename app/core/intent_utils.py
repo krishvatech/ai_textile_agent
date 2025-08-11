@@ -294,27 +294,25 @@ Output: {{
 """
 
     try:
-        response = await client.chat.completions.create(
-            model="gpt-4.1-mini",  # Updated model name
+        resp = await client.chat.completions.create(
+            model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=400
+            # Do not send temperature/max_tokens with gpt-5-mini
         )
-        
-        content = response.choices[0].message.content.strip()
+        content = resp.choices[0].message.content.strip()
+        # Clean possible code fences
         if content.startswith("```"):
             content = content.replace("```json", "").replace("```", "").strip()
-        
         result = json.loads(content)
-        
-        # Process all entities (including None values)
         processed_entities = process_all_entities(result.get("entities", {}))
         filtered_entities = clean_price_fields(processed_entities)
-        return result.get("intent", "other"), filtered_entities, result.get("confidence", 0.1)
-        
+        return (
+            result.get("intent", "other"),
+            filtered_entities,
+            float(result.get("confidence", 0.1))
+        )
     except Exception as e:
         logging.error(f"Intent detection failed: {e}")
-        # Return empty entity structure with all None values
         empty_entities = process_all_entities({})
         return "other", empty_entities, 0.1
 

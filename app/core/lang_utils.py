@@ -14,8 +14,8 @@ client = AsyncOpenAI(api_key=api_key)
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
-# Function to detect language using OpenAI API
-async def detect_language(text: str,last_language: str) -> Tuple[str, float]:
+# Function to detect language using GPT-5 Mini (no temperature/max_tokens params)
+async def detect_language(text: str, last_language: str) -> Tuple[str, float]:
     """
     Detect language using OpenAI API for textile bot
     Supports: Hindi, Gujarati, English (including Romanized)
@@ -43,25 +43,23 @@ async def detect_language(text: str,last_language: str) -> Tuple[str, float]:
   "confidence": <0.0-1.0>,
   "reasoning": "<brief explanation>"
 }}
-
 **Customer Message**: "{text}"
 """
     try:
-        response = await client.chat.completions.create(
-            model="gpt-4.1-mini",
+        resp = await client.chat.completions.create(
+            model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=1,
-            max_tokens=150
+            # Important: don't send temperature/max_tokens to gpt-5-mini
         )
-        content = response.choices[0].message.content.strip()
-        
-        # Clean JSON response
+        content = resp.choices[0].message.content.strip()
+        # Clean possible code fences
         if content.startswith("```"):
             content = content.replace("```json", "").replace("```", "").strip()
-        
         result = json.loads(content)
-        return result["language"], result["confidence"]
+        language = result.get("language", "en-IN")
+        confidence = float(result.get("confidence", 0.5))
+        return language, confidence
     except Exception as e:
         logging.error(f"Language detection failed: {e}")
-        return "en-IN", 0.5
-    
+        # Fall back to the last known language if available
+        return (last_language or "en-IN"), 0.5
