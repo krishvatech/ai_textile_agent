@@ -25,8 +25,6 @@ print("index=",index)
 def get_embedding(text):
     response = openai_client.embeddings.create(input=[text], model="text-embedding-3-small")
     return response.data[0].embedding
-
-
 def get_or_create_occasion_id(cursor, occasion_name):
     # Check if occasion exists
     cursor.execute("SELECT id FROM occasions WHERE name = %s", (occasion_name,))
