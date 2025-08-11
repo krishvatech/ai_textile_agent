@@ -295,7 +295,7 @@ Output: {{
 
     try:
         resp = await client.chat.completions.create(
-            model="gpt-5-mini",
+            model="gpt-4.1-mini",
             messages=[{"role": "user", "content": prompt}],
             # Do not send temperature/max_tokens with gpt-5-mini
         )
@@ -354,3 +354,4 @@ def format_entities(entities: dict) -> str:
             formatted_lines.append(f" ○ {k}: None")
     
     return "\n".join(formatted_lines)
+

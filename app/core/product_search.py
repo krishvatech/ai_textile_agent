@@ -1,134 +1,178 @@
-# import asyncio
-# from app.vector.pinecone_client import get_index
-# import openai
-# import os
-# from app.db.db_connection import get_db_connection, close_db_connection
-# from dotenv import load_dotenv
-# from app.vector.pinecone_client import get_image_index
-# from ultralytics import solutions
-# from app.core.image_clip import get_image_clip_embedding, get_text_clip_embedding
-# from app.vector.pinecone_client import get_image_index
 import os
 import asyncio
+import logging
+from functools import lru_cache
+from typing import Dict, Any, List
+import anyio
 from dotenv import load_dotenv
 from pinecone import Pinecone
 import open_clip
 import torch
-import pprint
 
 # ---------- Setup ----------
 load_dotenv()
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 TEXT_INDEX_NAME = os.getenv("PINECONE_INDEX", "textile-products")
 NAMESPACE = os.getenv("PINECONE_NAMESPACE", "default")
+
+if not PINECONE_API_KEY:
+    raise EnvironmentError("❌ PINECONE_API_KEY not set")
+
+# Pinecone client (reuse)
 pinecone = Pinecone(api_key=PINECONE_API_KEY)
+
+# Logging
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
+logger.setLevel(logging.INFO)
+
+# Device & Torch perf hints
 device = "cpu"
-model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='openai')
-tokenizer = open_clip.get_tokenizer('ViT-B-32')
+try:
+    torch.set_num_threads(min(4, (os.cpu_count() or 4)))
+except Exception:
+    pass
+
+# ---- CLIP model (init once, reuse) ----
+# Use quickgelu variant to match 'openai' weights
+model_name = "ViT-B-32-quickgelu"
+model, _, preprocess = open_clip.create_model_and_transforms(model_name, pretrained="openai")
+tokenizer = open_clip.get_tokenizer(model_name)
+model.eval()
+model = model.to(device)
+
+# Reuse index + query parameters
+PC_INDEX = pinecone.Index(TEXT_INDEX_NAME)
+TEXT_TOP_K = 5  # lower = faster; raise only if needed
 
 
-def flexible_compare(a, b):
-    # Handle booleans, numbers, strings
+def flexible_compare(a, b) -> bool:
+    """Robust equality for mixed types (bool/str/num)."""
     if isinstance(a, bool) or isinstance(b, bool):
         def to_bool(val):
             if isinstance(val, bool):
                 return val
             if isinstance(val, str):
-                return val.lower() in {"true", "yes", "1"}
+                return val.strip().lower() in {"true", "yes", "1"}
             return bool(val)
         return to_bool(a) == to_bool(b)
     return str(a) == str(b)
 
-async def pinecone_fetch_records(entities: dict, tenant_id: int):
+
+def build_metadata_filter(tenant_id: int, entities_cap: dict) -> dict:
     """
-    Capitalize all string entity values for Pinecone semantic search AND filtering.
-    Always includes product_name in the result.
+    Build a Pinecone metadata filter. Only include fields you index as exact-match metadata.
     """
-    # Normalize entity values (capitalize strings)
-    entities_cap = {
-        k: str(v).capitalize() if isinstance(v, str) else v
-        for k, v in entities.items()
-    }
+    f = {"tenant_id": {"$eq": tenant_id}}
+    for key in ("category", "size", "color", "is_rental", "type"):
+        val = entities_cap.get(key)
+        if val not in [None, "", [], {}]:
+            if isinstance(val, str):
+                f[key] = {"$eq": val}
+            elif isinstance(val, bool):
+                f[key] = {"$eq": bool(val)}
+            else:
+                f[key] = {"$eq": val}
+    return f
+
+
+@lru_cache(maxsize=512)
+def embed_text_cached(query_text: str) -> List[float]:
+    """
+    Cached CLIP text embedding (CPU).
+    Returns a plain list[float] (NOT a numpy array) for Pinecone serialization.
+    """
+    tokens = tokenizer([query_text]).to(device)
+    with torch.inference_mode():
+        feats = model.encode_text(tokens)
+        feats = feats / feats.norm(dim=-1, keepdim=True)
+    # ensure float32 and convert to Python list
+    return feats[0].cpu().numpy().astype("float32").tolist()
+
+
+async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[str, Any]]:
+    """
+    Fast product fetch:
+      - Normalizes string entities (capitalize) to match your stored metadata style
+      - Cached CLIP text embedding
+      - Single Pinecone query with include_metadata=True (no extra fetch)
+      - Server-side metadata filtering
+      - Optional local flexible filter (cheap on <=5 items)
+    """
+    # Normalize (capitalize strings if your metadata is capitalized)
+    entities_cap = {k: (str(v).capitalize() if isinstance(v, str) else v) for k, v in entities.items()}
+
+    # Build compact text query from non-empty strings
     texts = [str(v) for v in entities_cap.values() if isinstance(v, str) and v.strip()]
-    print("Semantic search embedding text:", texts)
     if not texts:
-        raise ValueError("entities must contain at least one non-empty string value for text-based search.")
+        logger.info("pinecone_fetch_records: no non-empty string fields in entities; returning [].")
+        return []
+
     query_text = " ".join(texts)
 
-    text_input = tokenizer([query_text]).to(device)
-    with torch.no_grad():
-        text_features = model.encode_text(text_input)
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-    query_vector = text_features[0].cpu().numpy().tolist()
+    # Get (cached) embedding as list[float]
+    query_vector = embed_text_cached(query_text)
 
-    index = pinecone.Index(TEXT_INDEX_NAME)
-    response = index.query(
-        vector=query_vector,
-        top_k=10,
-        namespace=NAMESPACE,
-        filter={"tenant_id": {"$eq": tenant_id}}
-    )
+    # Server-side metadata filter
+    md_filter = build_metadata_filter(tenant_id, entities_cap)
 
-    matches = []
-    ids = [m.id for m in response.matches if hasattr(m, "id")]
-    if ids:
-        details = await fetch_records_by_ids(ids)
-        for prod in details:
-            item = {"id": prod.get("id"), "score": None}
-            for m in response.matches:
-                if hasattr(m, "id") and m.id == prod["id"]:
-                    item["score"] = getattr(m, "score", None)
-                    break
-            item["product_name"] = prod.get("product_name")
-            for key in entities_cap:
-                item[key] = prod.get(key)
-            matches.append(item)
-    # Flexible filter using capitalized entities
+    # Run the query in a worker thread (Pinecone client is sync)
+    def _do_query():
+        return PC_INDEX.query(
+            vector=query_vector,          # list[float]
+            top_k=TEXT_TOP_K,
+            namespace=NAMESPACE,
+            filter=md_filter,
+            include_metadata=True,
+            include_values=False,
+        )
+
+    response = await anyio.to_thread.run_sync(_do_query)
+
+    # Build matches directly from returned metadata (single round-trip)
+    matches: List[Dict[str, Any]] = []
+    for m in getattr(response, "matches", []) or []:
+        md = getattr(m, "metadata", {}) or {}
+        item = {
+            "id": getattr(m, "id", None),
+            "score": getattr(m, "score", None),
+            "product_name": md.get("product_name"),
+        }
+        # copy only requested keys that exist in metadata
+        for key in entities_cap:
+            if key in md:
+                item[key] = md.get(key)
+        matches.append(item)
+
+    # Optional local flexible checks (cheap on <=5 results)
     filtered_matches = [
-    item for item in matches
+        item for item in matches
         if all(
-            # Only filter if the key is present in the product (not missing)
-            key in item and flexible_compare(item.get(key), value)
+            (key in item and flexible_compare(item.get(key), value))
             for key, value in entities_cap.items()
-            if value not in [None, '', [], {}]
+            if value not in [None, "", [], {}]
         )
     ]
-
-
-    filtered_matches.sort(key=lambda x: x["score"], reverse=True)
-    print("="*10)
-    print(filtered_matches)
-    print("="*10)
+    filtered_matches.sort(key=lambda x: (x["score"] is not None, x["score"]), reverse=True)
     return filtered_matches
 
-async def fetch_records_by_ids(ids, index_name=TEXT_INDEX_NAME, namespace=NAMESPACE):
-    """Fetch by ID: return metadata for each ID."""
-    index = pinecone.Index(index_name)
-    response = index.fetch(ids=ids, namespace=namespace)
-    return [
-        info.metadata | {"id": id_}
-        for id_, info in response.vectors.items()
-        if hasattr(info, "metadata") and info.metadata
-    ]
 
-# async def search_products_by_image(image_url, top_k=5, namespace=NAMESPACE):
-#     img_emb = get_image_clip_embedding(image_url)  # This will be 512-dim if using ViT-B-32
-#     index = get_image_index()
-#     print('index :', index.describe_index_stats())
-#     res = index.query(
-#         vector=img_emb,
-#         top_k=top_k,
-#         include_metadata=True,
-#         namespace=namespace
-#     )
-#     print('res..................122522', res)
-#     products = []
-#     for match in res.get("matches", []):
-#         meta = match.get("metadata", {})
-#         products.append({
-#             "id": meta.get("id", "MISSING"),
-#             "product_name": meta.get("product_name", "MISSING"),
-#             "image_url": meta.get("image_url", "MISSING"),
-#             "score": match.get("score", 0)
-#         })
-#     return products
+# --- (Optional) Legacy helper kept for compatibility; no longer used in the fast path ---
+async def fetch_records_by_ids(ids: List[str], index_name: str = TEXT_INDEX_NAME, namespace: str = NAMESPACE):
+    """
+    DEPRECATED: Not needed now that we query with include_metadata=True.
+    """
+    index = pinecone.Index(index_name)
+
+    def _do_fetch():
+        return index.fetch(ids=ids, namespace=namespace)
+
+    response = await anyio.to_thread.run_sync(_do_fetch)
+    out = []
+    for id_, info in getattr(response, "vectors", {}).items():
+        md = getattr(info, "metadata", {}) or {}
+        if md:
+            out.append(md | {"id": id_})
+    return out
+

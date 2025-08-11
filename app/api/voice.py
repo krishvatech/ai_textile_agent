@@ -131,12 +131,14 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                 txt, is_final, lang = await asyncio.wait_for(stt.get_transcript(), timeout=0.2)
                 if is_final and txt:
                     print(f"Final Transcript={txt}")
+                    print("final transcript time=",datetime.now())
                     logging.info(f"Final transcript: {txt}")
                     if re.fullmatch(r'[\W_]+', txt.strip()):
                         logging.info("Transcript only punctuation, ignoring")
                         continue
-                    start_lang = time.perf_counter()
+                    # print("calling Detect language = ",datetime.now())
                     detected_lang,_ = await detect_language(txt, last_user_lang)
+                    # print("after Detect language = ",datetime.now())
 
                     # Fix conversation language once set, but update if neutral or English greetings only
                     if current_language is None:
@@ -156,8 +158,8 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                     start_intent = time.perf_counter()
                     intent, new_entities, intent_confidence = await detect_textile_intent_openai(txt, lang)
                     elapsed_intent = (time.perf_counter() - start_intent) * 1000
-                    logging.info(f"detect_textile_intent_openai took {elapsed_intent:.2f} ms")
-                    
+                    # logging.info(f"detect_textile_intent_openai took {elapsed_intent:.2f} ms")
+                    # print(f"detect_textile_intent_openai took {elapsed_intent:.2f} ms")
                     if intent_confidence < 0.5:
                         logging.info(f"Ignoring transcript due to low intent confidence: {intent_confidence}")
                         continue  # Skip processing
@@ -175,11 +177,10 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                     )
                     print("ai-reply=",ai_reply)
                     elapsed_analyzer = (time.perf_counter() - start_analyzer) * 1000
-                    logging.info(f"analyzer.analyze_message took {elapsed_analyzer:.2f} ms")
-
+                    # logging.info(f"analyzer.analyze_message took {elapsed_analyzer:.2f} ms")
+                    print(f"analyzer.analyze_message took {elapsed_analyzer:.2f} ms")
                     last_activity = time.time()
                     
-                    logging.info(f"🤖 AI Reply In Dictionary : {ai_reply}")
                     if isinstance(ai_reply, dict):
                         answer_text = ai_reply.get('answer', '') or ai_reply.get("reply_text") or ai_reply.get("reply") or ai_reply.get("followup_reply")or ""
                     else:
@@ -191,6 +192,7 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                         tts_lang = 'en-IN'  # or set your preferred default language
                     else:
                         tts_lang = lang
+                    print("calling tts=",datetime.now())
                     audio = await synthesize_text(answer_text, language_code=tts_lang)
                     await speak_pcm(audio, websocket, stream_sid)
 
