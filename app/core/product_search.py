@@ -138,6 +138,7 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
             "id": getattr(m, "id", None),
             "score": getattr(m, "score", None),
             "product_name": md.get("product_name"),
+            "is_rental": md.get("is_rental"),
         }
         # copy only requested keys that exist in metadata
         for key in entities_cap:

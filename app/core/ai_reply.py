@@ -14,12 +14,12 @@ if not api_key:
     print("❌ Error: GPT_API_KEY not found in environment variables")
     exit(1)
 
-client = AsyncOpenAI(api_key=api_key, timeout=6.0, max_retries=1)
-
 # --- In-memory session stores
 session_memory: Dict[Any, List[Dict[str, str]]] = {}  # Conversation history
 session_entities: Dict[Any, Dict[str, Any]] = {}       # Merged entities per session
 last_main_intent_by_session: Dict[Any, str] = {}       # Remember last main intent
+
+
 
 MAIN_INTENTS = {
     "product_search", "catalog_request", "order_placement", "order_status",
@@ -39,20 +39,29 @@ def filter_non_empty_entities(entities: dict) -> dict:
 
 
 async def generate_product_pitch_prompt(language: str, entities: Dict[str, Any], products: Optional[list] = None) -> str:
+    """
+    Use GPT to produce a short, natural, TTS-friendly pitch in the caller's language.
+    - language: BCP-47 like 'gu-IN', 'hi-IN', 'kn-IN', 'en-IN'
+    - entities: merged collected entities
+    - products: optional list[dict] with keys like name/category/color/fabric/size/price/rental_price
+    """
     lang_root = (language or "en-IN").split("-")[0].lower()
     lang_hint = {
         "en": "English (India) — use English words only. No Hindi, no Hinglish.",
         "hi": "Hindi in Devanagari script only. No English words or transliteration.",
-        "gu": "Gujarati sentences in Gujarati script. Translate or transliterate product NAMES naturally into Gujarati (e.g., 'Georgette Party Saree' becomes 'જ્યોર્જેટ પાર્ટી સાડી'). No Hindi/Punjabi/English words except where necessary for clarity."
+        "gu": "Gujarati sentences, but keep product NAMES exactly as provided (no translation or transliteration of names). No Hindi/Punjabi/English words except the product names."
     }.get(lang_root, f"the exact locale {language}")
     sys_msg = (
-        "You are a retail assistant for a textile shop. Your goal is to sound like a helpful human, not a robot reading a list. "
-        "Write a very short, spoken pitch (1-2 natural sentences) for a voice assistant. "
-        "Weave the provided product names into a conversational sentence. Do not invent facts. Obey language instructions exactly."
+        "You are a retail assistant for a textile shop. "
+        "Write a very short spoken pitch (max 2 sentences). Natural tone, for voice. "
+        "Mention every provided product name exactly once, without changing, translating, or transliterating it. "
+        "Do not invent facts. Obey language instructions exactly."
     )
 
+    # Filter non-empty entities directly
     filtered_entities = {k: v for k, v in (entities or {}).items() if v not in [None, "", [], {}]}
 
+    # Build prompt with integrated context
     prompt = Textile_Prompt + (
         f"Reply ONLY in the exact locale given by {lang_hint} (same script, no transliteration). "
         "If products exist, mention all of the given product NAMES (exactly as provided); "
@@ -60,12 +69,15 @@ async def generate_product_pitch_prompt(language: str, entities: Dict[str, Any],
         f"Products: {products if products else None}. "
         "Keep it under ~60-80 words total. "
     )
+
+    client = AsyncOpenAI(api_key=api_key)
     completion = await client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model="gpt-5-mini",
         messages=[
             {"role": "system", "content": sys_msg},
             {"role": "user", "content": prompt},
         ],
+        # gpt-5-mini: do not send temperature/max_tokens
     )
     return completion.choices[0].message.content.strip()
 
@@ -127,6 +139,7 @@ async def FollowUP_Question(
 
     # Prompt instructing GPT to only ask about these N fields
     prompt = Textile_Prompt + (
+        f"You are a friendly assistant for a textile and clothing shop.\n"
         f"{session_text}"
         f"Collected details so far: { {k: v for k, v in entities.items() if v} }\n"
         f"Still missing: {merged_fields}.\n"
@@ -136,8 +149,10 @@ async def FollowUP_Question(
         f"Write in {lang_hint}. Output only one question."
 
     )
+
+    client = AsyncOpenAI(api_key=api_key)
     completion = await client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model="gpt-5-mini",
         messages=[
             {"role": "system", "content": "You are an expert, concise, friendly assistant. Respect language instructions strictly."},
             {"role": "user", "content": prompt}
@@ -160,6 +175,7 @@ async def generate_greeting_reply(language, session_history=None,mode: str = "ca
     # More concise, shop-aware greeting 
     emoji_instruction = "Do not use emojis." if mode == "call" else "Use emojis if you like."
     prompt = Textile_Prompt + (
+        f"You are a friendly WhatsApp assistant for our textile and clothing business.\n"
         f"{'Recent conversation: ' + str(session_history) if session_history else ''}\n"
         f"Greet the customer in a warm, short (1-2 sentences), conversational way in {language.upper()}. "
         f"If this is the first message, welcome them to our shop. "
@@ -167,8 +183,9 @@ async def generate_greeting_reply(language, session_history=None,mode: str = "ca
         f"Only output the greeting, no product suggestions."
     )
     try:
+        client = AsyncOpenAI(api_key=api_key)
         completion = await client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model="gpt-5-mini",
             messages=[
                 {"role": "system", "content": "You are an expert conversation starter and friendly textile assistant."},
                 {"role": "user", "content": prompt}
