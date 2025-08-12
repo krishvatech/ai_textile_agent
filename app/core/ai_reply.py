@@ -97,16 +97,14 @@ async def FollowUP_Question(
     if not missing_fields:
         return "Thank you. I have all the information I need for your request!"
 
-    # Priority for asking
     entity_priority = [
-        "is_rental", "rental_price", "price", "fabric",
+        "is_rental","occasion", "fabric",
         "size", "color", "category", "product_name",
-        "quantity", "location", "occasion", "type"
+        "quantity", "location","type","price","rental_price",
     ]
     field_display_names = {
         "is_rental": "rental",
-        "rental_price": "rental price",
-        "price": "price",
+        "occasion": "occasion",
         "fabric": "fabric",
         "size": "size",
         "color": "color",
@@ -114,8 +112,9 @@ async def FollowUP_Question(
         "product_name": "product",
         "quantity": "quantity",
         "location": "location",
-        "occasion": "occasion",
-        "type": "gender/type"
+        "type": "gender/type",
+        "price": "price",
+        "rental_price": "rental price",
     }
     # Sort and select only top 2 or 3 missing fields
     missing_sorted = sorted(missing_fields, key=lambda x: entity_priority.index(x) if x in entity_priority else 999)
