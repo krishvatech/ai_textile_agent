@@ -20,10 +20,22 @@ async def get_tenant_id_by_phone(phone_number: str, db):
     row = result.fetchone()
     return row[0] if row else None
 
+async def get_tenant_name_by_phone(phone_number: str, db):
+    """
+    Fetch tenant id by phone number from the database.
+    """
+    query = sql_text("SELECT name FROM tenants WHERE whatsapp_number = :phone AND is_active = true LIMIT 1")
+    result = await db.execute(query, {"phone": phone_number})
+    row = result.fetchone()
+    if row:
+        return row[0]
+    return None
+
 async def whatsapp_test_local(user_text: str):
     # Database lookup for tenant ID
     async for db in get_db():
         tenant_id = await get_tenant_id_by_phone(EXOPHONE, db)
+        tenant_name = await get_tenant_name_by_phone(EXOPHONE, db)
         break
 
     # Language detection
@@ -56,6 +68,7 @@ async def whatsapp_test_local(user_text: str):
         reply = await analyze_message(
             text=user_text,
             tenant_id=tenant_id,
+            tenant_name=tenant_name,
             language=last_user_lang,
             intent=intent_type,
             new_entities=entities,

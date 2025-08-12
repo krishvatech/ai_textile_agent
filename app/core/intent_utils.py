@@ -178,6 +178,10 @@ Return the closest standard occasion (wedding, party, festival, casual) if unsur
 
 **Entity Extraction Guidelines**:
 - **category**: Product category (Saree, Lehenga, Kurti, Suit, etc.)
+Input: “I need kurta” → "category": "Kurta Sets"
+Input: “kurti in peach” → "category": "Kurta Sets", "color": "peach"
+Input: “kurtasets blue M” → "category": "Kurta Sets", "color": "blue"
+Input: “sari 500 rate” → "category": "Saree"
 - **fabric**: Fabric type (Silk, Cotton, Georgette, Chiffon, etc.)
 - **color**: Specific colors mentioned
 - **size**: Size requirements (Free Size, XL, L, etc.)
@@ -354,4 +358,3 @@ def format_entities(entities: dict) -> str:
             formatted_lines.append(f" ○ {k}: None")
     
     return "\n".join(formatted_lines)
-

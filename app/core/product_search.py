@@ -4,6 +4,7 @@ import logging
 from functools import lru_cache
 from typing import Dict, Any, List
 import anyio
+import re
 from dotenv import load_dotenv
 from pinecone import Pinecone
 import open_clip
@@ -45,6 +46,39 @@ model = model.to(device)
 # Reuse index + query parameters
 PC_INDEX = pinecone.Index(TEXT_INDEX_NAME)
 TEXT_TOP_K = 5  # lower = faster; raise only if needed
+
+def smart_capitalize(text: str) -> str:
+    """Dynamic title casing:
+       - Capitalize each word
+       - Keep size tokens (xl, xxl, 3xl, etc.) fully upper
+       - Handle hyphen/ slash/ underscore separated parts
+    """
+    if not isinstance(text, str):
+        return text
+    s = re.sub(r"\s+", " ", text.strip())
+    if not s:
+        return s
+
+    SIZE_PAT = re.compile(r"^(?:\d+)?(?:(?:xxs|xs|s|m|l|xl|xxl|xxxl)|\d+xl)$", re.I)
+
+    def cap_token(tok: str) -> str:
+        # preserve all-uppercase tokens that look like sizes (xl/xxl/3xl etc.)
+        if SIZE_PAT.match(tok):
+            return tok.upper()
+
+        # recurse for compound tokens
+        for sep in ("-", "/", "_"):
+            if sep in tok:
+                return sep.join(cap_token(part) for part in tok.split(sep) if part != "")
+
+        # normal word -> first letter upper, rest lower
+        return tok[:1].upper() + tok[1:].lower() if tok else tok
+
+    return " ".join(cap_token(t) for t in s.split(" "))
+
+def normalize_category(cat: str) -> str:
+    # For now, category uses the same dynamic logic
+    return smart_capitalize(cat)
 
 
 def flexible_compare(a, b) -> bool:
@@ -101,8 +135,23 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
       - Optional local flexible filter (cheap on <=5 items)
     """
     # Normalize (capitalize strings if your metadata is capitalized)
-    entities_cap = {k: (str(v).capitalize() if isinstance(v, str) else v) for k, v in entities.items()}
+    def normalize_entities(e: dict) -> dict:
+        out = dict(e or {})
 
+        # Apply dynamic capitalization to text metadata fields
+        for key in ("category", "color", "fabric", "occasion", "type","size"):
+            if out.get(key):
+                out[key] = smart_capitalize(out[key])
+
+        # Optional: coerce is_rental to real bool if it came as string
+        if "is_rental" in out and isinstance(out["is_rental"], str):
+            out["is_rental"] = out["is_rental"].strip().lower() in {"true", "1", "yes", "y"}
+
+        # Remove empties
+        return {k: v for k, v in out.items() if v not in (None, "", [], {})}
+    entities_cap = normalize_entities(entities)
+    logger.info("normalized entities: %s", entities_cap)
+    print(entities_cap)
     # Build compact text query from non-empty strings
     texts = [str(v) for v in entities_cap.values() if isinstance(v, str) and v.strip()]
     if not texts:
@@ -113,7 +162,6 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
 
     # Get (cached) embedding as list[float]
     query_vector = embed_text_cached(query_text)
-
     # Server-side metadata filter
     md_filter = build_metadata_filter(tenant_id, entities_cap)
 
@@ -129,7 +177,7 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
         )
 
     response = await anyio.to_thread.run_sync(_do_query)
-
+    print(response)
     # Build matches directly from returned metadata (single round-trip)
     matches: List[Dict[str, Any]] = []
     for m in getattr(response, "matches", []) or []:
@@ -137,7 +185,7 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
         item = {
             "id": getattr(m, "id", None),
             "score": getattr(m, "score", None),
-            "product_name": md.get("product_name"),
+            "name": md.get("name"),
             "is_rental": md.get("is_rental"),
             "category": md.get("category"),
             "occasion": md.get("occasion"),
@@ -146,6 +194,7 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
             "size": md.get("size"),
             "variant_id": md.get("variant_id"),
             "product_id": md.get("product_id"),
+            "image_url": md.get("image_url"),
         }
         # copy only requested keys that exist in metadata
         for key in entities_cap:
@@ -183,3 +232,32 @@ async def fetch_records_by_ids(ids: List[str], index_name: str = TEXT_INDEX_NAME
         if md:
             out.append(md | {"id": id_})
     return out
+
+async def demo():
+    tenant_id = 4  # <-- change if needed
+    entities = {
+        "category": "saree",
+    }
+
+    results = await pinecone_fetch_records(entities=entities, tenant_id=tenant_id)
+
+    if not results:
+        print("No matches")
+        return
+
+    for i, it in enumerate(results, 1):
+        print(f"\n#{i}")
+        print(" id:", it.get("id"))
+        print(" score:", it.get("score"))
+        print(" product_name:", it.get("product_name"))
+        print(" is_rental:", it.get("is_rental"))
+        print(" category:", it.get("category"))
+        print(" occasion:", it.get("occasion"))
+        print(" fabric:", it.get("fabric"))
+        print(" color:", it.get("color"))
+        print(" size:", it.get("size"))
+        print(" variant_id:", it.get("variant_id"))
+        print(" product_id:", it.get("product_id"))
+
+if __name__ == "__main__":
+    asyncio.run(demo())

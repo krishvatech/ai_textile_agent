@@ -164,18 +164,34 @@ async def FollowUP_Question(
 
 def normalize_entities(entities):
     new_entities = {}
+    # Keys where we preserve spaces (add more if needed, e.g., 'size', 'occasion')
+    preserve_space_keys = ["category", "size", "occasion"]
     for k, v in entities.items():
         if isinstance(v, str):
-            new_entities[k] = v.lower().replace(" ", "")
+            if k in preserve_space_keys:
+                # Lowercase but keep spaces and trim extras
+                new_entities[k] = v.lower().strip()  # e.g., 'Kurta Sets' -> 'kurta sets'
+            else:
+                # Full normalization for other keys
+                new_entities[k] = v.lower().replace(" ", "").strip()
         else:
             new_entities[k] = v
     return new_entities
 
-async def generate_greeting_reply(language, session_history=None,mode: str = "call") -> str:
+# def normalize_entities(entities):
+#     new_entities = {}
+#     for k, v in entities.items():
+#         if isinstance(v, str):
+#             new_entities[k] = v.lower().replace(" ", "")
+#         else:
+#             new_entities[k] = v
+#     return new_entities
+
+async def generate_greeting_reply(language, tenant_name,session_history=None,mode: str = "call") -> str:
     # More concise, shop-aware greeting 
     emoji_instruction = "Do not use emojis." if mode == "call" else "Use emojis if you like."
     prompt = Textile_Prompt + (
-        f"You are a friendly WhatsApp assistant for our textile and clothing business.\n"
+        f"You are a friendly WhatsApp assistant for our {tenant_name} textile and clothing business.\n"
         f"{'Recent conversation: ' + str(session_history) if session_history else ''}\n"
         f"Greet the customer in a warm, short (1-2 sentences), conversational way in {language.upper()}. "
         f"If this is the first message, welcome them to our shop. "
@@ -209,7 +225,7 @@ async def generate_greeting_reply(language, session_history=None,mode: str = "ca
 def clean_entities_for_pinecone(entities):
     return {k:v for k,v in entities.items() if v not in [None, '', [], {}]}
 
-async def analyze_message(text: str, tenant_id: int,language: str = "en-US",intent: str | None = None,new_entities: dict | None = None,intent_confidence: float = 0.0,mode: str = "call") -> Dict[str, Any]:
+async def analyze_message(text: str, tenant_id: int,tenant_name:str,language: str = "en-US",intent: str | None = None,new_entities: dict | None = None,intent_confidence: float = 0.0,mode: str = "call") -> Dict[str, Any]:
     language = language
     logging.info(f"Detected language in analyze_message: {language}")
     intent_type=intent
@@ -220,6 +236,8 @@ async def analyze_message(text: str, tenant_id: int,language: str = "en-US",inte
     logging.info(f"Detected confidence in analyze_message: {confidence}")
     tenant_id=tenant_id
     logging.info(f"Tenant id ==== {tenant_id}======")
+    tenant_name=tenant_name
+    logging.info(f"Tenant id ==== {tenant_name}======")
     mode=mode
     history = session_memory.get(tenant_id, [])
     acc_entities = session_entities.get(tenant_id, None)
@@ -245,14 +263,14 @@ async def analyze_message(text: str, tenant_id: int,language: str = "en-US",inte
     session_entities[tenant_id] = acc_entities
 
     # === INTENT STICKY LOGIC ===
-    if intent_type in REFINEMENT_INTENTS and intent_type != "rental_inquiry" and last_main_intent:
-        intent_type = last_main_intent
+    # if intent_type in REFINEMENT_INTENTS and intent_type != "rental_inquiry" and last_main_intent:
+    #     intent_type = last_main_intent
     if intent_type in MAIN_INTENTS:
         last_main_intent_by_session[tenant_id] = intent_type
 
     # --- Respond
     if intent_type == "greeting":
-        reply = await generate_greeting_reply(language, session_history=history,mode=mode)
+        reply = await generate_greeting_reply(language,tenant_name,session_history=history,mode=mode)
         history.append({"role": "assistant", "content": reply})
         session_memory[tenant_id] = history
         return {
@@ -269,14 +287,17 @@ async def analyze_message(text: str, tenant_id: int,language: str = "en-US",inte
         # ADD THIS LINE:
         filtered_entities_norm = clean_entities_for_pinecone(filtered_entities_norm)
         pinecone_data = await pinecone_fetch_records(filtered_entities_norm, tenant_id)
+        # after you get pinecone_data
+        image_urls = [p.get("image_url") for p in (pinecone_data or []) if p.get("image_url")]
+        image_urls = image_urls[:4]  # send up to 4
         # --- Format product results and extra info (improved) ---
         product_lines = []
         for product in (pinecone_data or []):
-            name = product.get("product_name") or "Unnamed Product"
+            name = product.get("name") or "Unnamed Product"
 
             # Treat is_rental explicitly; don't default to truthy
             is_rental = product.get("is_rental")
-            availability = "Available For Rent" if is_rental is True else "Available For Sale"
+            availability = "Rent" if is_rental is True else "Sale"
 
             # Optional attributes
             fabric = (product.get("fabric") or "").strip()
@@ -301,13 +322,13 @@ async def analyze_message(text: str, tenant_id: int,language: str = "en-US",inte
                 details.append(" | ".join(meta_bits))
 
             # Pricing details (adjust currency as needed)
-            price_bits = []
-            if is_rental is True and rental_price not in [None, "", 0]:
-                price_bits.append(f"Rent: ₹{rental_price}")
-            if (is_rental is False or is_rental is None) and price not in [None, "", 0]:
-                price_bits.append(f"Price: ₹{price}")
-            if price_bits:
-                details.append(" | ".join(price_bits))
+            # price_bits = []
+            # if is_rental is True and rental_price not in [None, "", 0]:
+            #     price_bits.append(f"Rent: ₹{rental_price}")
+            # if (is_rental is False or is_rental is None) and price not in [None, "", 0]:
+            #     price_bits.append(f"Price: ₹{price}")
+            # if price_bits:
+            #     details.append(" | ".join(price_bits))
 
             # Final formatted line
             line = f"{name} — {' • '.join(details)}"
@@ -339,7 +360,8 @@ async def analyze_message(text: str, tenant_id: int,language: str = "en-US",inte
                 "collected_entities": acc_entities,
                 "answer": voice_response,  # For TTS in call
                 "followup_reply": followup,
-                "reply_text": reply_text
+                "reply_text": reply_text,
+                "media": image_urls 
             }
         elif mode== "chat":
             history.append({"role": "assistant", "content": reply_text})
@@ -355,9 +377,10 @@ async def analyze_message(text: str, tenant_id: int,language: str = "en-US",inte
                 "history": history,
                 "collected_entities": acc_entities,
                 "followup_reply": followup,
-                "reply_text": reply_text
+                "reply_text": reply_text,
+                "media": image_urls 
             }
-    elif intent_type in ("availability_check", "rental_inquiry"):
+    elif intent_type in ("availability_check"):
         # --- Extract/resolve dates ---
         start_date = None
         end_date = None

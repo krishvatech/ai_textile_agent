@@ -43,6 +43,17 @@ async def get_tenant_id_by_phone(phone_number: str, db):
         return row[0]
     return None
 
+async def get_tenant_name_by_phone(phone_number: str, db):
+    """
+    Fetch tenant id by phone number from the database.
+    """
+    query = text("SELECT name FROM tenants WHERE whatsapp_number = :phone AND is_active = true LIMIT 1")
+    result = await db.execute(query, {"phone": phone_number})
+    row = result.fetchone()
+    if row:
+        return row[0]
+    return None
+
 async def send_whatsapp_reply(to: str, body: str):
     """
     Send WhatsApp reply using Exotel API.
@@ -115,6 +126,7 @@ async def receive_whatsapp_message(request: Request):
     # Database look-up for tenant ID
     async for db in get_db():
         tenant_id = await get_tenant_id_by_phone(EXOPHONE, db)
+        tenant_name = await get_tenant_name_by_phone(EXOPHONE, db)
         break  # Only use one DB session
 
     # Run language/entity detection (awaiting)
@@ -152,6 +164,7 @@ async def receive_whatsapp_message(request: Request):
         reply = await analyze_message(
             text=text,
             tenant_id=tenant_id,
+            tenant_name=tenant_name,
             language=last_user_lang,
             intent=intent_type,
             new_entities=entities,
@@ -160,12 +173,15 @@ async def receive_whatsapp_message(request: Request):
         )
         # select appropriate response key; fallback to something plain if unexpected
         reply_text = reply.get("reply_text") or reply.get("answer") or "Sorry, I could not process your request right now."
+        folloup_text = reply.get("followup_reply")
     except Exception as e:
         logging.error(f"AI analyze_message failed: {e}")
         reply_text = "Sorry, our assistant is having trouble responding at the moment. We'll get back to you soon!"
 
 
     await send_whatsapp_reply(to=from_number, body=reply_text)
+    if folloup_text is not None:
+        await send_whatsapp_reply(to=from_number,body=folloup_text)
     return {"status": "received"}
 
 # For optional local testing
