@@ -13,7 +13,7 @@ import torch
 load_dotenv()
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 TEXT_INDEX_NAME = os.getenv("PINECONE_INDEX", "textile-products")
-NAMESPACE = os.getenv("PINECONE_NAMESPACE", "default")
+NAMESPACE = os.getenv("PINECONE_NAMESPACE")
 
 if not PINECONE_API_KEY:
     raise EnvironmentError("❌ PINECONE_API_KEY not set")

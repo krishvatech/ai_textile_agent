@@ -21,6 +21,7 @@ openai_client = OpenAI(api_key=api_key)
 
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 INDEX_NAME = os.getenv("PINECONE_INDEX", "textile-products")
+PINECONE_NAMESPACE = os.getenv("PINECONE_NAMESPACE")
 
 client = Pinecone(api_key=PINECONE_API_KEY)
 index = client.Index(INDEX_NAME)
@@ -85,7 +86,7 @@ def upsert_variant_to_pinecone(variant_data):
         "is_active": variant_data.get("is_active", True)
     }
 
-    index.upsert([(str(variant_data["variant_id"]), embedding, metadata)])
+    index.upsert([(str(variant_data["variant_id"]), embedding, metadata)],namespace=PINECONE_NAMESPACE)
 
 def insert_product_and_variants():
     conn, cursor = get_db_connection()
