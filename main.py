@@ -10,11 +10,13 @@ app.include_router(api_router)
 @app.on_event("startup")
 async def _startup():
     # init + ping once at boot
-    await init_redis()
+    # await init_redis()
+    pass
 
 @app.on_event("shutdown")
 async def _shutdown():
-    await close_redis()
+    # await close_redis()
+    pass
 
 @app.get("/health/redis")
 async def redis_healthcheck():
