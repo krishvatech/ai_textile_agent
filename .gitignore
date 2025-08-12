@@ -17,7 +17,7 @@ Pipfile.lock
 poetry.lock
 
 .env
-
+test.py
 # Virtualenv
 .venv/
 env/

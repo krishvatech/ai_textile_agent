@@ -3,9 +3,11 @@ import os
 import logging
 from typing import Dict, Any, List, Optional
 from openai import AsyncOpenAI
-import asyncio
+from dateutil import parser as dateparser
 from app.core.central_system_prompt import Textile_Prompt 
 import random
+from app.db.session import SessionLocal
+from app.core.rental_utils import is_variant_available
 from app.core.product_search import pinecone_fetch_records
 
 load_dotenv()
@@ -18,8 +20,6 @@ if not api_key:
 session_memory: Dict[Any, List[Dict[str, str]]] = {}  # Conversation history
 session_entities: Dict[Any, Dict[str, Any]] = {}       # Merged entities per session
 last_main_intent_by_session: Dict[Any, str] = {}       # Remember last main intent
-
-
 
 MAIN_INTENTS = {
     "product_search", "catalog_request", "order_placement", "order_status",
@@ -214,7 +214,7 @@ async def analyze_message(text: str, tenant_id: int,language: str = "en-US",inte
     logging.info(f"Detected language in analyze_message: {language}")
     intent_type=intent
     logging.info(f"Detected intent_type in analyze_message: {intent_type}")
-    entities=new_entities
+    entities=new_entities or {}
     logging.info(f"Detected entities in analyze_message: {entities}")
     confidence=intent_confidence
     logging.info(f"Detected confidence in analyze_message: {confidence}")
@@ -245,8 +245,8 @@ async def analyze_message(text: str, tenant_id: int,language: str = "en-US",inte
     session_entities[tenant_id] = acc_entities
 
     # === INTENT STICKY LOGIC ===
-    if intent_type in REFINEMENT_INTENTS and last_main_intent:
-        intent_type = last_main_intent  # Don't leave main flow for refinement
+    if intent_type in REFINEMENT_INTENTS and intent_type != "rental_inquiry" and last_main_intent:
+        intent_type = last_main_intent
     if intent_type in MAIN_INTENTS:
         last_main_intent_by_session[tenant_id] = intent_type
 
@@ -357,5 +357,88 @@ async def analyze_message(text: str, tenant_id: int,language: str = "en-US",inte
                 "followup_reply": followup,
                 "reply_text": reply_text
             }
+    elif intent_type in ("availability_check", "rental_inquiry"):
+        # --- Extract/resolve dates ---
+        start_date = None
+        end_date = None
+
+        # 1) Try entities first
+        if acc_entities.get("start_date"):
+            try:
+                start_date = dateparser.parse(str(acc_entities["start_date"]), dayfirst=True, fuzzy=True).date()
+            except Exception:
+                start_date = None
+        if acc_entities.get("end_date"):
+            try:
+                end_date = dateparser.parse(str(acc_entities["end_date"]), dayfirst=True, fuzzy=True).date()
+            except Exception:
+                end_date = None
+
+        # 2) Fallback: parse from the user text like "I want rent on 15 August"
+        if start_date is None:
+            try:
+                start_date = dateparser.parse(text, dayfirst=True, fuzzy=True).date()
+            except Exception:
+                reply = "❌ I couldn't understand the date. Please say a date like '15 August'."
+                history.append({"role": "assistant", "content": reply})
+                session_memory[tenant_id] = history
+                return {
+                    "input_text": text,
+                    "language": language,
+                    "intent_type": intent_type,
+                    "reply_text": reply,
+                    "history": history,
+                    "collected_entities": acc_entities
+                }
+
+        if end_date is None:
+            end_date = start_date  # default to single-day rental
+
+        # --- Figure out the variant id from collected entities ---
+        variant_id = acc_entities.get("product_variant_id")
+
+        if not variant_id:
+            reply = "❌ Please select a specific product variant first."
+            history.append({"role": "assistant", "content": reply})
+            session_memory[tenant_id] = history
+            return {
+                "input_text": text,
+                "language": language,
+                "intent_type": intent_type,
+                "reply_text": reply,
+                "history": history,
+                "collected_entities": acc_entities
+            }
+
+        # --- Check availability in DB ---
+        async with SessionLocal() as db:
+            available = await is_variant_available(db, int(variant_id), start_date, end_date)
+
+        if available:
+            reply = f"✅ Available on {start_date.strftime('%d %b %Y')}."
+        else:
+            reply = f"❌ Not available on {start_date.strftime('%d %b %Y')}."
+
+        # Return in the same shape as your other branches
+        history.append({"role": "assistant", "content": reply})
+        session_memory[tenant_id] = history
+        if mode == "call":
+            return {
+                "input_text": text,
+                "language": language,
+                "intent_type": intent_type,
+                "answer": reply,  # TTS uses this
+                "history": history,
+                "collected_entities": acc_entities
+            }
+        else:
+            return {
+                "input_text": text,
+                "language": language,
+                "intent_type": intent_type,
+                "reply_text": reply,
+                "history": history,
+                "collected_entities": acc_entities
+            } 
     else:
         return "<--> Upcoming Modules Are Under Development <-->"
