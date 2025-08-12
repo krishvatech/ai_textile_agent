@@ -30,30 +30,23 @@ class RentalStatus(str, enum.Enum):
     cancelled = "cancelled"
 
 # -------- HELPERS --------
-
-def parse_date_input(s: str) -> date:
-    s = (s or "").strip()
-    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
-        try:
-            return datetime.strptime(s, fmt).date()
-        except ValueError:
-            continue
-    raise ValueError(f"Invalid date: {s}. Use YYYY-MM-DD or DD-MM-YYYY.")
-
 def get_embedding(text):
     text = (text or "").strip()
     vec = _st_model.encode(text, normalize_embeddings=True)
     return vec.tolist()
 
 def get_or_create_occasion_id(cursor, occasion_name):
-    cursor.execute("SELECT id FROM occasions WHERE name = %s", (occasion_name,))
+    # Skip blank occasion string
+    if not occasion_name or not occasion_name.strip():
+        return None
+    cursor.execute("SELECT id FROM occasions WHERE name = %s", (occasion_name.strip(),))
     result = cursor.fetchone()
     if result:
         return result[0]
     else:
         cursor.execute(
             "INSERT INTO occasions (name) VALUES (%s) RETURNING id",
-            (occasion_name,)
+            (occasion_name.strip(),)
         )
         occasion_id = cursor.fetchone()[0]
         print(f"Inserted new occasion '{occasion_name}' with ID {occasion_id}")
@@ -92,7 +85,6 @@ def upsert_variant_to_pinecone(variant_data):
         "is_active": bool(variant_data.get("is_active", True)),
         "description": variant_data.get("description", ""),
     }
-    # Pinecone does not accept None values in metadata
     metadata = {k: v for k, v in metadata.items() if v is not None}
 
     pinecone_index.upsert(
@@ -102,10 +94,8 @@ def upsert_variant_to_pinecone(variant_data):
     print(f"Upserted variant {variant_data['variant_id']} to Pinecone.")
 
 # -------- MAIN BATCH LOGIC --------
-
 def auto_batch_insert_from_file(file_path):
     conn, cursor = get_db_connection()
-    # NEW: load from a JSON array
     with open(file_path, 'r', encoding='utf-8') as f:
         try:
             data = json.load(f)
@@ -169,11 +159,18 @@ def auto_batch_insert_from_file(file_path):
             is_active = not variant.get('extra', {}).get('is_demo', False)
             is_rental = variant.get('is_rental', False)
             image_url = variant.get('image_url')
-            occasions = variant.get('occasion', [])  # Array or str
-            if isinstance(occasions, list):
-                occasion_str = ' '.join(occasions)
+
+            # Occasion field fix: always treat as list
+            occasions_raw = variant.get('occasion', [])
+            if isinstance(occasions_raw, list):
+                occasions = [o for o in occasions_raw if o]    # remove blanks/nulls
+            elif isinstance(occasions_raw, str) and occasions_raw.strip():
+                occasions = [occasions_raw.strip()]
             else:
-                occasion_str = str(occasions)
+                occasions = []
+            print(f"Processing occasions for variant '{variant.get('product_name')}': {occasions}")
+
+            occasion_str = ' '.join(occasions) if occasions else ''
 
             try:
                 price_float = float(price)
@@ -198,25 +195,19 @@ def auto_batch_insert_from_file(file_path):
             variant_id = cursor.fetchone()[0]
             print(f"Inserted variant '{variant.get('product_name')}' ({variant.get('color')}, {variant.get('size')}) with ID: {variant_id}")
 
-            # Link occasions
-            if isinstance(occasions, list):
-                for occ in occasions:
-                    occasion_id = get_or_create_occasion_id(cursor, occ)
-                    cursor.execute(
-                        '''INSERT INTO product_variant_occasions (variant_id, occasion_id)
-                        VALUES (%s, %s)''',
-                        (variant_id, occasion_id)
-                    )
-                    print(f"Linked variant {variant_id} to occasion '{occ}' (ID {occasion_id})")
-            elif occasions:
-                # handle single string occasion
-                occasion_id = get_or_create_occasion_id(cursor, occasions)
+            # LINK OCCASIONS
+            for occ in occasions:
+                if not occ: continue  # Skip blank values
+                occasion_id = get_or_create_occasion_id(cursor, occ)
+                if not occasion_id:
+                    print(f"Skipped blank/invalid occasion for: {occ}")
+                    continue
                 cursor.execute(
                     '''INSERT INTO product_variant_occasions (variant_id, occasion_id)
                     VALUES (%s, %s)''',
                     (variant_id, occasion_id)
                 )
-                print(f"Linked variant {variant_id} to occasion '{occasions}' (ID {occasion_id})")
+                print(f"Linked variant {variant_id} to occasion '{occ}' (ID {occasion_id})")
 
             # Upsert to Pinecone
             variant_data = {
@@ -249,5 +240,5 @@ def auto_batch_insert_from_file(file_path):
         close_db_connection(conn, cursor)
 
 if __name__ == '__main__':
-    # Update file path as needed
+    # Replace path as needed
     auto_batch_insert_from_file('app/tests/csvjson.json')
