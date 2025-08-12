@@ -1,9 +1,10 @@
-from datetime import datetime
+from datetime import datetime,date
 from app.db.db_connection import get_db_connection, close_db_connection
 import psycopg2  # if your get_db_connection uses psycopg2, else import your DB lib
 from openai import OpenAI
 from pinecone import Pinecone, ServerlessSpec
 import os
+from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 import enum
 
@@ -13,6 +14,8 @@ class RentalStatus(str, enum.Enum):
     cancelled = "cancelled"
 load_dotenv()
 
+_st_model = SentenceTransformer("clip-ViT-B-32")
+
 api_key = os.getenv("GPT_API_KEY")
 openai_client = OpenAI(api_key=api_key)
 
@@ -21,11 +24,22 @@ INDEX_NAME = os.getenv("PINECONE_INDEX", "textile-products")
 
 client = Pinecone(api_key=PINECONE_API_KEY)
 index = client.Index(INDEX_NAME)
+
+def parse_date_input(s: str) -> date:
+    s = (s or "").strip()
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    raise ValueError(f"Invalid date: {s}. Use YYYY-MM-DD or DD-MM-YYYY.")
+
 print("index=",index)
 def get_embedding(text):
-    response = openai_client.embeddings.create(input=[text], model="ViT-B-32 ")
-    return response.data[0].embedding
-
+    text = (text or "").strip()
+    # CLIP is good for short text like product names/attributes; it truncates long text (~77 tokens).
+    vec = _st_model.encode(text, normalize_embeddings=True)  # returns np.array shape (512,)
+    return vec.tolist()
 
 def get_or_create_occasion_id(cursor, occasion_name):
     # Check if occasion exists
@@ -165,13 +179,21 @@ def insert_product_and_variants():
             add_rentals = 'y'
             while add_rentals.lower() == 'y':
                 rental_start_date_str = input("Rental start date (YYYY-MM-DD): ").strip()
-                rental_end_date_str = input("Rental end date (YYYY-MM-DD): ").strip()
-                rental_price_str = input("Rental price (optional, press enter to use variant rental price): ").strip()
+                rental_end_date_str   = input("Rental end date (YYYY-MM-DD): ").strip()
+                rental_price_str      = input("Rental price (optional, press enter to use variant rental price): ").strip()
+
+                # Parse to real dates; accepts YYYY-MM-DD or DD-MM-YYYY (and slashes)
+                rental_start_date = parse_date_input(rental_start_date_str)
+                rental_end_date   = parse_date_input(rental_end_date_str)
+
+                if rental_end_date < rental_start_date:
+                    raise ValueError("End date cannot be before start date.")
+
+                # Use provided rental price or fallback to variant’s rental_price
                 rental_price = float(rental_price_str) if rental_price_str else variant_data["rental_price"]
 
-                status = RentalStatus.active.value  # or 'booked' or your logic
-
-                now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                status = RentalStatus.active.value
+                now_dt = datetime.now()  # psycopg2 handles datetime objects directly
 
                 insert_rental_query = '''
                 INSERT INTO rentals (
@@ -182,13 +204,14 @@ def insert_product_and_variants():
 
                 cursor.execute(insert_rental_query, (
                     variant_id,
-                    rental_start_date_str,
-                    rental_end_date_str,
+                    rental_start_date,   # date object
+                    rental_end_date,     # date object
                     rental_price,
                     status,
-                    now_str,
-                    now_str
+                    now_dt,              # datetime object
+                    now_dt
                 ))
+
                 rental_id = cursor.fetchone()[0]
                 conn.commit()
                 print(f"Inserted rental availability record with ID: {rental_id}")
