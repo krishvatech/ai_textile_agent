@@ -295,6 +295,17 @@ Output: {{
   "confidence": 0.90,
   "is_question": true
 }}
+**IMPORTANT INTENT RULES**:
+- If the last known intent was "product_search" and the new message adds details (color, size, fabric, rental, price, quantity, etc.), keep intent as "product_search" instead of switching.
+- If the message mentions rental terms, set "is_rental" to true and still keep intent as "product_search" unless the message clearly asks about stock availability for specific dates.
+- Only change intent to "availability_check" if ALL these are true:
+  1. is_rental = true
+  2. product_variant_id is known
+  3. start_date (and optionally end_date) is provided or can be parsed from the message.
+- If the last intent was "greeting" and the new message contains a product request, change to "product_search".
+**Your Task**: Analyze the customer message and identify their business intent...
+(rest of your original prompt stays here)
+
 """
 
     try:
