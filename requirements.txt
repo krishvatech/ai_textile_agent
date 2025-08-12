@@ -8,7 +8,6 @@ alembic
 pgvector
 twilio
 celery
-redis
 rapidfuzz
 openai==1.98.0
 pandas
