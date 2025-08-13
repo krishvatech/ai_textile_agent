@@ -296,13 +296,19 @@ Output: {{
   "is_question": true
 }}
 **IMPORTANT INTENT RULES**:
-- If the last known intent was "product_search" and the new message adds details (color, size, fabric, rental, price, quantity, etc.), keep intent as "product_search" instead of switching.
-- If the message mentions rental terms, set "is_rental" to true and still keep intent as "product_search" unless the message clearly asks about stock availability for specific dates.
+- ALWAYS check the **Previous Conversation Context** first.
+- If the last intent was "product_search", KEEP it as "product_search" unless the search is complete. "Complete" means:
+  - All key entities (category, fabric, color, size, occasion, is_rental) are filled (not None) based on prior entities + current message.
+  - OR the user explicitly shifts (e.g., says "place order", "check availability", or asks about delivery/payment).
+- If the new message adds details (color, size, fabric, rental, price, quantity, etc.) to an ongoing "product_search", merge them into entities but do NOT switch intent.
+- If the message mentions rental terms, set "is_rental" to true and keep intent as "product_search" unless it meets criteria for "availability_check".
 - Only change intent to "availability_check" if ALL these are true:
   1. is_rental = true
-  2. product_variant_id is known
+  2. product_variant_id is known (from prior entities or message)
   3. start_date (and optionally end_date) is provided or can be parsed from the message.
 - If the last intent was "greeting" and the new message contains a product request, change to "product_search".
+- For any intent, update entities by merging with prior entities (fill in None values where possible).
+
 **Your Task**: Analyze the customer message and identify their business intent...
 (rest of your original prompt stays here)
 
