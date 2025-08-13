@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 api_key = os.getenv("GPT_API_KEY")
+gpt_model=os.getenv("GPT_MODEL")
 client = AsyncOpenAI(api_key=api_key)
 
 # Configure logging
@@ -47,7 +48,7 @@ async def detect_language(text: str, last_language: str) -> Tuple[str, float]:
 """
     try:
         resp = await client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model=gpt_model,
             messages=[{"role": "user", "content": prompt}],
             # Important: don't send temperature/max_tokens to gpt-5-mini
         )

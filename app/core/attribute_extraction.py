@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 client = OpenAI(api_key=os.getenv("GPT_API_KEY"))
+gpt_model = os.getenv("GPT_MODEL")
 
 def extract_dynamic_attributes(txt):
     """
@@ -19,7 +20,7 @@ def extract_dynamic_attributes(txt):
     try:
         # Send the request to OpenAI API (GPT-3 or GPT-4)
         response = client.chat.completions.create(
-            model="gpt-4.1-mini",  # Use GPT-4 or another compatible model
+            model=gpt_model,  # Use GPT-4 or another compatible model
             messages=[
                 {"role": "system", "content": "You are an assistant that extracts colors and fabrics from sentences."},
                 {"role": "user", "content": prompt}

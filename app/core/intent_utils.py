@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 api_key = os.getenv("GPT_API_KEY")
+gpt_model = os.getenv("GPT_MODEL")
 if not api_key:
     print("❌ Error: GPT_API_KEY not found in environment variables")
     exit(1)
@@ -333,9 +334,9 @@ Output: {{
 """
     try:
         resp = await client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model=gpt_model,
             messages=[{"role": "user", "content": prompt}],
-            # Do not send temperature/max_tokens with gpt-5-mini
+            # Do not send temperature/max_tokens with gpt_model
         )
         content = resp.choices[0].message.content.strip()
         # Clean possible code fences

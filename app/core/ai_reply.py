@@ -15,6 +15,7 @@ from typing import Optional
 
 load_dotenv()
 api_key = os.getenv("GPT_API_KEY")
+gpt_model = os.getenv("GPT_MODEL")
 if not api_key:
     print("❌ Error: GPT_API_KEY not found in environment variables")
     exit(1)
@@ -81,12 +82,12 @@ async def generate_product_pitch_prompt(language: str, entities: Dict[str, Any],
 
     client = AsyncOpenAI(api_key=api_key)
     completion = await client.chat.completions.create(
-        model="gpt-5-mini",
+        model=gpt_model,
         messages=[
             {"role": "system", "content": sys_msg},
             {"role": "user", "content": prompt},
         ],
-        # gpt-5-mini: do not send temperature/max_tokens
+        # gpt_model: do not send temperature/max_tokens
     )
     return completion.choices[0].message.content.strip()
 
@@ -176,12 +177,12 @@ async def FollowUP_Question(
 
     client = AsyncOpenAI(api_key=api_key)
     completion = await client.chat.completions.create(
-        model="gpt-5-mini",
+        model=gpt_model,
         messages=[
             {"role": "system", "content": "You are an expert, concise, friendly assistant. Respect language instructions strictly."},
             {"role": "user", "content": prompt}
         ]
-        # gpt-5-mini: don't pass temperature/max_tokens
+        # gpt_model: don't pass temperature/max_tokens
     )
     return completion.choices[0].message.content.strip()
 
@@ -283,12 +284,12 @@ async def generate_greeting_reply(language, tenant_name,session_history=None,mod
     try:
         client = AsyncOpenAI(api_key=api_key)
         completion = await client.chat.completions.create(
-            model="gpt-5-mini",
+            model=gpt_model,
             messages=[
                 {"role": "system", "content": "You are an expert conversation starter and friendly textile assistant."},
                 {"role": "user", "content": prompt}
             ]
-            # gpt-5-mini: don't pass temperature/max_tokens
+            # gpt_model: don't pass temperature/max_tokens
         )
         reply = completion.choices[0].message.content.strip()
         if reply:
@@ -316,7 +317,7 @@ async def llm_route_other(
     history: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """
-    Uses gpt-5-mini (JSON mode) to:
+    Uses gpt_model (JSON mode) to:
       - understand user's message + recent history + collected entities
       - (optionally) show a short help menu using live categories
       - produce a final reply (≤ ~80 words) with at most ONE follow-up question
@@ -374,7 +375,7 @@ async def llm_route_other(
     try:
         client = AsyncOpenAI(api_key=api_key)
         completion = await client.chat.completions.create(
-            model="gpt-5-mini",
+            model=gpt_model,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": sys_msg},
