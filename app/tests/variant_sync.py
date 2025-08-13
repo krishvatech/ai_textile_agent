@@ -36,7 +36,7 @@ def update_all_tables(
         cursor.execute("SELECT product_id FROM product_variants WHERE id = %s", (variant_id,))
         result = cursor.fetchone()
         if not result:
-            print("❌ Variant not found.")
+            print(f"❌ Variant {variant_id} not found.")
             return
         product_id = result[0]
 
@@ -63,7 +63,7 @@ def update_all_tables(
 
         conn.commit()
 
-        # --- Pinecone metadata update (only metadata, not embedding!) ---
+        # --- Pinecone metadata update (only metadata!) ---
         new_metadata = {}
         new_metadata.update(product_updates)
         new_metadata.update(variant_updates)
@@ -75,21 +75,23 @@ def update_all_tables(
         # Metadata-only update (embedding/vector nahi chahiye)
         try:
             pinecone_index.update(id=str(variant_id), set_metadata=new_metadata, namespace=PINECONE_NAMESPACE)
-            print("\n✅ All tables and Pinecone metadata successfully updated!")
+            print(f"\n✅ Variant {variant_id} — all tables and Pinecone metadata successfully updated!")
         except Exception as e:
-            print(f"Error updating Pinecone metadata: {e}")
+            print(f"Error updating Pinecone metadata for Variant {variant_id}: {e}")
 
     except Exception as e:
         conn.rollback()
-        print(f"Error: {e}")
+        print(f"Error for Variant {variant_id}: {e}")
     finally:
         close_db_connection(conn, cursor)
 
 if __name__ == '__main__':
-    try:
-        variant_id = int(input("Variant ID dijiye (e.g. 14): ").strip())
-    except ValueError:
-        print("❌ Galat ID format! Integer dijiye.")
+    # Multiple variant ID input
+    raw_input = input("Multiple Variant IDs dijiye (comma or space separated, e.g. 14,15,21): ").strip()
+    ids = [x.strip() for x in raw_input.replace(',', ' ').split() if x.strip().isdigit()]
+    variant_ids = [int(x) for x in ids]
+    if not variant_ids:
+        print("❌ Koi valid variant ID nahi diya.")
         exit(1)
 
     # PRODUCT TABLE FIELDS
@@ -111,14 +113,13 @@ if __name__ == '__main__':
         "is_rental"
     ]
 
-    print("\n--- Products table fields (blank to skip) ---")
+    print("\n--- Fields update karne ke liye value daalein (ye values sab variants par lagu hongi). Blank to skip ---")
     product_updates = {}
     for field in product_fields:
         user_in = input(f"{field}: ").strip()
         if user_in != "":
             product_updates[field] = user_in
 
-    print("\n--- Product_variants table fields (blank to skip) ---")
     variant_updates = {}
     for field in variant_fields:
         user_in = input(f"{field}: ").strip()
@@ -141,9 +142,11 @@ if __name__ == '__main__':
 
     occasion_name = input("\nOccasion (e.g. Party/Wedding, blank to skip): ").strip()
 
-    update_all_tables(
-        variant_id=variant_id,
-        product_updates=product_updates,
-        variant_updates=variant_updates,
-        occasion_name=occasion_name
-    )
+    for variant_id in variant_ids:
+        print(f"\n--- Updating Variant ID: {variant_id} ---")
+        update_all_tables(
+            variant_id=variant_id,
+            product_updates=product_updates,
+            variant_updates=variant_updates,
+            occasion_name=occasion_name
+        )
