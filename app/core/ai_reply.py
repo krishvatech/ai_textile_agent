@@ -183,6 +183,54 @@ def normalize_entities(entities):
             new_entities[k] = v
     return new_entities
 
+# --- helper: collapse variants so every product appears once ---
+def dedupe_products(pinecone_data):
+    grouped = {}
+    for p in (pinecone_data or []):
+        # Prefer a stable product id; fall back to name+tenant+rent/sale
+        key = (
+            p.get("product_id")
+            or p.get("id")
+            or ((p.get("name") or p.get("product_name") or "").strip().lower(),
+                p.get("tenant_id"),
+                p.get("is_rental"))
+        )
+        if not key:
+            continue
+
+        g = grouped.setdefault(key, {
+            "base": p.copy(),
+            "colors": set(),
+            "sizes": set(),
+            "images": set(),
+            "min_price": None,
+            "min_rent": None,
+        })
+
+        if p.get("color"): g["colors"].add(str(p["color"]).strip())
+        if p.get("size"):  g["sizes"].add(str(p["size"]).strip())
+        if p.get("image_url"): g["images"].add(p["image_url"])
+
+        price = p.get("price")
+        if isinstance(price, (int, float)):
+            g["min_price"] = price if g["min_price"] is None else min(g["min_price"], price)
+
+        rprice = p.get("rental_price")
+        if isinstance(rprice, (int, float)):
+            g["min_rent"] = rprice if g["min_rent"] is None else min(g["min_rent"], rprice)
+
+    out = []
+    for g in grouped.values():
+        base = g["base"]
+        base["available_colors"] = sorted(c for c in g["colors"] if c)
+        base["available_sizes"]  = sorted(s for s in g["sizes"] if s)
+        base["image_urls"] = list(g["images"])
+        if g["min_price"] is not None: base["price"] = g["min_price"]
+        if g["min_rent"]  is not None: base["rental_price"] = g["min_rent"]
+        out.append(base)
+    return out
+
+
 # def normalize_entities(entities):
 #     new_entities = {}
 #     for k, v in entities.items():
@@ -292,52 +340,41 @@ async def analyze_message(text: str, tenant_id: int,tenant_name:str,language: st
         # ADD THIS LINE:
         filtered_entities_norm = clean_entities_for_pinecone(filtered_entities_norm)
         pinecone_data = await pinecone_fetch_records(filtered_entities_norm, tenant_id)
-        # after you get pinecone_data
-        image_urls = [p.get("image_url") for p in (pinecone_data or []) if p.get("image_url")]
-        image_urls = image_urls[:4]  # send up to 4
+        # NEW: collapse variants -> one entry per product
+        pinecone_data = dedupe_products(pinecone_data)
+        # NEW: collect unique images (max 4)
+        seen = set()
+        image_urls = []
+        for p in (pinecone_data or []):
+            for u in (p.get("image_urls") or []):
+                if u and u not in seen:
+                    seen.add(u)
+                    image_urls.append(u)
+        image_urls = image_urls[:4]
         # --- Format product results and extra info (improved) ---
         product_lines = []
         for product in (pinecone_data or []):
-            name = product.get("name") or "Unnamed Product"
+            name = product.get("name") or product.get("product_name") or "Unnamed Product"
 
-            # Treat is_rental explicitly; don't default to truthy
             is_rental = product.get("is_rental")
             availability = "Rent" if is_rental is True else "Sale"
 
-            # Optional attributes
             fabric = (product.get("fabric") or "").strip()
-            color = (product.get("color") or "").strip()
-            size = (product.get("size") or "").strip()
-
-            # Prices
-            rental_price = product.get("rental_price")
-            price = product.get("price")
+            colors = product.get("available_colors") or []
+            sizes  = product.get("available_sizes") or []
 
             details = [availability]
 
-            # Meta details
             meta_bits = []
-            if fabric:
-                meta_bits.append(f"{fabric}")
-            if color:
-                meta_bits.append(f"{color}")
-            if size:
-                meta_bits.append(f"{size}")
+            if fabric: meta_bits.append(f"{fabric}")
+            if colors: meta_bits.append("Colors: " + ", ".join(colors))
+            if sizes:  meta_bits.append("Sizes: " + ", ".join(sizes))
             if meta_bits:
                 details.append(" | ".join(meta_bits))
 
-            # Pricing details (adjust currency as needed)
-            # price_bits = []
-            # if is_rental is True and rental_price not in [None, "", 0]:
-            #     price_bits.append(f"Rent: ₹{rental_price}")
-            # if (is_rental is False or is_rental is None) and price not in [None, "", 0]:
-            #     price_bits.append(f"Price: ₹{price}")
-            # if price_bits:
-            #     details.append(" | ".join(price_bits))
-
-            # Final formatted line
             line = f"{name} — {' • '.join(details)}"
             product_lines.append(line)
+
 
         # Build the products text
         if product_lines:
