@@ -162,7 +162,7 @@ async def receive_whatsapp_message(request: Request):
             tenant_name = await get_tenant_name_by_phone(EXOPHONE, db) or "Your Shop"
 
             try:
-                reply = await analyze_message(
+                raw_reply = await analyze_message(
                     text=text,
                     tenant_id=tenant_id,
                     tenant_name=tenant_name,
@@ -174,9 +174,10 @@ async def receive_whatsapp_message(request: Request):
                 )
                 print('reply..................................!')
                 print(reply)
-                reply_dict = reply if isinstance(reply, dict) else {"reply_text": str(reply)}
-                reply_text    = reply_dict.get("reply_text") or reply_dict.get("answer") \
-                    or "Sorry, I could not process your request right now."
+                reply = raw_reply if isinstance(raw_reply, dict) else {"reply_text": str(raw_reply)}
+
+                reply_text    = reply.get("reply_text") or reply.get("answer") \
+                                or "Sorry, I could not process your request right now."
                 followup_text = reply.get("followup_reply")
                 media_urls    = reply.get("media") or []
             except Exception:
