@@ -107,9 +107,9 @@ async def receive_whatsapp_message(request: Request):
         return {"status": "missing_sid"}
 
     # Deduplication: Only process each incoming_message SID once
-    if sid in processed_message_sids:
-        logging.info(f"Duplicate incoming_message SID {sid} ignored")
-        return {"status": f"duplicate_{sid}"}
+    # if sid in processed_message_sids:
+    #     logging.info(f"Duplicate incoming_message SID {sid} ignored")
+    #     return {"status": f"duplicate_{sid}"}
     processed_message_sids.add(sid)
 
     from_number = message.get("from", "")
