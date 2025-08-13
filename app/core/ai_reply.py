@@ -332,6 +332,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
 
     session_entities[tenant_id] = acc_entities
 
+    print('intent_type...................', intent_type)
     # === INTENT STICKY LOGIC ===
     # if intent_type in REFINEMENT_INTENTS and intent_type != "rental_inquiry" and last_main_intent:
     #     intent_type = last_main_intent
