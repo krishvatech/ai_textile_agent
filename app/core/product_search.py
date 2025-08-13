@@ -226,7 +226,7 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
             if key in md:
                 item[key] = md.get(key)
         matches.append(item)
-    SCORE_THRESHOLD = 0.65
+    SCORE_THRESHOLD = 0.45
     # Optional local flexible checks (cheap on <=5 results)
     filtered_matches = [
         item for item in matches
