@@ -156,19 +156,27 @@ async def receive_whatsapp_message(request: Request):
                 detected = await detect_language(text, "en-IN")
                 current_language = detected[0] if isinstance(detected, tuple) else detected
             except Exception:
-                logging.exception("Language detection failed; defaulting to en")
-                current_language = "en"
+                logging.exception("Language detection failed; defaulting to en-US")
+                current_language = "en-US"
+
+            tenant_name = await get_tenant_name_by_phone(EXOPHONE, db) or "Your Shop"
 
             try:
                 reply = await analyze_message(
                     text=text,
                     tenant_id=tenant_id,
+                    tenant_name=tenant_name,
                     language=current_language,
-                    mode="chat",
+                    intent=None,
+                    new_entities=None,
+                    intent_confidence=0.0,
+                    mode="chat",   # important for WhatsApp
                 )
-                reply_text = reply.get("reply_text") or reply.get("answer") or \
-                            "Sorry, I could not process your request right now."
+
+                reply_text   = reply.get("reply_text") or reply.get("answer") \
+                   or "Sorry, I could not process your request right now."
                 followup_text = reply.get("followup_reply")
+                media_urls    = reply.get("media") or []
             except Exception:
                 logging.exception("AI analyze_message failed")
                 reply_text, followup_text = (
