@@ -10,6 +10,8 @@ from sqlalchemy import text as sql_text  # Import if not already present
 from app.db.session import SessionLocal
 from app.core.rental_utils import is_variant_available
 from app.core.product_search import pinecone_fetch_records
+import json
+from typing import Optional
 
 load_dotenv()
 api_key = os.getenv("GPT_API_KEY")
@@ -184,6 +186,16 @@ async def FollowUP_Question(
     return completion.choices[0].message.content.strip()
 
 
+# NEW: language/script instruction for the LLM
+def _lang_hint(language: Optional[str]) -> str:
+    lr = (language or "en-IN").split("-")[0].lower()
+    if lr == "hi":
+        return "Reply in Hindi using Devanagari script only. No English/Hinglish."
+    if lr == "gu":
+        return "Reply in Gujarati script only. Keep product NAMES exactly as provided (no translation or transliteration). No Hindi/English."
+    return "Reply in English (India). English only — no Hinglish."
+
+
 def normalize_entities(entities):
     new_entities = {}
     # Keys where we preserve spaces (add more if needed, e.g., 'size', 'occasion')
@@ -295,6 +307,97 @@ async def generate_greeting_reply(language, tenant_name,session_history=None,mod
 def clean_entities_for_pinecone(entities):
     return {k:v for k,v in entities.items() if v not in [None, '', [], {}]}
 
+# NEW: LLM-driven router for 'other'
+async def llm_route_other(
+    text: str,
+    language: Optional[str],
+    tenant_id: int,
+    acc_entities: Dict[str, Any],
+    history: Optional[List[Dict[str, str]]] = None,
+) -> Dict[str, Any]:
+    """
+    Uses gpt-5-mini (JSON mode) to:
+      - understand user's message + recent history + collected entities
+      - (optionally) show a short help menu using live categories
+      - produce a final reply (≤ ~80 words) with at most ONE follow-up question
+    Returns:
+      { action: 'smalltalk'|'help'|'followup'|'handoff'|'unknown',
+        reply: str,
+        ask_fields: list[str] (≤3),
+        confidence: float }
+    """
+    # 1) Pull live categories (helps the model craft a helpful 'help' reply)
+    categories: List[str] = []
+    try:
+        async with SessionLocal() as db:
+            result = await db.execute(
+                sql_text("SELECT DISTINCT category FROM public.products WHERE tenant_id = :tid"),
+                {"tid": tenant_id}
+            )
+            categories = [row[0] for row in result.fetchall() if row[0]]
+    except Exception as e:
+        logging.warning(f"Category fetch failed: {e}")
+
+    recent_history = (history or [])[-6:]
+
+    sys_msg = (
+        "You are a warm, concise shop assistant for an Indian textile store (retail + wholesale + rentals).\n"
+        "RULES:\n"
+        "• Follow the locale instruction exactly (script + no transliteration).\n"
+        "• Ask at most ONE follow-up question.\n"
+        "• Never invent stock, sizes, fabrics, colors, prices, dates, or offers.\n"
+        "• If you mention product NAMES, keep them EXACTLY as provided (no translation/transliteration).\n"
+        "• Keep replies short and natural for WhatsApp/voice (≤ ~80 words).\n"
+        "• If user asks for a human or seems upset, choose action='handoff' and write a polite line.\n"
+    )
+
+    user_payload = {
+        "locale_instruction": _lang_hint(language),
+        "business_prompt": Textile_Prompt,  # your global policy block
+        "user_message": text,
+        "entities_collected": {k: v for k, v in (acc_entities or {}).items() if v not in [None, "", [], {}]},
+        "recent_history": recent_history,
+        "categories": categories[:12],
+        "allowed_actions": ["smalltalk","help","followup","handoff","unknown"],
+        "allowed_followup_fields": [
+            "is_rental","occasion","fabric","size","color","category",
+            "product_name","quantity","location","type","price","rental_price"
+        ],
+        "output_contract": {
+            "action": "one of allowed_actions",
+            "reply": "final user-facing text in the correct language, one question max",
+            "ask_fields": "<=3 field names from allowed_followup_fields (or empty)",
+            "confidence": "float 0..1"
+        }
+    }
+
+    try:
+        client = AsyncOpenAI(api_key=api_key)
+        completion = await client.chat.completions.create(
+            model="gpt-5-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": sys_msg},
+                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}
+            ],
+        )
+        data = json.loads(completion.choices[0].message.content)
+    except Exception as e:
+        logging.warning(f"LLM router JSON parse/error: {e}")
+        # Safe language-aware help fallback
+        lr = (language or "en-IN").split("-")[0].lower()
+        fallback = render_categories_reply(lr, categories or ["Sarees","Kurta Sets","Lehengas","Blouses","Gowns"])
+        return {"action": "help", "reply": fallback, "ask_fields": [], "confidence": 0.4}
+
+    # Defaults + clamps
+    data.setdefault("action", "unknown")
+    data.setdefault("reply", "")
+    data.setdefault("ask_fields", [])
+    data.setdefault("confidence", 0.6)
+    if isinstance(data.get("ask_fields"), list) and len(data["ask_fields"]) > 3:
+        data["ask_fields"] = data["ask_fields"][:3]
+
+    return data
 
 async def analyze_message(text: str, tenant_id: int, tenant_name: str, language: str = "en-US", intent: str | None = None, new_entities: dict | None = None, intent_confidence: float = 0.0, mode: str = "call") -> Dict[str, Any]:
     language = language
@@ -402,7 +505,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
 
         followup = await FollowUP_Question(intent_type, acc_entities, language, session_history=history)
         # Final consolidated reply string for this turn
-        reply_text = f"{products_text}"  # CHANGED: Added followup to reply_text for consistency
+        reply_text = f"{products_text}\n\n{followup}"  # CHANGED: Added followup to reply_text for consistency
         if mode == "call":
             # Generate and speak full response
             spoken_pitch = await generate_product_pitch_prompt(language, acc_entities, pinecone_data)
@@ -569,7 +672,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
 
         if mode == "call":
             return {
-                "input_text": sql_text,          # rename from `text` to avoid shadowing
+                "input_text": text,          # rename from `text` to avoid shadowing
                 "language": language,
                 "intent_type": intent_type,
                 "answer": reply,
@@ -578,7 +681,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
             }
         else:
             return {
-                "input_text": sql_text,
+                "input_text": text,
                 "language": language,
                 "intent_type": intent_type,
                 "reply_text": reply,
@@ -586,7 +689,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
                 "collected_entities": acc_entities
             }
     elif intent_type == "fabric_inquiry":
-    # --- language setup ---
+        # --- language setup ---
         lang_root = (language or "en-IN").split("-")[0].lower()
 
         def render_fabrics_reply(lang: str, fabrics: list[str]) -> str:
@@ -681,6 +784,71 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
                 "history": history,
                 "collected_entities": acc_entities
             }        
-    
-    else:
-        return Textile_Prompt
+    elif intent_type == "other" or intent_type is None:  # NEW
+        routed = await llm_route_other(text, language, tenant_id, acc_entities, history)
+        # Simple language-aware fallback if router returned empty reply
+        if not routed.get("reply"):
+            if (language or "").lower().startswith("hi"):
+                reply = "मैं आपकी कैसे मदद कर सकता/सकती हूँ — किराये या खरीद?"
+            elif (language or "").lower().startswith("gu"):
+                reply = "હું કેવી રીતે મદદ કરી શકું — ભાડે કે ખરીદી?"
+            else:
+                reply = "How can I help you today — rental or purchase?"
+        else:
+            reply = routed["reply"]
+
+        history.append({"role": "assistant", "content": reply})
+        session_memory[tenant_id] = history
+
+        if mode == "call":
+            return {
+                "input_text": text,
+                "language": language,
+                "intent_type": "other",
+                "answer": reply,   # TTS payload
+                "history": history,
+                "collected_entities": acc_entities,
+                "router": routed
+            }
+        else:
+            return {
+                "input_text": text,
+                "language": language,
+                "intent_type": "other",
+                "reply_text": reply,
+                "history": history,
+                "collected_entities": acc_entities,
+                "router": routed
+            }
+    else:  # NEW final fallback → behave like 'other'
+        routed = await llm_route_other(text, language, tenant_id, acc_entities, history)
+        reply = routed.get("reply") or (
+            "How can I help you today — rental or purchase?"
+            if (language or "").startswith("en") else
+            ("मैं आपकी कैसे मदद कर सकता/सकती हूँ — किराये या खरीद?" if (language or "").startswith("hi")
+             else "હું કેવી રીતે મદદ કરી શકું — ભાડે કે ખરીદી?")
+        )
+        history.append({"role": "assistant", "content": reply})
+        session_memory[tenant_id] = history
+
+        if mode == "call":
+            return {
+                "input_text": text,
+                "language": language,
+                "intent_type": intent_type or "other",
+                "answer": reply,
+                "history": history,
+                "collected_entities": acc_entities,
+                "router": routed
+            }
+        else:
+            return {
+                "input_text": text,
+                "language": language,
+                "intent_type": intent_type or "other",
+                "reply_text": reply,
+                "history": history,
+                "collected_entities": acc_entities,
+                "router": routed
+            }
+
