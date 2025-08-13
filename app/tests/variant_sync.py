@@ -1,11 +1,11 @@
-# variant_sync.py
+# ---------- IMPORTS, CONFIG, ETC. ----------
 
 from app.db.db_connection import get_db_connection, close_db_connection
 from pinecone import Pinecone
 import os
 from dotenv import load_dotenv
 
-# --- LOAD ENVIRONMENT VARIABLES ---
+# --- ENVIRONMENT VARIABLES ---
 load_dotenv()
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_INDEX = os.getenv("PINECONE_INDEX", "textile-products")
@@ -32,7 +32,7 @@ def update_all_tables(
 ):
     conn, cursor = get_db_connection()
     try:
-        # Get product_id from variant
+        # --- PRODUCT ID fetch ---
         cursor.execute("SELECT product_id FROM product_variants WHERE id = %s", (variant_id,))
         result = cursor.fetchone()
         if not result:
@@ -52,7 +52,7 @@ def update_all_tables(
             query = f"UPDATE product_variants SET {set_clause} WHERE id = %s"
             cursor.execute(query, list(variant_updates.values()) + [variant_id])
 
-        # --- OCCASION Mapping ---
+        # --- OCCASION MAPPING ---
         if occasion_name and occasion_name.strip():
             occasion_id = get_or_create_occasion_id(cursor, occasion_name)
             cursor.execute("DELETE FROM product_variant_occasions WHERE variant_id = %s", (variant_id,))
@@ -63,16 +63,13 @@ def update_all_tables(
 
         conn.commit()
 
-        # --- Pinecone metadata update (only metadata!) ---
+        # --- Pinecone metadata update (only metadata) ---
         new_metadata = {}
         new_metadata.update(product_updates)
         new_metadata.update(variant_updates)
         if occasion_name and occasion_name.strip():
             new_metadata['occasion'] = occasion_name.strip()
-        # Remove None values
         new_metadata = {k: v for k, v in new_metadata.items() if v is not None}
-
-        # Metadata-only update (embedding/vector nahi chahiye)
         try:
             pinecone_index.update(id=str(variant_id), set_metadata=new_metadata, namespace=PINECONE_NAMESPACE)
             print(f"\n✅ Variant {variant_id} — all tables and Pinecone metadata successfully updated!")
@@ -94,13 +91,14 @@ if __name__ == '__main__':
         print("❌ Koi valid variant ID nahi diya.")
         exit(1)
 
-    # PRODUCT TABLE FIELDS
+    # --- PRODUCT TABLE FIELDS ---
     product_fields = [
         "name",
         "description",
         "category",
         "type"
     ]
+    # --- VARIANT TABLE FIELDS (NEWLY ADDED: product_url) ---
     variant_fields = [
         "color",
         "size",
@@ -110,7 +108,8 @@ if __name__ == '__main__':
         "available_stock",
         "image_url",
         "is_active",
-        "is_rental"
+        "is_rental",
+        "product_url"     # ⭐️ <-- Add this field for update/support
     ]
 
     print("\n--- Fields update karne ke liye value daalein (ye values sab variants par lagu hongi). Blank to skip ---")
