@@ -92,6 +92,7 @@ async def receive_whatsapp_message(request: Request):
     Handle incoming WhatsApp messages and DLR/webhook events from Exotel.
     Only process 'incoming_message' events and reply only ONCE per message SID.
     """
+    global processed_message_sids
     data = await request.json()
     logging.info(f"Full incoming payload: {data}")
 
