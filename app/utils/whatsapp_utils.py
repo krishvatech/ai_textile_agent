@@ -85,7 +85,7 @@ async def send_whatsapp_reply(to: str, body: str):
         response = await client.post(url, json=payload, headers=headers)
         logging.info(f"Exotel API Response: {response.status_code} {response.text}")
 
-@router.post("/whatsapp")
+@router.post("/")
 async def receive_whatsapp_message(request: Request):
     """
     Handle incoming WhatsApp messages and DLR/webhook events from Exotel.
