@@ -173,7 +173,7 @@ async def receive_whatsapp_message(request: Request):
                     mode="chat",   # important for WhatsApp
                 )
                 print('reply..................................!')
-                print(reply)
+                print(raw_reply)
                 reply = raw_reply if isinstance(raw_reply, dict) else {"reply_text": str(raw_reply)}
 
                 reply_text    = reply.get("reply_text") or reply.get("answer") \
