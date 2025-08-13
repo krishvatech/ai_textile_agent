@@ -160,6 +160,7 @@ async def receive_whatsapp_message(request: Request):
                 current_language = "en-US"
 
             tenant_name = await get_tenant_name_by_phone(EXOPHONE, db) or "Your Shop"
+            intent_type, entities, confidence = await detect_textile_intent_openai(text, current_language)
 
             try:
                 raw_reply = await analyze_message(
@@ -167,9 +168,9 @@ async def receive_whatsapp_message(request: Request):
                     tenant_id=tenant_id,
                     tenant_name=tenant_name,
                     language=current_language,
-                    intent=None,
-                    new_entities=None,
-                    intent_confidence=0.0,
+                    intent=intent_type,
+                    new_entities=entities,
+                    intent_confidence=confidence,
                     mode="chat",   # important for WhatsApp
                 )
                 print('reply..................................!')
