@@ -45,7 +45,7 @@ model = model.to(device)
 
 # Reuse index + query parameters
 PC_INDEX = pinecone.Index(TEXT_INDEX_NAME)
-TEXT_TOP_K = 5  # lower = faster; raise only if needed
+TEXT_TOP_K = 50  # lower = faster; raise only if needed
 
 def smart_capitalize(text: str) -> str:
     """Dynamic title casing:

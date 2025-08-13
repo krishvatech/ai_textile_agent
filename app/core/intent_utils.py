@@ -56,8 +56,23 @@ You are an AI assistant for a textile business in India specializing in wholesal
 **Your Task**: Analyze the customer message and identify their business intent.
 
 **Textile Business Intents**:
- **asking_inquiry** - User asking for products like "I want saree" or "which products do you have or "I want to Purchase Something" or " i want to buy something for upcoming any festival"releted this."
-1. **product_search** - Looking for clothes (saree, lehenga, kurti, suit, etc.)
+-Do NOT use if a category is extracted/detected (e.g., "I want saree") or if responding to a bot question—switch to "product_search" instead."I Want on wedding on Rent or Size or fabric or Price" releted then product search
+Example:Bot: Here are our Sarees...
+User: I want for wedding → product_search (occasion filter applied to previous product list)
+Bot: What's the occasion?
+User: any occasion→ product_search (occasion filter to prior context)
+User: Which products do you have? → asking_inquiry (no prior category, no refinement)
+User: rent → product_search (rental filter without full category but in context)
+User: any size → product_search (rental filter without full category but in context)
+User: any fabric → product_search (rental filter without full category but in context)
+User: any color → product_search (rental filter without full category but in context)
+
+
+-If the user’s reply directly answers a bot’s filtering question (about rent/buy, occasion, size, fabric, price, color) and there is existing product context → intent = product_search.
+
+**asking_inquiry** - Standalone general asks for products without prior context, specific category, or details, like "which products do you have" or "I want to buy something for festival". 
+
+1. **product_search** - Looking for clothes (saree, lehenga, kurti, suit, etc.), including when a category is explicitly mentioned (e.g., "I want kurta") or refinements to prior messages/context (e.g., adding "for wedding" or "on rent" after a product list or bot question).
 2. **price_inquiry** - Asking about price, cost, budget
 3. **color_preference** - Mentioning specific colors
 4. **size_query** - Size, measurement, fitting questions
@@ -70,7 +85,7 @@ You are an AI assistant for a textile business in India specializing in wholesal
 11. **delivery_inquiry** - Delivery time, location, charges
 12. **payment_query** - Payment methods, EMI, refund
 13. **discount_inquiry** - Offers, deals, discounts
-14. **rental_inquiry** - Rental services, rental price
+14. **rental_inquiry** - Rental services, rental price; use this if the user specifies rental in an ongoing product context (e.g., "i want on rent" after a saree list) and the message focuses on rental specifics like price or availability—otherwise, keep as "product_search" with merged entities.
 15. **greeting** - Hello, hi, namaste
 16. **complaint** - Problems, issues, returns
 18. **other** - Anything else
@@ -150,7 +165,7 @@ Return the closest standard occasion (wedding, party, festival, casual) if unsur
 - **quantity**: Number of pieces desired
 - **location**: Delivery location if mentioned
 
-- **is_rental**: Recognize rental-related words
+- **is_rental**: Recognize rental-related words ONLY from explicit mentions. DO NOT assume 'false' (buy) for general interest queries like "I want to know about saree" or "Tell me about products"—these must be None unless buy/rent is specified.
   - English: "for rent," "on rent," "rental," "rented," "rent price," "renting," "rent available"
   - Hindi: "किराए पर," "किराया," "रेंटल," "उधार पर," "भाड़ा"
   - Gujarati: "કિરાયે પર," "દાડા પર," "ભાડે," "રેન્ટ માટે"
@@ -167,11 +182,12 @@ Return the closest standard occasion (wedding, party, festival, casual) if unsur
     "Send me your catalog" → is_rental: None
     "કિראયે પર લોંગા?" → is_rental: 'true'
     "મને ઓર્ડર કરવું છે" → is_rental: 'false'
+     "I want to know about saree" → is_rental: None  
   
   Always return is_rental as one of:
-      'true' (for rental inquiry)
-      'false' (for buy/purchase inquiry)
-      None (if cannot determine)
+      ''true' (for rental inquiry, based on explicit rental words)
+    'false' (for buy/purchase inquiry, based on explicit buy words)
+    None (DEFAULT if cannot determine—do not auto-set to 'false' for neutral messages)
   
   
 **Customer Message**: "{text}"
@@ -297,24 +313,24 @@ Output: {{
   "is_question": true
 }}
 **IMPORTANT INTENT RULES**:
-- ALWAYS check the **Previous Conversation Context** first.
+- ALWAYS check the **Previous Conversation Context** first, including the bot's last message and any prior entities. Merge entities aggressively to avoid resets (e.g., carry over 'category' from recent product lists unless explicitly changed).
+- For any intent, update entities by merging with prior entities (fill in None values where possible). For example, if the bot recently listed or asked about a specific category (e.g., "Saree"), set 'category' to that value unless overridden.
+- If a specific category is detected in entities or context (e.g., 'category': 'Saree' from prior), prioritize "product_search" over "asking_inquiry" and use it to advance—do NOT reset to broad inquiry.
+- If the message combines product and detail (e.g., "kurta for wedding" or "Kurta Sets for wedding"), treat it as a single "product_search" refinement: extract and merge all entities (e.g., 'category': 'Kurta Sets', 'occasion': 'wedding') without splitting into separate intents.
 - If the last intent was "product_search", KEEP it as "product_search" unless the search is complete. "Complete" means:
   - All key entities (category, fabric, color, size, occasion, is_rental) are filled (not None) based on prior entities + current message.
   - OR the user explicitly shifts (e.g., says "place order", "check availability", or asks about delivery/payment).
-- If the new message adds details (color, size, fabric, rental, price, quantity, etc.) to an ongoing "product_search", merge them into entities but do NOT switch intent.
-- If the message mentions rental terms, set "is_rental" to true and keep intent as "product_search" unless it meets criteria for "availability_check".
+- If the new message adds details (color, size, fabric, rental, price, quantity, occasion, etc.) to an ongoing "product_search", merge them into entities but do NOT switch intent.
+- If the message mentions rental terms, set "is_rental" to 'true' and keep intent as "product_search" unless it meets criteria for "availability_check" or "rental_inquiry".
+- If the message directly responds to a rent/buy or occasion/date question (e.g., "What’s the occasion or date you need the saree for?" with "i want for wedding"), merge entities from context (e.g., 'category': 'Saree', 'occasion': 'wedding') and set intent to "product_search". Do NOT classify as "asking_inquiry" or reset entities.
 - Only change intent to "availability_check" if ALL these are true:
-  1. is_rental = true
+  1. is_rental = 'true'
   2. product_variant_id is known (from prior entities or message)
   3. start_date (and optionally end_date) is provided or can be parsed from the message.
 - If the last intent was "greeting" and the new message contains a product request, change to "product_search".
-- For any intent, update entities by merging with prior entities (fill in None values where possible).
-
-**Your Task**: Analyze the customer message and identify their business intent...
-(rest of your original prompt stays here)
-
+- Prioritize "product_search" over "asking_inquiry" in ongoing conversations where products have already been mentioned or listed. Only use "asking_inquiry" for initial, broad asks without context or detected category/details.
+- For is_rental, preserve 'None' from prior entities unless the current message provides explicit rental or buy words. Do not infer 'false' from product interest alone—use 'None' as the default for neutral messages.
 """
-
     try:
         resp = await client.chat.completions.create(
             model="gpt-4.1-mini",
