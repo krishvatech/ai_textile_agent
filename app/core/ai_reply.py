@@ -44,6 +44,54 @@ def filter_non_empty_entities(entities: dict) -> dict:
     return {k: v for k, v in entities.items()
             if v not in [None, '', [], {}]}
 
+def _build_dynamic_heading(e: dict) -> str:
+    """
+    Headings built only from collected entities so far.
+    Examples:
+      - 'Here are saree:'
+      - 'Here are rental saree:'
+      - 'Here are rental saree in red:'
+      - 'Here are rental saree in red with silk:'
+    """
+    e = {k: v for k, v in (e or {}).items() if v not in [None, "", [], {}]}
+
+    # base parts
+    parts = []
+    if e.get("is_rental") is True:
+        parts.append("rental")
+    elif e.get("is_rental") is False:
+        parts.append("sale")
+
+    if e.get("category"):
+        parts.append(str(e["category"]).strip())
+
+    base = " ".join(parts) if parts else "products"
+
+    # suffix like "in red" + "with silk" + "size M"
+    suffix = []
+    if e.get("color"):
+        suffix.append(f"in {e['color']}")
+    if e.get("fabric"):
+        suffix.append(f"with {e['fabric']}")
+    if e.get("size"):
+        suffix.append(f"size {e['size']}")
+
+    tail = (" " + " ".join(suffix)) if suffix else ""
+    return f"Here are {base}{tail}:"
+
+def _build_item_tags(product: dict, collected: dict) -> str:
+    """
+    Per-line tags using ONLY collected entities so far,
+    but always include [rent]/[sale] from the product itself.
+    """
+    tags = []
+    tags.append("rent" if product.get("is_rental") else "sale")  # always show
+    for k in ("color", "fabric", "size"):
+        val = collected.get(k)
+        if val not in [None, "", [], {}]:
+            tags.append(str(val).strip())
+    return " ".join(f"[{t}]" for t in tags)
+
 
 async def generate_product_pitch_prompt(language: str, entities: Dict[str, Any], products: Optional[list] = None) -> str:
     """
@@ -457,56 +505,45 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
             "collected_entities": acc_entities
         }
     elif intent_type == "product_search":
+        # 1) Collect and normalize entities for Pinecone filtering
         filtered_entities = filter_non_empty_entities(acc_entities)
         filtered_entities_norm = normalize_entities(filtered_entities)
-        # ADD THIS LINE:
         filtered_entities_norm = clean_entities_for_pinecone(filtered_entities_norm)
+
+        # 2) Fetch + dedupe products
         pinecone_data = await pinecone_fetch_records(filtered_entities_norm, tenant_id)
-        # NEW: collapse variants -> one entry per product
         pinecone_data = dedupe_products(pinecone_data)
-        # NEW: collect unique images (max 4)
-        seen = set()
-        image_urls = []
+
+        # 3) (Optional) collect a few unique images
+        seen, image_urls = set(), []
         for p in (pinecone_data or []):
             for u in (p.get("image_urls") or []):
                 if u and u not in seen:
                     seen.add(u)
                     image_urls.append(u)
         image_urls = image_urls[:4]
-        # --- Format product results and extra info (improved) ---
+
+        # 4) Build heading + lines using ONLY collected entities so far
+        collected_for_text = {
+            k: v for k, v in (filtered_entities or {}).items()
+            if k in ("category", "color", "fabric", "size", "is_rental") and v not in (None, "", [], {})
+        }
+
+        heading = _build_dynamic_heading(collected_for_text)
+
         product_lines = []
         for product in (pinecone_data or []):
             name = product.get("name") or product.get("product_name") or "Unnamed Product"
+            tags = _build_item_tags(product, collected_for_text)  # always includes [rent]/[sale]
+            product_lines.append(f"- {name} {tags}")
 
-            is_rental = product.get("is_rental")
-            availability = "Rent" if is_rental is True else "Sale"
-
-            fabric = (product.get("fabric") or "").strip()
-            colors = product.get("available_colors") or []
-            sizes  = product.get("available_sizes") or []
-
-            details = [availability]
-
-            meta_bits = []
-            if fabric: meta_bits.append(f"{fabric}")
-            if colors: meta_bits.append("Colors: " + ", ".join(colors))
-            if sizes:  meta_bits.append("Sizes: " + ", ".join(sizes))
-            if meta_bits:
-                details.append(" | ".join(meta_bits))
-
-            line = f"{name} — {' • '.join(details)}"
-            product_lines.append(line)
-
-        # Build the products text
-        if product_lines:
-            category =  filtered_entities.get("category") or "products"
-            products_text = f"Here are our {category}:\n" + "\n".join(product_lines)
-        else:
-            products_text = "Sorry, no products match your search so far."
+        # 5) Final message
+        products_text = f"{heading}\n" + "\n".join(product_lines) if product_lines else \
+                        "Sorry, no products match your search so far."
 
         followup = await FollowUP_Question(intent_type, acc_entities, language, session_history=history)
-        # Final consolidated reply string for this turn
-        reply_text = f"{products_text}\n\n{followup}"  # CHANGED: Added followup to reply_text for consistency
+        reply_text = f"{products_text}\n\n{followup}"
+
         if mode == "call":
             # Generate and speak full response
             spoken_pitch = await generate_product_pitch_prompt(language, acc_entities, pinecone_data)
