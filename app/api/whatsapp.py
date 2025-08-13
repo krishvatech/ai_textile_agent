@@ -172,9 +172,11 @@ async def receive_whatsapp_message(request: Request):
                     intent_confidence=0.0,
                     mode="chat",   # important for WhatsApp
                 )
-
-                reply_text   = reply.get("reply_text") or reply.get("answer") \
-                   or "Sorry, I could not process your request right now."
+                print('reply..................................!')
+                print(reply)
+                reply_dict = reply if isinstance(reply, dict) else {"reply_text": str(reply)}
+                reply_text    = reply_dict.get("reply_text") or reply_dict.get("answer") \
+                    or "Sorry, I could not process your request right now."
                 followup_text = reply.get("followup_reply")
                 media_urls    = reply.get("media") or []
             except Exception:
