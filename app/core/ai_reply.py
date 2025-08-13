@@ -564,7 +564,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
         )
 
         followup = await FollowUP_Question(intent_type, acc_entities, language, session_history=history)
-        reply_text = f"{products_text}\n\n{followup}"
+        reply_text = f"{products_text}"
 
 
         if mode == "call":
