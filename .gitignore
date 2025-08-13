@@ -64,20 +64,6 @@ app_local.py
 frontend/node_modules/
 frontend/build/
 frontend/.next/
-frontend/.env
-frontend/.env.*
-
-# Docker
-*.pid
-*.pid.lock
-
-# Coverage/testing
-htmlcov/
-.coverage
-.tox/
-.nox/
-.cache
-pytest_cache/
 
 
 # PyInstaller

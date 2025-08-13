@@ -1,4 +1,6 @@
 from datetime import datetime, date
+from variant_sync import update_variant_price, delete_variant
+
 import os
 import json
 import enum
