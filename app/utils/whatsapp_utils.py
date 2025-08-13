@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request,APIRouter
 from dotenv import load_dotenv
 import os
 import logging
@@ -26,7 +26,7 @@ EXOTEL_TOKEN = os.getenv("EXOTEL_TOKEN")
 EXOPHONE = os.getenv("EXOPHONE")
 SUBDOMAIN = os.getenv("EXOTEL_SUBDOMAIN")
 
-app = FastAPI()
+router = APIRouter()
 
 # Simple in-memory deduplication for processed incoming message SIDs
 processed_message_sids = set()
@@ -85,7 +85,7 @@ async def send_whatsapp_reply(to: str, body: str):
         response = await client.post(url, json=payload, headers=headers)
         logging.info(f"Exotel API Response: {response.status_code} {response.text}")
 
-@app.post("/whatsapp")
+@router.post("/whatsapp")
 async def receive_whatsapp_message(request: Request):
     """
     Handle incoming WhatsApp messages and DLR/webhook events from Exotel.
@@ -183,8 +183,3 @@ async def receive_whatsapp_message(request: Request):
     if folloup_text is not None:
         await send_whatsapp_reply(to=from_number,body=folloup_text)
     return {"status": "received"}
-
-# For optional local testing
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, port=8000)
