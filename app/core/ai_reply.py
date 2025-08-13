@@ -437,7 +437,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
                 "reply_text": reply_text,
                 "media": image_urls 
             }
-    elif intent_type in ("availability_check"):
+    elif intent_type == "availability_check":
         # --- Extract/resolve dates ---
         start_date = None
         end_date = None
