@@ -6,6 +6,7 @@ from openai import AsyncOpenAI
 from dateutil import parser as dateparser
 from app.core.central_system_prompt import Textile_Prompt 
 import random
+from sqlalchemy import text  # Import if not already present
 from app.db.session import SessionLocal
 from app.core.rental_utils import is_variant_available
 from app.core.product_search import pinecone_fetch_records
@@ -278,20 +279,20 @@ async def generate_greeting_reply(language, tenant_name,session_history=None,mod
 def clean_entities_for_pinecone(entities):
     return {k:v for k,v in entities.items() if v not in [None, '', [], {}]}
 
-async def analyze_message(text: str, tenant_id: int,tenant_name:str,language: str = "en-US",intent: str | None = None,new_entities: dict | None = None,intent_confidence: float = 0.0,mode: str = "call") -> Dict[str, Any]:
+async def analyze_message(text: str, tenant_id: int, tenant_name: str, language: str = "en-US", intent: str | None = None, new_entities: dict | None = None, intent_confidence: float = 0.0, mode: str = "call") -> Dict[str, Any]:
     language = language
     logging.info(f"Detected language in analyze_message: {language}")
-    intent_type=intent
+    intent_type = intent
     logging.info(f"Detected intent_type in analyze_message: {intent_type}")
-    entities=new_entities or {}
+    entities = new_entities or {}
     logging.info(f"Detected entities in analyze_message: {entities}")
-    confidence=intent_confidence
+    confidence = intent_confidence
     logging.info(f"Detected confidence in analyze_message: {confidence}")
-    tenant_id=tenant_id
+    tenant_id = tenant_id
     logging.info(f"Tenant id ==== {tenant_id}======")
-    tenant_name=tenant_name
+    tenant_name = tenant_name
     logging.info(f"Tenant id ==== {tenant_name}======")
-    mode=mode
+    mode = mode
     history = session_memory.get(tenant_id, [])
     acc_entities = session_entities.get(tenant_id, None)
     last_main_intent = last_main_intent_by_session.get(tenant_id, None)
@@ -312,7 +313,6 @@ async def analyze_message(text: str, tenant_id: int,tenant_name:str,language: st
     elif is_rental is False:
         acc_entities.pop("rental_price", None) # Remove 'rental_price' if present
 
-
     session_entities[tenant_id] = acc_entities
 
     # === INTENT STICKY LOGIC ===
@@ -323,7 +323,7 @@ async def analyze_message(text: str, tenant_id: int,tenant_name:str,language: st
 
     # --- Respond
     if intent_type == "greeting":
-        reply = await generate_greeting_reply(language,tenant_name,session_history=history,mode=mode)
+        reply = await generate_greeting_reply(language, tenant_name, session_history=history, mode=mode)
         history.append({"role": "assistant", "content": reply})
         session_memory[tenant_id] = history
         return {
@@ -375,7 +375,6 @@ async def analyze_message(text: str, tenant_id: int,tenant_name:str,language: st
             line = f"{name} — {' • '.join(details)}"
             product_lines.append(line)
 
-
         # Build the products text
         if product_lines:
             category = filtered_entities.get("color") or filtered_entities.get("category") or "products"
@@ -383,10 +382,9 @@ async def analyze_message(text: str, tenant_id: int,tenant_name:str,language: st
         else:
             products_text = "Sorry, no products match your search so far."
 
-        
         followup = await FollowUP_Question(intent_type, acc_entities, language, session_history=history)
         # Final consolidated reply string for this turn
-        reply_text = f"{products_text}"
+        reply_text = f"{products_text}\n\n{followup}"  # CHANGED: Added followup to reply_text for consistency
         if mode == "call":
             # Generate and speak full response
             spoken_pitch = await generate_product_pitch_prompt(language, acc_entities, pinecone_data)
@@ -405,7 +403,7 @@ async def analyze_message(text: str, tenant_id: int,tenant_name:str,language: st
                 "reply_text": reply_text,
                 "media": image_urls 
             }
-        elif mode== "chat":
+        elif mode == "chat":
             history.append({"role": "assistant", "content": reply_text})
             session_memory[tenant_id] = history
             print("="*20)
@@ -505,5 +503,68 @@ async def analyze_message(text: str, tenant_id: int,tenant_name:str,language: st
                 "history": history,
                 "collected_entities": acc_entities
             } 
+    elif intent_type == "asking_inquiry":
+        
+        # Get lang_root and lang_hint for language-specific response
+        lang_root = (language or "en-IN").split("-")[0].lower()
+        lang_hint = {
+            "en": "English (India) — English only, no Hindi/Hinglish",
+            "hi": "Hindi in Devanagari script — no English/Hinglish",
+            "gu": "Gujarati script — no Hindi/English",
+        }.get(lang_root, f"the exact locale {language}")
+
+        # Query distinct categories from products table for the tenant
+        async with SessionLocal() as db:
+            result = await db.execute(
+                text("SELECT DISTINCT category FROM public.products WHERE tenant_id = :tid"),
+                {"tid": tenant_id}
+            )
+            categories = [row[0] for row in result.fetchall() if row[0]]
+
+        if not categories:
+            reply = "Sorry, we don't have any product categories available right now."
+        else:
+            cat_list = ", ".join(categories)
+            # Use GPT to generate a natural, language-specific response
+            prompt = Textile_Prompt + (
+                f"You are a friendly assistant for a textile and clothing shop.\n"
+                f"Generate a short, polite message listing these categories: {cat_list}.\n"
+                f"Ask which category or type of product the user wants.\n"
+                f"Keep it brief and natural. Do not add extra information.\n"
+                f"Reply in {language.upper()}. Write in {lang_hint}. Output only the message."
+            )
+
+            client = AsyncOpenAI(api_key=api_key)
+            completion = await client.chat.completions.create(
+                model="gpt-5-mini",
+                messages=[
+                    {"role": "system", "content": "You are an expert, concise, friendly assistant. Respect language instructions strictly."},
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            reply = completion.choices[0].message.content.strip()
+
+        # Handle mode-specific response
+        history.append({"role": "assistant", "content": reply})
+        session_memory[tenant_id] = history
+
+        if mode == "call":
+            return {
+                "input_text": text,
+                "language": language,
+                "intent_type": intent_type,
+                "answer": reply,  # For TTS in call
+                "history": history,
+                "collected_entities": acc_entities
+            }
+        else:
+            return {
+                "input_text": text,
+                "language": language,
+                "intent_type": intent_type,
+                "reply_text": reply,
+                "history": history,
+                "collected_entities": acc_entities
+        }
     else:
-        return "<--> Upcoming Modules Are Under Development <-->"
+        return Textile_Prompt

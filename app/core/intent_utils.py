@@ -56,6 +56,7 @@ You are an AI assistant for a textile business in India specializing in wholesal
 **Your Task**: Analyze the customer message and identify their business intent.
 
 **Textile Business Intents**:
+ **asking_inquiry** - User asking for products like "I want saree" or "which products do you have or "I want to Purchase Something" releted this."
 1. **product_search** - Looking for clothes (saree, lehenga, kurti, suit, etc.)
 2. **price_inquiry** - Asking about price, cost, budget
 3. **color_preference** - Mentioning specific colors
@@ -72,7 +73,7 @@ You are an AI assistant for a textile business in India specializing in wholesal
 14. **rental_inquiry** - Rental services, rental price
 15. **greeting** - Hello, hi, namaste
 16. **complaint** - Problems, issues, returns
-17. **other** - Anything else
+18. **other** - Anything else
 
 **CRITICAL: Price vs Quantity Recognition Patterns**:
 **GUJARATI PATTERNS**:
