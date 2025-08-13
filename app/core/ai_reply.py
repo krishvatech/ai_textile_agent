@@ -62,6 +62,11 @@ def _build_dynamic_heading(e: dict) -> str:
     elif e.get("is_rental") is False:
         parts.append("sale")
 
+    if e.get("product_url") is not None:
+        parts.append(e.get("product_url"))
+    elif e.get("product_url") is None:
+        parts.append("")
+
     if e.get("category"):
         parts.append(str(e["category"]).strip())
 
@@ -90,7 +95,7 @@ def _build_item_tags(product: dict, collected: dict) -> str:
         val = collected.get(k)
         if val not in [None, "", [], {}]:
             tags.append(str(val).strip())
-    return " ".join(f"[{t}]" for t in tags)
+    return " ".join(f"- {t}" for t in tags)
 
 
 async def generate_product_pitch_prompt(language: str, entities: Dict[str, Any], products: Optional[list] = None) -> str:
@@ -533,16 +538,34 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
 
         product_lines = []
         for product in (pinecone_data or []):
+            # Name
             name = product.get("name") or product.get("product_name") or "Unnamed Product"
-            tags = _build_item_tags(product, collected_for_text)  # always includes [rent]/[sale]
-            product_lines.append(f"- {name} {tags}")
+
+            # Tags: always include [rent]/[sale], plus collected entities only
+            tags = _build_item_tags(product, collected_for_text)
+
+            # URL (with simple normalization + fallbacks)
+            url = (
+                product.get("product_url")
+            )
+            if isinstance(url, str):
+                url = url.strip()
+                if url and not url.startswith(("http://", "https://")):
+                    url = "https://" + url.lstrip("/")
+
+            # Final line (include URL only if present)
+            product_lines.append(f"- {name} {tags}" + (f" — {url}" if url else ""))
 
         # 5) Final message
-        products_text = f"{heading}\n" + "\n".join(product_lines) if product_lines else \
-                        "Sorry, no products match your search so far."
+        products_text = (
+            f"{heading}\n" + "\n".join(product_lines)
+            if product_lines else
+            "Sorry, no products match your search so far."
+        )
 
         followup = await FollowUP_Question(intent_type, acc_entities, language, session_history=history)
         reply_text = f"{products_text}\n\n{followup}"
+
 
         if mode == "call":
             # Generate and speak full response

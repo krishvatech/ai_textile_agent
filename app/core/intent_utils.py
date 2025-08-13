@@ -67,7 +67,7 @@ User: rent → product_search (rental filter without full category but in contex
 User: any size → product_search (rental filter without full category but in context)
 User: any fabric → product_search (rental filter without full category but in context)
 User: any color → product_search (rental filter without full category but in context)
-
+User: Buy → product_search (rental filter without full category but in context)
 
 -If the user’s reply directly answers a bot’s filtering question (about rent/buy, occasion, size, fabric, price, color) and there is existing product context → intent = product_search.
 
