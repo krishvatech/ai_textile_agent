@@ -110,6 +110,31 @@ def build_metadata_filter(tenant_id: int, entities_cap: dict) -> dict:
                 f[key] = {"$eq": val}
     return f
 
+def flexible_compare(a, b) -> bool:
+    """Robust equality for mixed types (bool/str/num). Add fuzzy matching for strings."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        def to_bool(val):
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, str):
+                return val.strip().lower() in {"true", "yes", "1"}
+            return bool(val)
+        return to_bool(a) == to_bool(b)
+    
+    a_str = str(a).lower().strip()
+    b_str = str(b).lower().strip()
+    
+    # Strict equality for most fields
+    if a_str == b_str:
+        return True
+    
+    # Fuzzy for specific fields (e.g., fabric can be partial)
+    # Allow substring matches if the query is shorter
+    if len(b_str) <= 5 or b_str in a_str or a_str in b_str:  # e.g., 'silk' in 'soft silk'
+        return True
+    
+    return False
+
 
 @lru_cache(maxsize=512)
 def embed_text_cached(query_text: str) -> List[float]:
@@ -201,11 +226,12 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
             if key in md:
                 item[key] = md.get(key)
         matches.append(item)
-
+    SCORE_THRESHOLD = 0.65
     # Optional local flexible checks (cheap on <=5 results)
     filtered_matches = [
         item for item in matches
-        if all(
+        if (item.get("score") is not None and item["score"] >= SCORE_THRESHOLD) and
+        all(
             (key in item and flexible_compare(item.get(key), value))
             for key, value in entities_cap.items()
             if value not in [None, "", [], {}]

@@ -34,6 +34,9 @@ def filter_non_empty_entities(entities: dict) -> dict:
     """
     Returns a dict of only non-empty (not None, '', [], or {}) entity fields.
     """
+    if not isinstance(entities, dict):
+        logging.warning(f"filter_non_empty_entities: Input is not a dict ({type(entities)}), returning empty.")
+        return {}
     return {k: v for k, v in entities.items()
             if v not in [None, '', [], {}]}
 
@@ -45,6 +48,9 @@ async def generate_product_pitch_prompt(language: str, entities: Dict[str, Any],
     - entities: merged collected entities
     - products: optional list[dict] with keys like name/category/color/fabric/size/price/rental_price
     """
+    if not isinstance(entities, dict):
+        logging.warning(f"generate_product_pitch_prompt: entities is not a dict ({type(entities)}), using empty.")
+        entities = {}
     lang_root = (language or "en-IN").split("-")[0].lower()
     lang_hint = {
         "en": "English (India) — use English words only. No Hindi, no Hinglish.",
