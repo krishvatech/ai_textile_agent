@@ -6,7 +6,7 @@ from openai import AsyncOpenAI
 from dateutil import parser as dateparser
 from app.core.central_system_prompt import Textile_Prompt 
 import random
-from sqlalchemy import text  # Import if not already present
+from sqlalchemy import text as sql_text  # Import if not already present
 from app.db.session import SessionLocal
 from app.core.rental_utils import is_variant_available
 from app.core.product_search import pinecone_fetch_records
@@ -88,6 +88,22 @@ async def generate_product_pitch_prompt(language: str, entities: Dict[str, Any],
     )
     return completion.choices[0].message.content.strip()
 
+def render_categories_reply(lang_root: str, categories: list[str]) -> str:
+    bullets = "\n".join(f"• {c}" for c in categories[:12])  # cap to 12
+    if lang_root == "hi":
+        return (
+            f"हमारे पास ये कैटेगरी उपलब्ध हैं:\n{bullets}\n"
+            "आप किस कैटेगरी में देखना चाहेंगे? किराये या खरीद, और आपका बजट?"
+        )
+    if lang_root == "gu":
+        return (
+            f"અમારી પાસે આ કેટેગરી ઉપલબ્ધ છે:\n{bullets}\n"
+            "કઈ કેટેગરીમાં જોઈએ? ભાડે કે ખરીદી, અને તમારું બજેટ?"
+        )
+    return (
+        f"We currently carry:\n{bullets}\n"
+        "Which category would you like to explore? Rental or purchase, and your budget?"
+    )
 
 async def FollowUP_Question(
     intent_type: str,
@@ -278,6 +294,7 @@ async def generate_greeting_reply(language, tenant_name,session_history=None,mod
 
 def clean_entities_for_pinecone(entities):
     return {k:v for k,v in entities.items() if v not in [None, '', [], {}]}
+
 
 async def analyze_message(text: str, tenant_id: int, tenant_name: str, language: str = "en-US", intent: str | None = None, new_entities: dict | None = None, intent_confidence: float = 0.0, mode: str = "call") -> Dict[str, Any]:
     language = language
@@ -504,67 +521,68 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
                 "collected_entities": acc_entities
             } 
     elif intent_type == "asking_inquiry":
-        
-        # Get lang_root and lang_hint for language-specific response
         lang_root = (language or "en-IN").split("-")[0].lower()
         lang_hint = {
-            "en": "English (India) — English only, no Hindi/Hinglish",
-            "hi": "Hindi in Devanagari script — no English/Hinglish",
-            "gu": "Gujarati script — no Hindi/English",
-        }.get(lang_root, f"the exact locale {language}")
+            "en": "English (India) — English only, no Hinglish.",
+            "hi": "Hindi (Devanagari) only — no English/Hinglish.",
+            "gu": "Gujarati script only — no Hindi/English.",
+        }.get(lang_root, f"Use the exact locale: {language}")
 
-        # Query distinct categories from products table for the tenant
         async with SessionLocal() as db:
             result = await db.execute(
-                text("SELECT DISTINCT category FROM public.products WHERE tenant_id = :tid"),
+                sql_text("SELECT DISTINCT category FROM public.products WHERE tenant_id = :tid"),
                 {"tid": tenant_id}
             )
             categories = [row[0] for row in result.fetchall() if row[0]]
 
         if not categories:
-            reply = "Sorry, we don't have any product categories available right now."
+            reply = (
+                "Sorry, we don't have any product categories available right now."
+                if lang_root == "en" else
+                ("माफ़ कीजिए, अभी कोई कैटेगरी उपलब्ध नहीं है." if lang_root == "hi"
+                else "માફ કરશો, હાલમાં કોઈ કેટેગરી ઉપલબ્ધ નથી.")
+            )
         else:
-            cat_list = ", ".join(categories)
-            # Use GPT to generate a natural, language-specific response
-            prompt = Textile_Prompt + (
-                f"You are a friendly assistant for a textile and clothing shop.\n"
-                f"Generate a short, polite message listing these categories: {cat_list}.\n"
-                f"Ask which category or type of product the user wants.\n"
-                f"Keep it brief and natural. Do not add extra information.\n"
-                f"Reply in {language.upper()}. Write in {lang_hint}. Output only the message."
-            )
+            # 1) Deterministic fallback (always works)
+            reply = render_categories_reply(lang_root, categories)
 
-            client = AsyncOpenAI(api_key=api_key)
-            completion = await client.chat.completions.create(
-                model="gpt-5-mini",
-                messages=[
-                    {"role": "system", "content": "You are an expert, concise, friendly assistant. Respect language instructions strictly."},
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            reply = completion.choices[0].message.content.strip()
+            # 2) Try GPT to polish — keep only if it actually mentions a category
+            try:
+                cat_list = ", ".join(sorted(set(categories)))
+                prompt = Textile_Prompt
+                client = AsyncOpenAI(api_key=api_key)
+                completion = await client.chat.completions.create(
+                    model="gpt-4.1-mini",
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                gpt_reply = completion.choices[0].message.content.strip()
 
-        # Handle mode-specific response
+                # Use GPT reply only if it includes at least one known category (prevents generic greetings)
+                if any(c.lower() in gpt_reply.lower() for c in categories[:3]):
+                    reply = gpt_reply
+            except Exception as e:
+                logging.warning(f"GPT polish failed, using fallback. Error: {e}")
+
         history.append({"role": "assistant", "content": reply})
         session_memory[tenant_id] = history
 
         if mode == "call":
             return {
-                "input_text": text,
+                "input_text": sql_text,          # rename from `text` to avoid shadowing
                 "language": language,
                 "intent_type": intent_type,
-                "answer": reply,  # For TTS in call
+                "answer": reply,
                 "history": history,
                 "collected_entities": acc_entities
             }
         else:
             return {
-                "input_text": text,
+                "input_text": sql_text,
                 "language": language,
                 "intent_type": intent_type,
                 "reply_text": reply,
                 "history": history,
                 "collected_entities": acc_entities
-        }
+            }
     else:
         return Textile_Prompt
