@@ -403,6 +403,10 @@ async def llm_route_other(
         "• If you mention product NAMES, keep them EXACTLY as provided (no translation/transliteration).\n"
         "• Keep replies short and natural for WhatsApp/voice (≤ ~80 words).\n"
         "• If user asks for a human or seems upset, choose action='handoff' and write a polite line.\n"
+        "• If the user asks “What’s my name?” and known_profile.name exists, say it exactly; else say you don’t have it and ask once to share it.\n"
+        "\nFINAL OUTPUT FORMAT:\n"
+        "• Return ONLY a JSON object (json) with keys: action, reply, ask_fields, confidence.\n"
+        "• No preamble, no code fences, no extra text — just valid JSON.\n"
     )
 
     user_payload = {
@@ -412,10 +416,14 @@ async def llm_route_other(
         "entities_collected": {k: v for k, v in (acc_entities or {}).items() if v not in [None, "", [], {}]},
         "recent_history": recent_history,
         "categories": categories[:12],
+        "known_profile": {
+            "name": (acc_entities or {}).get("user_name") or ""
+        },
         "allowed_actions": ["smalltalk","help","followup","handoff","unknown"],
         "allowed_followup_fields": [
             "is_rental","occasion","fabric","size","color","category",
-            "product_name","quantity","location","type","price","rental_price"
+            "product_name","quantity","location","type","price","rental_price",
+            "user_name"
         ],
         "output_contract": {
             "action": "one of allowed_actions",
@@ -432,9 +440,12 @@ async def llm_route_other(
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": sys_msg},
-                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}
+                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                # Safety nudge so 'json' definitely appears in messages:
+                {"role": "system", "content": "Remember: respond with JSON only — a single JSON object."}
             ],
         )
+
         data = json.loads(completion.choices[0].message.content)
     except Exception as e:
         logging.warning(f"LLM router JSON parse/error: {e}")
@@ -452,6 +463,57 @@ async def llm_route_other(
         data["ask_fields"] = data["ask_fields"][:3]
 
     return data
+
+# NEW: extract a user's name from free text (LLM, JSON mode)
+async def extract_user_name(text: str, language: Optional[str]) -> Optional[str]:
+    """
+    Ask gpt-5-mini (JSON mode) to see if the message states the user's name.
+    Returns a clean display name or None.
+    """
+    # Quick short-circuit: empty or trivial text → skip
+    if not text or len(text.strip()) < 2:
+        return None
+
+    sys_msg = (
+        "You are a precise NER helper.\n"
+        "Identify if the user is stating THEIR OWN NAME in the message.\n"
+        "Only return JSON (json) with keys: has_name (bool), name (string).\n"
+        "The 'name' must be the person's display name as said (e.g., 'Avinash' or 'Avinash Od').\n"
+        "If unsure, has_name=false and name=\"\".\n"
+    )
+    user_payload = {
+        "message": text,
+        "locale": language,
+        "examples": [
+            {"text":"I'm Avinash","has_name":True,"name":"Avinash"},
+            {"text":"My name is Avinash Od","has_name":True,"name":"Avinash Od"},
+            {"text":"This is Priya here","has_name":True,"name":"Priya"},
+            {"text":"What's my name?","has_name":False,"name":""},
+            {"text":"Ok thanks","has_name":False,"name":""}
+        ],
+        "output_contract": {"has_name":"bool","name":"string"}
+    }
+    try:
+        client = AsyncOpenAI(api_key=api_key)
+        resp = await client.chat.completions.create(
+            model="gpt-5-mini",
+            response_format={"type":"json_object"},
+            messages=[
+                {"role":"system","content":sys_msg},
+                {"role":"user","content":json.dumps(user_payload, ensure_ascii=False)},
+                {"role":"system","content":"Respond with JSON only — a single JSON object."}  # ensures 'json' appears
+            ],
+        )
+        data = json.loads(resp.choices[0].message.content)
+        if data.get("has_name") and isinstance(data.get("name"), str) and data["name"].strip():
+            # Basic cleanup: collapse inner spaces
+            name = " ".join(data["name"].strip().split())
+            # Cap length to avoid prompt injection
+            if len(name) <= 60:
+                return name
+    except Exception as e:
+        logging.warning(f"extract_user_name failed: {e}")
+    return None
 
 async def analyze_message(text: str, tenant_id: int, tenant_name: str, language: str = "en-US", intent: str | None = None, new_entities: dict | None = None, intent_confidence: float = 0.0, mode: str = "call") -> Dict[str, Any]:
     language = language
@@ -478,6 +540,11 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
         for k, v in entities.items():
             if v not in [None, '', [], {}]:
                 acc_entities[k] = v
+    
+    if not acc_entities.get("user_name"):
+        maybe_name = await extract_user_name(text, language)
+        if maybe_name:
+            acc_entities["user_name"] = maybe_name
 
     # --- Rental/Purchase logic
     is_rental = acc_entities.get("is_rental")
