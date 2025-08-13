@@ -343,7 +343,7 @@ async def analyze_message(text: str, tenant_id: int,tenant_name:str,language: st
         
         followup = await FollowUP_Question(intent_type, acc_entities, language, session_history=history)
         # Final consolidated reply string for this turn
-        reply_text = f"{products_text}\n{followup}"
+        reply_text = f"{products_text}"
         if mode == "call":
             # Generate and speak full response
             spoken_pitch = await generate_product_pitch_prompt(language, acc_entities, pinecone_data)

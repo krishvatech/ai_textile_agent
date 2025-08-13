@@ -170,6 +170,7 @@ async def receive_whatsapp_message(request: Request):
 
     # ---- AI-Driven Reply ----
     reply_text = ""
+    followup_text = None
     try:
         reply = await analyze_message(
             text=text,
@@ -183,13 +184,13 @@ async def receive_whatsapp_message(request: Request):
         )
         # select appropriate response key; fallback to something plain if unexpected
         reply_text = reply.get("reply_text") or reply.get("answer") or "Sorry, I could not process your request right now."
-        folloup_text = reply.get("followup_reply")
+        followup_text = reply.get("followup_reply")
     except Exception as e:
         logging.error(f"AI analyze_message failed: {e}")
         reply_text = "Sorry, our assistant is having trouble responding at the moment. We'll get back to you soon!"
 
 
     await send_whatsapp_reply(to=from_number, body=reply_text)
-    if folloup_text is not None:
-        await send_whatsapp_reply(to=from_number,body=folloup_text)
+    if followup_text is not None:
+        await send_whatsapp_reply(to=from_number,body=followup_text)
     return {"status": "received"}
