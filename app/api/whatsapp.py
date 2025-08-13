@@ -9,6 +9,11 @@ from app.db.session import get_db
 from app.core.lang_utils import detect_language
 from app.core.intent_utils import detect_textile_intent_openai
 from app.core.ai_reply import analyze_message
+from app.core.chat_persistence import (
+    get_or_create_customer,
+    get_or_open_active_session,
+    append_transcript_message,
+)
 
 # Load environment variables
 load_dotenv()
@@ -45,15 +50,10 @@ async def get_tenant_id_by_phone(phone_number: str, db):
     return None
 
 async def get_tenant_name_by_phone(phone_number: str, db):
-    """
-    Fetch tenant id by phone number from the database.
-    """
     query = text("SELECT name FROM tenants WHERE whatsapp_number = :phone AND is_active = true LIMIT 1")
     result = await db.execute(query, {"phone": phone_number})
     row = result.fetchone()
-    if row:
-        return row[0]
-    return None
+    return row[0] if row else None
 
 async def send_whatsapp_reply(to: str, body: str):
     """
@@ -101,17 +101,9 @@ async def receive_whatsapp_message(request: Request):
     sid = message.get("sid", None)
 
     # Only handle real incoming user messages (not delivery reports, etc.)
-    if callback_type != "incoming_message":
-        logging.info(f"Ignored non-user event: {callback_type}")
-        return {"status": f"ignored_{callback_type}"}
-    if not sid:
-        logging.warning("No SID present in incoming message!")
-        return {"status": "missing_sid"}
+    if callback_type != "incoming_message" or not sid:
+        return {"status": "ignored"}
 
-    # Deduplication: Only process each incoming_message SID once
-    # if sid in processed_message_sids:
-    #     logging.info(f"Duplicate incoming_message SID {sid} ignored")
-    #     return {"status": f"duplicate_{sid}"}
     now = datetime.now()
     if sid in processed_message_sids and now - processed_message_sids[sid] < timedelta(minutes=5):
         logging.info(f"Duplicate incoming_message SID {sid} ignored (first seen at {processed_message_sids[sid]})")
@@ -124,73 +116,87 @@ async def receive_whatsapp_message(request: Request):
 
     from_number = message.get("from", "")
     msg_type = message.get("content", {}).get("type")
-    text = ""
-
-    if msg_type == "text":
-        text = message["content"]["text"]["body"]
-    else:
-        text = f"[{msg_type} message received]"
+    text = message["content"]["text"]["body"] if msg_type == "text" else f"[{msg_type} message received]"
 
     logging.info(f"Message from {from_number}: {text}")
 
-    # Database look-up for tenant ID
     async for db in get_db():
-        tenant_id = await get_tenant_id_by_phone(EXOPHONE, db)
-        tenant_name = await get_tenant_name_by_phone(EXOPHONE, db)
-        break  # Only use one DB session
+        try:
+            # 1) Resolve tenant
+            tenant_id = await get_tenant_id_by_phone(EXOPHONE, db)
+            if not tenant_id:
+                logging.error(f"No tenant mapped to business number {EXOPHONE}. Check tenants.whatsapp_number.")
+                return {"status": "no_tenant"}
 
-    # Run language/entity detection (awaiting)
-    lang_code = 'en-IN'  # Default language
-    current_language = None
-    last_user_lang = lang_code
-    language = await detect_language(text,last_user_lang)
-    if isinstance(language, tuple):
-        language = language[0]
-    else:
-        language = language
-    # Fix conversation language once set, but update if neutral or English greetings only
-    if current_language is None:
-        current_language = language
-        logging.info(f"Conversation language set to {current_language}")
-    else:
-        # If current_language is neutral or en-IN (greeting), update to detected_lang if meaningful
-        if current_language in ['neutral', 'en-IN'] and language in ['hi-IN', 'gu-IN']:
-            current_language = language
-            logging.info(f"Conversation language updated to {current_language}")
-        else:
-            logging.info(f"Conversation language remains as {current_language}")
+            # 2) Upsert customer
+            customer = await get_or_create_customer(
+                db,
+                tenant_id=tenant_id,
+                phone=from_number,
+                name=None,
+                preferred_language=None,
+            )
 
-    lang = current_language
-    last_user_lang = current_language
-    intent_type, entities, confidence = await detect_textile_intent_openai(text, lang)
-    logging.info(f"intent_type : {intent_type}")
-    logging.info(f"Entities : {entities}")
-    logging.info(f"confidence : {confidence}")
+            # 3) Open (or get) active session
+            chat_session = await get_or_open_active_session(db, customer_id=customer.id)
 
+            # 4) Save inbound message
+            await append_transcript_message(
+                db,
+                chat_session,
+                role="user",
+                text=text,
+                msg_id=sid,
+                direction="in",
+                meta={"msg_type": msg_type, "raw": data},
+            )
 
-    # ---- AI-Driven Reply ----
-    reply_text = ""
-    followup_text = None
-    try:
-        reply = await analyze_message(
-            text=text,
-            tenant_id=tenant_id,
-            tenant_name=tenant_name,
-            language=last_user_lang,
-            intent=intent_type,
-            new_entities=entities,
-            intent_confidence=confidence,
-            mode="chat"   # Because it's WhatsApp
-        )
-        # select appropriate response key; fallback to something plain if unexpected
-        reply_text = reply.get("reply_text") or reply.get("answer") or "Sorry, I could not process your request right now."
-        followup_text = reply.get("followup_reply")
-    except Exception as e:
-        logging.error(f"AI analyze_message failed: {e}")
-        reply_text = "Sorry, our assistant is having trouble responding at the moment. We'll get back to you soon!"
+            # 5) Detect language + AI reply
+            try:
+                detected = await detect_language(text, "en-IN")
+                current_language = detected[0] if isinstance(detected, tuple) else detected
+            except Exception:
+                logging.exception("Language detection failed; defaulting to en")
+                current_language = "en"
 
+            try:
+                reply = await analyze_message(
+                    text=text,
+                    tenant_id=tenant_id,
+                    channel="whatsapp",
+                    language=current_language,
+                    mode="chat",
+                )
+                reply_text = reply.get("reply_text") or reply.get("answer") or \
+                            "Sorry, I could not process your request right now."
+                followup_text = reply.get("followup_reply")
+            except Exception:
+                logging.exception("AI analyze_message failed")
+                reply_text, followup_text = (
+                    "Sorry, our assistant is having trouble responding at the moment. We'll get back to you soon!",
+                    None,
+                )
 
-    await send_whatsapp_reply(to=from_number, body=reply_text)
-    if followup_text is not None:
-        await send_whatsapp_reply(to=from_number,body=followup_text)
-    return {"status": "received"}
+            # 6) Send replies
+            await send_whatsapp_reply(to=from_number, body=reply_text)
+            if followup_text:
+                await send_whatsapp_reply(to=from_number, body=followup_text)
+
+            # 7) Save outbound(s)
+            await append_transcript_message(
+                db, chat_session, role="assistant", text=reply_text, direction="out", meta={"reply_to": sid}
+            )
+            if followup_text:
+                await append_transcript_message(
+                    db, chat_session, role="assistant", text=followup_text, direction="out",
+                    meta={"reply_to": sid, "followup": True},
+                )
+
+            # 8) Commit
+            await db.commit()
+        except Exception:
+            logging.exception("Webhook DB flow failed; rolling back")
+            await db.rollback()
+            return {"status": "error"}
+        finally:
+            break

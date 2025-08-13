@@ -69,10 +69,11 @@ async def get_or_open_active_session(db: AsyncSession, customer_id: int) -> Chat
 async def append_transcript_message(
     db: AsyncSession,
     chat_session: ChatSession,
-    role: str,              # "user" | "assistant" | "system"
+    role: str,                     # "user" | "assistant" | "system"
     text: str,
     msg_id: Optional[str] = None,
     ts: Optional[datetime] = None,
+    direction: Optional[str] = None,   # "in" | "out" (optional)
     meta: Optional[Dict[str, Any]] = None,
 ) -> None:
     entry = {
@@ -81,13 +82,16 @@ async def append_transcript_message(
         "msg_id": msg_id,
         "ts": (ts or datetime.utcnow()).isoformat(),
     }
+    if direction:
+        entry["direction"] = direction
     if meta:
         entry["meta"] = meta
 
     transcript: List[dict] = list(chat_session.transcript or [])
-    # dedupe by msg_id if provided
+    # de-dup by msg_id if provided
     if entry.get("msg_id") and any(m.get("msg_id") == entry["msg_id"] for m in transcript):
         return
+
     transcript.append(entry)
     chat_session.transcript = transcript
     db.add(chat_session)
