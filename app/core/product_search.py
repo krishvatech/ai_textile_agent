@@ -5,6 +5,7 @@ from functools import lru_cache
 from typing import Dict, Any, List
 import anyio
 import re
+from itertools import product
 from dotenv import load_dotenv
 from pinecone import Pinecone
 import open_clip
@@ -80,6 +81,22 @@ def normalize_category(cat: str) -> str:
     # For now, category uses the same dynamic logic
     return smart_capitalize(cat)
 
+def get_multi(entities, field, actual_key=None):
+    """
+    entities: user query dict
+    field: key to grab from user input
+    actual_key: metadata key in Pinecone (case-sensitive!)
+    """
+    val = entities.get(field)
+    if val is None:
+        val = entities.get(field.capitalize())
+    if val is None and actual_key is not None:
+        val = entities.get(actual_key)
+    if isinstance(val, list):  # NEW: Handle list directly
+        return [str(v).strip().capitalize() for v in val if str(v).strip()]
+    elif isinstance(val, str):  # Existing: Split string on comma
+        return [v.strip().capitalize() for v in val.split(",") if v.strip()]
+    return []  # Fallback for other types
 
 def flexible_compare(a, b) -> bool:
     """Robust equality for mixed types (bool/str/num)."""
@@ -102,13 +119,21 @@ def build_metadata_filter(tenant_id: int, entities_cap: dict) -> dict:
     for key in ("category", "size", "color", "is_rental", "type"):
         val = entities_cap.get(key)
         if val not in [None, "", [], {}]:
-            if isinstance(val, str):
-                f[key] = {"$eq": val}
+            if isinstance(val, list):
+                normalized_list = [smart_capitalize(v) for v in val]  # NEW: Capitalize list items
+                f[key] = {"$in": normalized_list}
+            elif isinstance(val, str):
+                split_val = [smart_capitalize(v.strip()) for v in val.split(",") if v.strip()]  # NEW: Split and capitalize
+                if len(split_val) > 1:
+                    f[key] = {"$in": split_val}
+                else:
+                    f[key] = {"$eq": val}
             elif isinstance(val, bool):
                 f[key] = {"$eq": bool(val)}
             else:
                 f[key] = {"$eq": val}
     return f
+
 
 def flexible_compare(a, b) -> bool:
     """Robust equality for mixed types (bool/str/num). Add fuzzy matching for strings."""
@@ -162,18 +187,22 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
     # Normalize (capitalize strings if your metadata is capitalized)
     def normalize_entities(e: dict) -> dict:
         out = dict(e or {})
-
         # Apply dynamic capitalization to text metadata fields
-        for key in ("category", "color", "fabric", "occasion", "type","size"):
-            if out.get(key):
-                out[key] = smart_capitalize(out[key])
-
+        for key in ("category", "color", "fabric", "occasion", "type", "size"):
+            if key in out:
+                val = out[key]
+                if isinstance(val, list):  # NEW: Handle lists by capitalizing each item
+                    out[key] = [smart_capitalize(item) for item in val if item]
+                elif isinstance(val, str):
+                    out[key] = smart_capitalize(val)
+                # Else, leave as is
         # Optional: coerce is_rental to real bool if it came as string
         if "is_rental" in out and isinstance(out["is_rental"], str):
             out["is_rental"] = out["is_rental"].strip().lower() in {"true", "1", "yes", "y"}
-
         # Remove empties
         return {k: v for k, v in out.items() if v not in (None, "", [], {})}
+
+    
     entities_cap = normalize_entities(entities)
     logger.info("normalized entities: %s", entities_cap)
     print(entities_cap)
@@ -184,7 +213,38 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
         return []
 
     query_text = " ".join(texts)
+    text_input = tokenizer([query_text]).to(device)
+    with torch.no_grad():
+        text_features = model.encode_text(text_input)
+        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        
+    COLOR_KEY   = "color"   # For color field—adjust if your index uses 'Color'
+    SIZE_KEY    = "size"    # == 'size' (small-case, as per your confirmation!)
+    FABRIC_KEY  = "fabric"  # For fabric field—adjust if needed
 
+    color_list  = get_multi(entities, "color", COLOR_KEY)
+    size_list   = get_multi(entities, "size", SIZE_KEY)       # Now using 'size'
+    fabric_list = get_multi(entities, "fabric", FABRIC_KEY)
+
+    color_list  = color_list  if color_list  else [None]
+    size_list   = size_list   if size_list   else [None]
+    fabric_list = fabric_list if fabric_list else [None]
+
+    
+    combos = list(product(color_list, size_list, fabric_list))
+    if all(combo == (None, None, None) for combo in combos):
+        combos = [(None, None, None)]
+
+    for color, size, fabric in combos:
+        filter_dict = {"tenant_id": {"$eq": tenant_id}}
+        if color:
+            filter_dict[COLOR_KEY] = {"$eq": color}
+        if size:
+            filter_dict[SIZE_KEY] = {"$eq": size}          # small-case 'size'
+        if fabric:
+            filter_dict[FABRIC_KEY] = {"$eq": fabric}
+        print(f"Sub-query filter: {filter_dict}")
+        
     # Get (cached) embedding as list[float]
     query_vector = embed_text_cached(query_text)
     # Server-side metadata filter

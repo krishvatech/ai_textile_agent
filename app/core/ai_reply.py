@@ -395,7 +395,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
 
         # Build the products text
         if product_lines:
-            category = filtered_entities.get("color") or filtered_entities.get("category") or "products"
+            category =  filtered_entities.get("category") or "products"
             products_text = f"Here are our {category}:\n" + "\n".join(product_lines)
         else:
             products_text = "Sorry, no products match your search so far."
