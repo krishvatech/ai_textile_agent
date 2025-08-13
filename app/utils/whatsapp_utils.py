@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request,APIRouter
 from dotenv import load_dotenv
+from datetime import datetime, timedelta  
 import os
 import logging
 import httpx
@@ -29,7 +30,7 @@ SUBDOMAIN = os.getenv("EXOTEL_SUBDOMAIN")
 router = APIRouter()
 
 # Simple in-memory deduplication for processed incoming message SIDs
-processed_message_sids = set()
+processed_message_sids = {}
 mode = "chat"
 
 async def get_tenant_id_by_phone(phone_number: str, db):
@@ -110,7 +111,15 @@ async def receive_whatsapp_message(request: Request):
     # if sid in processed_message_sids:
     #     logging.info(f"Duplicate incoming_message SID {sid} ignored")
     #     return {"status": f"duplicate_{sid}"}
-    processed_message_sids.add(sid)
+    now = datetime.now()
+    if sid in processed_message_sids and now - processed_message_sids[sid] < timedelta(minutes=5):
+        logging.info(f"Duplicate incoming_message SID {sid} ignored (first seen at {processed_message_sids[sid]})")
+        return {"status": f"duplicate_{sid}"}
+    processed_message_sids[sid] = now  # Add or update timestamp
+
+    # Optional: Clean up old entries to save memory
+    if len(processed_message_sids) > 1000:
+        processed_message_sids = {k: v for k, v in processed_message_sids.items() if now - v < timedelta(hours=1)}
 
     from_number = message.get("from", "")
     msg_type = message.get("content", {}).get("type")
