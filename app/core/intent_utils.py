@@ -76,7 +76,7 @@ User: any color → product_search (rental filter without full category but in c
 2. **price_inquiry** - Asking about price, cost, budget
 3. **color_preference** - Mentioning specific colors
 4. **size_query** - Size, measurement, fitting questions
-5. **fabric_inquiry** - Cotton, silk, georgette, chiffon, etc.
+5. **fabric_inquiry** - Trigger when the user asks about fabric types, fabric details, fabric availability, or expresses preference/requirements related to fabric for clothing/textiles (e.g., “What fabrics do you have?”, “Which fabric is best for me?”).
 6. **order_placement** - Ready to buy, place order
 7. **order_status** - Check existing order status
 8. **catalog_request** - Want to see catalog, images, new designs, collections, what's available

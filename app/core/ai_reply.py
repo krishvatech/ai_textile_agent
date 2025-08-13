@@ -585,5 +585,102 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
                 "history": history,
                 "collected_entities": acc_entities
             }
+    elif intent_type == "fabric_inquiry":
+    # --- language setup ---
+        lang_root = (language or "en-IN").split("-")[0].lower()
+
+        def render_fabrics_reply(lang: str, fabrics: list[str]) -> str:
+            csv = ", ".join(fabrics)
+            if lang == "hi":
+                return f"उपलब्ध फैब्रिक्स: {csv}. आप किसे पसंद करेंगे?"
+            if lang == "gu":
+                return f"ઉપલબ્ધ ફેબ્રિક: {csv}. તમે કયું પસંદ કરશો?"
+            return f"Available fabrics: {csv}. Which one do you prefer?"
+
+        # --- optional filters from your parsed entities ---
+        category     = (acc_entities or {}).get("category")
+        product_type = (acc_entities or {}).get("type")
+        is_rental    = (acc_entities or {}).get("is_rental")
+
+        where = [
+            "p.tenant_id = :tid",
+            "COALESCE(pv.is_active, TRUE) = TRUE",
+        ]
+        params = {"tid": tenant_id}
+
+        if category:
+            where.append("LOWER(p.category) = LOWER(:category)")
+            params["category"] = str(category)
+        if product_type:
+            where.append("LOWER(p.type) = LOWER(:ptype)")
+            params["ptype"] = str(product_type)
+        if is_rental is not None:
+            where.append("pv.is_rental = :is_rental")
+            params["is_rental"] = bool(is_rental)
+
+        sql = f"""
+            SELECT DISTINCT pv.fabric
+            FROM public.product_variants pv
+            JOIN public.products p ON p.id = pv.product_id
+            WHERE {' AND '.join(where)}
+            ORDER BY pv.fabric
+        """
+
+        # --- fetch fabrics ---
+        async with SessionLocal() as db:
+            result = await db.execute(sql_text(sql), params)
+            fabrics_raw = [row[0] for row in result.fetchall() if row[0]]
+
+        # normalize & dedupe (trim, title-case)
+        fabrics = sorted({str(f).strip().title() for f in fabrics_raw if str(f).strip()})
+
+        if not fabrics:
+            reply = (
+                "Sorry, no fabrics are available right now."
+                if lang_root == "en" else
+                ("माफ़ कीजिए, अभी कोई फ़ैब्रिक उपलब्ध नहीं है." if lang_root == "hi"
+                else "માફ કરશો, હાલમાં કોઈ ફેબ્રિક ઉપલબ્ધ નથી.")
+            )
+        else:
+            reply = render_fabrics_reply(lang_root, fabrics)
+            try:
+                client = AsyncOpenAI(api_key=api_key)
+                prompt = (
+                    f"Language: {language}. "
+                    f"Fabrics available: {', '.join(fabrics)}. "
+                    "Write one short friendly line listing them and asking the user to choose. "
+                    "Do not add anything else."
+                )
+                completion = await client.chat.completions.create(
+                    model="gpt-4.1-mini",
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                gpt_reply = (completion.choices[0].message.content or "").strip()
+                if any(f.lower() in gpt_reply.lower() for f in fabrics[:3]):
+                    reply = gpt_reply
+            except Exception as e:
+                logging.warning(f"GPT polish failed; using fallback. Error: {e}")
+
+        # --- record + return ---
+        history.append({"role": "assistant", "content": reply})
+        session_memory[tenant_id] = history
+
+        if mode == "call":
+            return {
+                "language": language,
+                "intent_type": intent_type,
+                "answer": reply,
+                "history": history,
+                "collected_entities": acc_entities
+            }
+        else:
+            return {
+                "language": language,
+                "intent_type": intent_type,
+                "reply_text": reply,
+                "history": history,
+                "collected_entities": acc_entities
+            }        
+    
     else:
         return Textile_Prompt
