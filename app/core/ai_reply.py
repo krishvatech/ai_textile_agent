@@ -10,6 +10,7 @@ from sqlalchemy import text as sql_text  # Import if not already present
 from app.db.session import SessionLocal
 from app.core.rental_utils import is_variant_available
 from app.core.product_search import pinecone_fetch_records
+from app.core.phase_ask_inquiry import detect_requested_attributes,fetch_distinct_options,render_attr_options,suggest_categories_advanced,scope_filters_for_attr,clean_filters_for_turn,resolve_color_list,apply_price_parsing_to_entities,fetch_starting_price,render_starting_price_single,render_starting_price_table
 import json
 
 load_dotenv()
@@ -402,7 +403,8 @@ async def llm_route_other(
         "locale_instruction": _lang_hint(language),
         "business_prompt": Textile_Prompt,  # your global policy block
         "user_message": text,
-        "entities_collected": {k: v for k, v in (acc_entities or {}).items() if v not in [None, "", [], {}]},
+        # "entities_collected": {k: v for k, v in (acc_entities or {}).items() if v not in [None, "", [], {}]},
+         "entities_collected": {k: v for k, v in (acc_entities or {}).items() if v not in [None, "", [], {}] and k != 'user_name'},
         "recent_history": recent_history,
         "categories": categories[:12],
         "known_profile": {
@@ -485,7 +487,7 @@ async def extract_user_name(text: str, language: Optional[str]) -> Optional[str]
     try:
         client = AsyncOpenAI(api_key=api_key)
         resp = await client.chat.completions.create(
-            model="gpt-5-mini",
+            model=gpt_model,
             response_format={"type":"json_object"},
             messages=[
                 {"role":"system","content":sys_msg},
@@ -596,6 +598,8 @@ async def analyze_message(
     elif intent_type == "product_search":
         # 1) Collect and normalize entities for Pinecone filtering
         filtered_entities = filter_non_empty_entities(acc_entities)
+        if 'user_name' in filtered_entities:
+            del filtered_entities['user_name']
         filtered_entities_norm = normalize_entities(filtered_entities)
         filtered_entities_norm = clean_entities_for_pinecone(filtered_entities_norm)
 
@@ -770,156 +774,140 @@ async def analyze_message(
 
     elif intent_type == "asking_inquiry":
         lang_root = (language or "en-IN").split("-")[0].lower()
+        asked_now = detect_requested_attributes(text or "")
+        acc_clean = clean_filters_for_turn(acc_entities, asked_now)
+        acc_clean = apply_price_parsing_to_entities(text or "", acc_clean) 
+        reply = None
 
-        async with SessionLocal() as db:
-            result = await db.execute(
-                sql_text("SELECT DISTINCT category FROM public.products WHERE tenant_id = :tid"),
-                {"tid": tenant_id}
-            )
-            categories = [row[0] for row in result.fetchall() if row[0]]
+        # ---- Case: Explicit COLOR question with a color value (e.g., "royle blue")
+        # For your #2/#5/#7/#9 flows, we return CATEGORY NAMES filtered by that color (+ other filters if present).
+        if "color" in asked_now and (acc_entities or {}).get("color"):
+            # Resolve possibly multi colors and/or typos, then suggest categories
+            acc_local = dict(acc_entities or {})
+            colors_resolved, sugg_pool = await resolve_color_list(tenant_id, acc_local, acc_local.get("color"))
+            # keep as list for advanced suggester
+            if colors_resolved:
+                acc_local["color"] = colors_resolved  # pass list; advanced suggester accepts lists via _split_multi
+            cats = await suggest_categories_advanced(tenant_id, acc_local)
+            if cats:
+                reply = render_categories_reply(lang_root, cats)
+            else:
+                if sugg_pool:
+                    top = ", ".join(sugg_pool[:3])
+                    reply = (f"No categories found in that color.\nDid you mean: {top}?"
+                            if lang_root == "en" else
+                            (f"इस रंग में कोई कैटेगरी नहीं मिली।\nक्या आपका मतलब था: {top}?"
+                            if lang_root == "hi" else
+                            f"આ રંગમાં કોઈ કેટેગરી મળી નથી.\nશું તમે કહ્યુ હતુ: {top}?"))
+            history.append({"role": "assistant", "content": reply})
+            session_memory[tenant_id] = history
+            return {
+                "input_text": text, "language": language, "intent_type": intent_type,
+                "reply_text": reply if mode != "call" else None, "answer": reply if mode == "call" else None,
+                "history": history, "collected_entities": acc_entities
+            }
 
-        if not categories:
-            reply = (
-                "Sorry, we don't have any product categories available right now."
-                if lang_root == "en" else
-                ("माफ़ कीजिए, अभी कोई कैटेगरी उपलब्ध नहीं है." if lang_root == "hi"
-                else "માફ કરશો, હાલમાં કોઈ કેટેગરી ઉપલબ્ધ નથી.")
-            )
-        else:
-            # Deterministic fallback
-            reply = render_categories_reply(lang_root, categories)
-            # Optional polish
+        # ---- Case: "what colors do you have?" (#1 variant asking for color list)
+        if "color" in asked_now and not (acc_entities or {}).get("color"):
+            scoped = scope_filters_for_attr(acc_entities, "color", asked_now)
+            options = await fetch_distinct_options(tenant_id, scoped, "color")
+            reply = render_attr_options(lang_root, "color", options) if options else \
+                    ("No colors available right now." if lang_root == "en"
+                    else ("अभी रंग उपलब्ध नहीं हैं." if lang_root == "hi" else "હાલમાં કોઈ કલર્સ ઉપલબ્ધ નથી."))
+            history.append({"role": "assistant", "content": reply})
+            session_memory[tenant_id] = history
+            return {
+                "input_text": text, "language": language, "intent_type": intent_type,
+                "reply_text": reply if mode != "call" else None, "answer": reply if mode == "call" else None,
+                "history": history, "collected_entities": acc_entities
+            }
+
+        # ---- Case: "which fabrics do you have?" (#3)
+        if "fabric" in asked_now and not (acc_entities or {}).get("fabric"):
             try:
-                client = AsyncOpenAI(api_key=api_key)
-                prompt = Textile_Prompt
-                completion = await client.chat.completions.create(
-                    model="gpt-4.1-mini",
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                gpt_reply = completion.choices[0].message.content.strip()
-                if any(c.lower() in gpt_reply.lower() for c in categories[:3]):
-                    reply = gpt_reply
+                scoped = scope_filters_for_attr(acc_entities, "fabric", asked_now)
+                options = await fetch_distinct_options(tenant_id, scoped, "fabric")
+                if options:
+                    reply = render_attr_options(lang_root, "fabric", options)
+                else:
+                    reply = ("No fabrics available right now." if lang_root == "en"
+                            else ("अभी फैब्रिक उपलब्ध नहीं है." if lang_root == "hi"
+                                else "હાલમાં કોઈ ફેબ્રિક ઉપલબ્ધ નથી."))
             except Exception as e:
-                logging.warning(f"GPT polish failed, using fallback. Error: {e}")
+                logging.warning(f"[list-fabrics] failed: {e}")
+                reply = ("No fabrics available right now." if lang_root == "en"
+                        else ("अभी फैब्रिक उपलब्ध नहीं है." if lang_root == "hi"
+                            else "હાલમાં કોઈ ફેબ્રિક ઉપલબ્ધ નથી."))
+
+            history.append({"role": "assistant", "content": reply})
+            session_memory[tenant_id] = history
+            return {
+                "input_text": text, "language": language, "intent_type": intent_type,
+                "reply_text": reply if mode != "call" else None, "answer": reply if mode == "call" else None,
+                "history": history, "collected_entities": acc_entities
+            }
+        if acc_clean.get("__starting_price__"):
+            mode = acc_clean["__starting_price__"]  # 'price' or 'rental_price'
+            # normalize marriage/shaadi => wedding if you do that elsewhere (optional)
+            lang_root = (language or "en-IN").split("-")[0].lower()
+            try:
+                result = await fetch_starting_price(tenant_id, acc_clean, mode=mode)
+                if isinstance(result, dict):
+                    # category present
+                    reply = render_starting_price_single(lang_root, result["category"], result["value"], mode)
+                else:
+                    # no category -> show table per category
+                    reply = render_starting_price_table(lang_root, result, mode)
+            except Exception as e:
+                logging.warning(f"[starting-price] failed: {e}")
+                reply = ("Sorry, I couldn't fetch the starting price right now."
+                        if lang_root == "en" else
+                        ("अभी शुरुआती कीमत नहीं मिल पाई." if lang_root == "hi" else "હવે શરૂઆતની કિંમત મેળવી શક્યો નથી."))
+            history.append({"role": "assistant", "content": reply})
+            session_memory[tenant_id] = history
+            return {
+                "input_text": text, "language": language, "intent_type": intent_type,
+                "reply_text": reply if mode != "call" else None, "answer": reply if mode == "call" else None,
+                "history": history, "collected_entities": acc_clean
+            }
+        # ---- If user provided ANY filters (fabric/color/size/price/is_rental/occasion) -> categories by ADVANCED filters
+        # Any filters present? (now includes price_min/price_max or rental_price_min/rental_price_max)
+        has_any_filter = any((acc_clean or {}).get(k) not in (None, "", []) for k in (
+            "fabric","color","size","price","price_min","price_max",
+            "rental_price","rental_price_min","rental_price_max",
+            "is_rental","occasion"
+        ))
+        if has_any_filter:
+            cats = await suggest_categories_advanced(tenant_id, acc_clean)
+            if cats:
+                reply = render_categories_reply(lang_root, cats)
+            else:
+                reply = ("No matching categories found for your filters." if lang_root == "en"
+                        else ("आपके फ़िल्टर के अनुसार कोई कैटेगरी नहीं मिली." if lang_root == "hi"
+                            else "તમારા ફિલ્ટર અનુસાર કોઈ કેટેગરી મળી નથી."))
+            history.append({"role": "assistant", "content": reply})
+            session_memory[tenant_id] = history
+            return {
+                "input_text": text, "language": language, "intent_type": intent_type,
+                "reply_text": reply if mode != "call" else None, "answer": reply if mode == "call" else None,
+                "history": history, "collected_entities": acc_clean
+            }
+
+        # ---- Default / #1: "I want to buy clothes" (no filters) -> show categories
+        options = await fetch_distinct_options(tenant_id, {}, "category")
+        reply = render_attr_options(lang_root, "category", options) if options else \
+                ("Sorry, nothing to suggest right now."
+                if lang_root == "en" else
+                ("माफ़ कीजिए, अभी सुझाव उपलब्ध नहीं हैं." if lang_root == "hi"
+                else "માફ કરશો, હાલમાં સૂચનો ઉપલબ્ધ નથી."))
 
         history.append({"role": "assistant", "content": reply})
-        _commit()
-
-        if mode == "call":
-            return {
-                "input_text": text,
-                "language": language,
-                "intent_type": intent_type,
-                "answer": reply,
-                "history": history,
-                "collected_entities": acc_entities
-            }
-        else:
-            return {
-                "input_text": text,
-                "language": language,
-                "intent_type": intent_type,
-                "reply_text": reply,
-                "history": history,
-                "collected_entities": acc_entities
-            }
-
-    elif intent_type == "fabric_inquiry":
-        # --- language setup ---
-        lang_root = (language or "en-IN").split("-")[0].lower()
-
-        def render_fabrics_reply(lang: str, fabrics: list[str]) -> str:
-            csv = ", ".join(fabrics)
-            if lang == "hi":
-                return f"उपलब्ध फैब्रिक्स: {csv}. आप किसे पसंद करेंगे?"
-            if lang == "gu":
-                return f"ઉપલબ્ધ ફેબ્રિક: {csv}. તમે કયું પસંદ કરશો?"
-            return f"Available fabrics: {csv}. Which one do you prefer?"
-
-        # --- optional filters from your parsed entities ---
-        category     = (acc_entities or {}).get("category")
-        product_type = (acc_entities or {}).get("type")
-        is_rental    = (acc_entities or {}).get("is_rental")
-
-        where = [
-            "p.tenant_id = :tid",
-            "COALESCE(pv.is_active, TRUE) = TRUE",
-        ]
-        params = {"tid": tenant_id}
-
-        if category:
-            where.append("LOWER(p.category) = LOWER(:category)")
-            params["category"] = str(category)
-        if product_type:
-            where.append("LOWER(p.type) = LOWER(:ptype)")
-            params["ptype"] = str(product_type)
-        if is_rental is not None:
-            where.append("pv.is_rental = :is_rental")
-            params["is_rental"] = bool(is_rental)
-
-        sql = f"""
-            SELECT DISTINCT pv.fabric
-            FROM public.product_variants pv
-            JOIN public.products p ON p.id = pv.product_id
-            WHERE {' AND '.join(where)}
-            ORDER BY pv.fabric
-        """
-
-        # --- fetch fabrics ---
-        async with SessionLocal() as db:
-            result = await db.execute(sql_text(sql), params)
-            fabrics_raw = [row[0] for row in result.fetchall() if row[0]]
-
-        # normalize & dedupe (trim, title-case)
-        fabrics = sorted({str(f).strip().title() for f in fabrics_raw if str(f).strip()})
-
-        if not fabrics:
-            reply = (
-                "Sorry, no fabrics are available right now."
-                if lang_root == "en" else
-                ("माफ़ कीजिए, अभी कोई फ़ैब्रिक उपलब्ध नहीं है." if lang_root == "hi"
-                else "માફ કરશો, હાલમાં કોઈ ફેબ્રિક ઉપલબ્ધ નથી.")
-            )
-        else:
-            reply = render_fabrics_reply(lang_root, fabrics)
-            try:
-                client = AsyncOpenAI(api_key=api_key)
-                prompt = (
-                    f"Language: {language}. "
-                    f"Fabrics available: {', '.join(fabrics)}. "
-                    "Write one short friendly line listing them and asking the user to choose. "
-                    "Do not add anything else."
-                )
-                completion = await client.chat.completions.create(
-                    model="gpt-4.1-mini",
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                gpt_reply = (completion.choices[0].message.content or "").strip()
-                if any(f.lower() in gpt_reply.lower() for f in fabrics[:3]):
-                    reply = gpt_reply
-            except Exception as e:
-                logging.warning(f"GPT polish failed; using fallback. Error: {e}")
-
-        # --- record + return ---
-        history.append({"role": "assistant", "content": reply})
-        _commit()
-
-        if mode == "call":
-            return {
-                "language": language,
-                "intent_type": intent_type,
-                "answer": reply,
-                "history": history,
-                "collected_entities": acc_entities
-            }
-        else:
-            return {
-                "language": language,
-                "intent_type": intent_type,
-                "reply_text": reply,
-                "history": history,
-                "collected_entities": acc_entities
-            }        
+        session_memory[tenant_id] = history
+        return {
+            "input_text": text, "language": language, "intent_type": intent_type,
+            "reply_text": reply if mode != "call" else None, "answer": reply if mode == "call" else None,
+            "history": history, "collected_entities": acc_entities
+        }
 
     elif intent_type == "other" or intent_type is None:  # NEW
         routed = await llm_route_other(text, language, tenant_id, acc_entities, history)
@@ -957,375 +945,6 @@ async def analyze_message(
                 "collected_entities": acc_entities,
                 "router": routed
             }
-
-    elif intent_type == "price_inquiry":
-        # --- language setup ---
-        lang_root = (language or "en-IN").split("-")[0].lower()
-
-        def render_price_reply(lang: str, min_price: float, max_price: float, category: str) -> str:
-            if lang == "hi":
-                return f"{category} श्रेणी में उपलब्ध उत्पादों की कीमत {min_price} से {max_price} तक है। क्या आप और विवरण चाहते हैं?"
-            if lang == "gu":
-                return f"{category} શ્રેણીમાં ઉપલબ્ધ ઉત્પાદનોની કિંમત {min_price} થી {max_price} સુધી છે. શું તમે વધુ વિગતો માંગો છો?"
-            return f"Prices for {category} category range from {min_price} to {max_price}. Would you like more details?"
-
-        # --- optional filters from your parsed entities ---
-        category = (acc_entities or {}).get("category")
-        product_type = (acc_entities or {}).get("type")
-        is_rental = (acc_entities or {}).get("is_rental")
-
-        if not category:
-            # Fallback if no category is provided
-            reply = (
-                "Please specify a category to check prices."
-                if lang_root == "en" else
-                ("कृपया कीमत जांचने के लिए एक श्रेणी निर्दिष्ट करें." if lang_root == "hi"
-                else "કૃપા કરીને કિંમત તપાસવા માટે એક શ્રેણી નિર્દિષ્ટ કરો.")
-            )
-            history.append({"role": "assistant", "content": reply})
-            _commit()
-
-            if mode == "call":
-                return {
-                    "language": language,
-                    "intent_type": intent_type,
-                    "answer": reply,
-                    "history": history,
-                    "collected_entities": acc_entities
-                }
-            else:
-                return {
-                    "language": language,
-                    "intent_type": intent_type,
-                    "reply_text": reply,
-                    "history": history,
-                    "collected_entities": acc_entities
-                }
-
-        where = [
-            "p.tenant_id = :tid",
-            "COALESCE(pv.is_active, TRUE) = TRUE",
-            "LOWER(p.category) = LOWER(:category)"
-        ]
-        params = {"tid": tenant_id, "category": str(category)}
-
-        if product_type:
-            where.append("LOWER(p.type) = LOWER(:ptype)")
-            params["ptype"] = str(product_type)
-        if is_rental is not None:
-            where.append("pv.is_rental = :is_rental")
-            params["is_rental"] = bool(is_rental)
-
-        price_field = "pv.rental_price" if is_rental else "pv.price"
-
-        sql = f"""
-            SELECT MIN({price_field}) AS min_price, MAX({price_field}) AS max_price
-            FROM public.product_variants pv
-            JOIN public.products p ON p.id = pv.product_id
-            WHERE {' AND '.join(where)}
-        """
-
-        # --- fetch prices ---
-        async with SessionLocal() as db:
-            result = await db.execute(sql_text(sql), params)
-            row = result.fetchone()
-            min_price = row[0] if row else None
-            max_price = row[1] if row else None
-
-        if min_price is None or max_price is None:
-            reply = (
-                f"Sorry, no prices available for {category} right now."
-                if lang_root == "en" else
-                (f"माफ़ कीजिए, {category} के लिए अभी कोई कीमत उपलब्ध नहीं है." if lang_root == "hi"
-                else f"માફ કરશો, {category} માટે હાલમાં કોઈ કિંમત ઉપલબ્ધ નથી.")
-            )
-        else:
-            reply = render_price_reply(lang_root, min_price, max_price, category)
-            try:
-                client = AsyncOpenAI(api_key=api_key)
-                prompt = Textile_Prompt+ (
-                    f"Language: {language}. "
-                    f"Category: {category}. Min price: {min_price}. Max price: {max_price}. "
-                    "Write one short friendly line stating the price range and asking if they want more details. "
-                    "Do not add anything else."
-                )
-                completion = await client.chat.completions.create(
-                    model=gpt_model,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                gpt_reply = (completion.choices[0].message.content or "").strip()
-                if str(min_price).lower() in gpt_reply.lower() or str(max_price).lower() in gpt_reply.lower():
-                    reply = gpt_reply
-            except Exception as e:
-                logging.warning(f"GPT polish failed; using fallback. Error: {e}")
-
-        # --- record + return ---
-        history.append({"role": "assistant", "content": reply})
-        _commit()
-
-        if mode == "call":
-            return {
-                "language": language,
-                "intent_type": intent_type,
-                "answer": reply,
-                "history": history,
-                "collected_entities": acc_entities
-            }
-        else:
-            return {
-                "language": language,
-                "intent_type": intent_type,
-                "reply_text": reply,
-                "history": history,
-                "collected_entities": acc_entities
-            }
-
-    elif intent_type == "size_query":
-        # --- language setup ---
-        lang_root = (language or "en-IN").split("-")[0].lower()
-
-        def render_sizes_reply(lang: str, sizes: list[str], category: str) -> str:
-            csv = ", ".join(sizes)
-            if lang == "hi":
-                return f"{category} श्रेणी में उपलब्ध आकार: {csv}. आप किसे पसंद करेंगे?"
-            if lang == "gu":
-                return f"{category} શ્રેણીમાં ઉપલબ્ધ કદ: {csv}. તમે કયું પસંદ કરશો?"
-            return f"Available sizes for {category}: {csv}. Which one do you prefer?"
-
-        # --- optional filters from your parsed entities ---
-        category = (acc_entities or {}).get("category")
-        product_type = (acc_entities or {}).get("type")
-        is_rental = (acc_entities or {}).get("is_rental")
-
-        if not category:
-            # Fallback if no category is provided
-            reply = (
-                "Please specify a category to check sizes."
-                if lang_root == "en" else
-                ("कृपया आकार जांचने के लिए एक श्रेणी निर्दिष्ट करें." if lang_root == "hi"
-                else "કૃપા કરીને કદ તપાસવા માટે એક શ્રેણી નિર્દિષ્ટ કરો.")
-            )
-            history.append({"role": "assistant", "content": reply})
-            _commit()
-
-            if mode == "call":
-                return {
-                    "language": language,
-                    "intent_type": intent_type,
-                    "answer": reply,
-                    "history": history,
-                    "collected_entities": acc_entities
-                }
-            else:
-                return {
-                    "language": language,
-                    "intent_type": intent_type,
-                    "reply_text": reply,
-                    "history": history,
-                    "collected_entities": acc_entities
-                }
-
-        where = [
-            "p.tenant_id = :tid",
-            "COALESCE(pv.is_active, TRUE) = TRUE",
-            "LOWER(p.category) = LOWER(:category)"
-        ]
-        params = {"tid": tenant_id, "category": str(category)}
-
-        if product_type:
-            where.append("LOWER(p.type) = LOWER(:ptype)")
-            params["ptype"] = str(product_type)
-        if is_rental is not None:
-            where.append("pv.is_rental = :is_rental")
-            params["is_rental"] = bool(is_rental)
-
-        sql = f"""
-            SELECT DISTINCT pv.size
-            FROM public.product_variants pv
-            JOIN public.products p ON p.id = pv.product_id
-            WHERE {' AND '.join(where)}
-            ORDER BY pv.size
-        """
-
-        # --- fetch sizes ---
-        async with SessionLocal() as db:
-            result = await db.execute(sql_text(sql), params)
-            sizes_raw = [row[0] for row in result.fetchall() if row[0]]
-
-        # normalize & dedupe (trim, title-case)
-        sizes = sorted({str(s).strip().title() for s in sizes_raw if str(s).strip()})
-
-        if not sizes:
-            reply = (
-                f"Sorry, no sizes available for {category} right now."
-                if lang_root == "en" else
-                (f"माफ़ कीजिए, {category} के लिए अभी कोई आकार उपलब्ध नहीं है." if lang_root == "hi"
-                else f"માફ કરશો, {category} માટે હાલમાં કોઈ કદ ઉપલબ્ધ નથી.")
-            )
-        else:
-            reply = render_sizes_reply(lang_root, sizes, category)
-            try:
-                client = AsyncOpenAI(api_key=api_key)
-                prompt = Textile_Prompt + (
-                    f"Language: {language}. "
-                    f"Category: {category}. Sizes available: {', '.join(sizes)}. "
-                    "Write one short friendly line listing them and asking the user to choose. "
-                    "Do not add anything else."
-                )
-                completion = await client.chat.completions.create(
-                    model=gpt_model,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                gpt_reply = (completion.choices[0].message.content or "").strip()
-                if any(s.lower() in gpt_reply.lower() for s in sizes[:3]):
-                    reply = gpt_reply
-            except Exception as e:
-                logging.warning(f"GPT polish failed; using fallback. Error: {e}")
-
-        # --- record + return ---
-        history.append({"role": "assistant", "content": reply})
-        _commit()
-
-        if mode == "call":
-            return {
-                "language": language,
-                "intent_type": intent_type,
-                "answer": reply,
-                "history": history,
-                "collected_entities": acc_entities
-            }
-        else:
-            return {
-                "language": language,
-                "intent_type": intent_type,
-                "reply_text": reply,
-                "history": history,
-                "collected_entities": acc_entities
-            }
-
-    elif intent_type == "color_preference":
-        # --- language setup ---
-        lang_root = (language or "en-IN").split("-")[0].lower()
-
-        def render_colors_reply(lang: str, colors: list[str], category: str) -> str:
-            csv = ", ".join(colors)
-            if lang == "hi":
-                return f"{category} श्रेणी में उपलब्ध रंग: {csv}. आप किसे पसंद करेंगे?"
-            if lang == "gu":
-                return f"{category} શ્રેણીમાં ઉપલબ્ધ રંગો: {csv}. તમે કયું પસંદ કરશો?"
-            return f"Available colors for {category}: {csv}. Which one do you prefer?"
-
-        # --- optional filters from your parsed entities ---
-        category = (acc_entities or {}).get("category")
-        product_type = (acc_entities or {}).get("type")
-        is_rental = (acc_entities or {}).get("is_rental")
-
-        if not category:
-            # Fallback if no category is provided
-            reply = (
-                "Please specify a category to check colors."
-                if lang_root == "en" else
-                ("कृपया रंग जांचने के लिए एक श्रेणी निर्दिष्ट करें." if lang_root == "hi"
-                else "કૃપા કરીને રંગ તપાસવા માટે એક શ્રેણી નિર્દિષ્ટ કરો.")
-            )
-            history.append({"role": "assistant", "content": reply})
-            _commit()
-
-            if mode == "call":
-                return {
-                    "language": language,
-                    "intent_type": intent_type,
-                    "answer": reply,
-                    "history": history,
-                    "collected_entities": acc_entities
-                }
-            else:
-                return {
-                    "language": language,
-                    "intent_type": intent_type,
-                    "reply_text": reply,
-                    "history": history,
-                    "collected_entities": acc_entities
-                }
-
-        where = [
-            "p.tenant_id = :tid",
-            "COALESCE(pv.is_active, TRUE) = TRUE",
-            "LOWER(p.category) = LOWER(:category)"
-        ]
-        params = {"tid": tenant_id, "category": str(category)}
-
-        if product_type:
-            where.append("LOWER(p.type) = LOWER(:ptype)")
-            params["ptype"] = str(product_type)
-        if is_rental is not None:
-            where.append("pv.is_rental = :is_rental")
-            params["is_rental"] = bool(is_rental)
-
-        sql = f"""
-            SELECT DISTINCT pv.color
-            FROM public.product_variants pv
-            JOIN public.products p ON p.id = pv.product_id
-            WHERE {' AND '.join(where)}
-            ORDER BY pv.color
-        """
-
-        # --- fetch colors ---
-        async with SessionLocal() as db:
-            result = await db.execute(sql_text(sql), params)
-            colors_raw = [row[0] for row in result.fetchall() if row[0]]
-
-        # normalize & dedupe (trim, title-case)
-        colors = sorted({str(c).strip().title() for c in colors_raw if str(c).strip()})
-
-        if not colors:
-            reply = (
-                f"Sorry, no colors available for {category} right now."
-                if lang_root == "en" else
-                (f"माफ़ कीजिए, {category} के लिए अभी कोई रंग उपलब्ध नहीं है." if lang_root == "hi"
-                else f"માફ કરશો, {category} માટે હાલમાં કોઈ રંગ ઉપલબ્ધ નથી.")
-            )
-        else:
-            reply = render_colors_reply(lang_root, colors, category)
-            try:
-                client = AsyncOpenAI(api_key=api_key)
-                prompt = Textile_Prompt + (
-                    f"Language: {language}. "
-                    f"Category: {category}. Colors available: {', '.join(colors)}. "
-                    "Write one short friendly line listing them and asking the user to choose. "
-                    "Do not add anything else."
-                )
-                completion = await client.chat.completions.create(
-                    model=gpt_model,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                gpt_reply = (completion.choices[0].message.content or "").strip()
-                if any(c.lower() in gpt_reply.lower() for c in colors[:3]):
-                    reply = gpt_reply
-            except Exception as e:
-                logging.warning(f"GPT polish failed; using fallback. Error: {e}")
-
-        # --- record + return ---
-        history.append({"role": "assistant", "content": reply})
-        _commit()
-
-        if mode == "call":
-            return {
-                "language": language,
-                "intent_type": intent_type,
-                "answer": reply,
-                "history": history,
-                "collected_entities": acc_entities
-            }
-        else:
-            return {
-                "language": language,
-                "intent_type": intent_type,
-                "reply_text": reply,
-                "history": history,
-                "collected_entities": acc_entities
-            }
-
     else:  # NEW final fallback → behave like 'other'
         routed = await llm_route_other(text, language, tenant_id, acc_entities, history)
         reply = routed.get("reply") or (
