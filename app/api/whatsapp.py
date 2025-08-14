@@ -64,6 +64,37 @@ async def get_tenant_name_by_phone(phone_number: str, db):
     row = result.fetchone()
     return row[0] if row else None
 
+async def get_tenant_category_by_phone(phone_number: str, db):
+    """
+    Return a lowercase, de-duplicated list of category names available for the tenant
+    mapped to this WhatsApp number. Pulls from products.category and products.type.
+    """
+    query = text("""
+        WITH t AS (
+          SELECT id
+          FROM tenants
+          WHERE whatsapp_number = :phone AND is_active = true
+          LIMIT 1
+        )
+        -- pull from products.category
+        SELECT DISTINCT LOWER(TRIM(p.category)) AS cat
+        FROM products p, t
+        WHERE p.tenant_id = t.id
+          AND p.category IS NOT NULL
+          AND TRIM(p.category) <> ''
+        UNION
+        -- also accept 'type' as a category source (some catalogs use it)
+        SELECT DISTINCT LOWER(TRIM(p.type)) AS cat
+        FROM products p, t
+        WHERE p.tenant_id = t.id
+          AND p.type IS NOT NULL
+          AND TRIM(p.type) <> '';
+    """)
+    result = await db.execute(query, {"phone": phone_number})
+    rows = result.fetchall() or []
+    # return a simple Python list of strings
+    return [r[0] for r in rows]
+
 async def send_whatsapp_reply(to: str, body: str):
     """
     Send WhatsApp reply using Exotel API.
@@ -185,7 +216,8 @@ async def receive_whatsapp_message(request: Request):
             logging.info(f"Using language: {current_language}")
 
             tenant_name = await get_tenant_name_by_phone(EXOPHONE, db) or "Your Shop"
-            intent_type, entities, confidence = await detect_textile_intent_openai(text, current_language)
+            tenant_categories = await get_tenant_category_by_phone(EXOPHONE, db)
+            intent_type, entities, confidence = await detect_textile_intent_openai(text, current_language,allowed_categories=tenant_categories)
 
             try:
                 # 🔑 NEW: pass the per-customer session_key to analyze_message

@@ -1,6 +1,7 @@
 import asyncio
 from openai import AsyncOpenAI
 import json
+from typing import Tuple, List, Optional
 import logging
 import os
 from typing import Tuple
@@ -47,38 +48,74 @@ def process_all_entities(entities: dict) -> dict:
     
     # return all_entities
 
-async def detect_textile_intent_openai(text: str, detected_language: str) -> Tuple[str, dict, float]:
+async def detect_textile_intent_openai(text: str, detected_language: str,allowed_categories: Optional[List[str]] = None) -> Tuple[str, dict, float]:
     """
     Detect customer intent for textile business using OpenAI
     """
     prompt = f"""
 You are an AI assistant for a textile business in India specializing in wholesale and retail.
-**Your Task**: Analyze the customer message and identify their business intent.
-**greeting** – Short salutations or pleasantries.
-**asking_inquiry**:
-  If the user's message is primarily asking about available products, fabrics, colors, sizes, prices, rental options, or combinations of these — whether they use direct questions or indirect phrasing — classify the intent as **"asking_inquiry"**.
-Do NOT classify as "asking_inquiry" if:
-- The message is about order status, tracking, delivery, payment, or returns.
-- The message is a greeting, thank you, or unrelated conversation.
-**Customer Message**: "{text}"
-**Detected Language**: "{detected_language}"
-**Response Format** (JSON only):
+
+Goal: Analyze the customer message and return a single intent plus normalized entities.
+
+Intents (lowercase values):
+- greeting — short salutations/pleasantries only.
+- product_search — message explicitly names a product category (garment/product type), optionally with attributes (fabric, color, size, price, quantity, location, occasion, rental).
+- asking_inquiry — message asks about availability/options/prices/rental without clearly naming a product category.
+- other — order status, tracking, delivery, payment, returns, complaints, small talk, or unrelated topics.
+
+Decision rules (apply in order; pick exactly one):
+1) If a product category is explicitly present → product_search.
+2) Else if the message is primarily about availability/options/prices/rental without a clear category → asking_inquiry.
+3) Else if it is only a salutation → greeting.
+4) Else → other.
+Never return "other" when rule 1 or 2 matches.
+
+Entity extraction guidelines (normalize; be conservative; use null when unknown):
+- product: Type of clothing mentioned; if identified, mirror it to "category" as well.
+- category: The product/garment type  **Must be normalized to one of {allowed_categories}**
+- color: Normalize to standard English color names regardless of language/script; if uncertain, choose the closest standard color.
+- fabric: Normalize regional/colloquial names to common fabric types (e.g., standard silk/cotton/blends). If uncertain, choose the closest standard fabric.
+- price: Unit price/rate per piece (number). If a numeric price is given and the request is about buying, set here; else leave null.
+- rental_price: Rent price/rate per piece (number). If a numeric price is given and rental intent is explicit, set here; else leave null.
+- size: Recognize full names, abbreviations, numbers, or measurements; normalize to one of "S","M","L","XL","XXL","Child", or preserve numeric (e.g., "42"). 
+  Saree rule: if the category/name is "saree" (any spelling/script), always set size = "Freesize" and ignore other size mentions.
+- occasion: Normalize to one of "wedding","party","festival","casual" when detectable; else null.
+- quantity: Number of pieces desired (number) if stated; else null.
+- location: Delivery location if stated; else null.
+- is_rental: Only set true if rental intent is explicit; set false only if buy/purchase intent is explicit; otherwise null. Do not infer false for neutral queries.
+
+Question detection:
+- is_question = true if the user asks/requests info (including imperative forms like “find/show/get”); otherwise false.
+
+Output requirements:
+- Strict JSON only (no extra text).
+- Use lowercase for "intent" values.
+- "confidence" is a float between 0.0–1.0.
+- Use numbers for price/rental_price/quantity; use booleans for is_rental; use null for unknown fields.
+- Provide both "intent" and "intent_type" (set to the same value).
+
+Customer Message: "{text}"
+Detected Language: "{detected_language}"
+
+Return exactly this JSON shape:
 {{
     "intent": "",
+    "intent_type": "",
     "entities": {{
-        "category": "",
-        "fabric": "",
-        "color": "",
-        "size": "",
-        "price": "",
-        "rental_price": "",
-        "quantity": "",
-        "location": "",
-        "occasion": "",
-        "is_rental": ""
+        "product": null,
+        "category": null,
+        "fabric": null,
+        "color": null,
+        "size": null,
+        "price": null,
+        "rental_price": null,
+        "quantity": null,
+        "location": null,
+        "occasion": null,
+        "is_rental": null
     }},
-    "confidence": <0.0-1.0>,
-    "is_question": <true/false>
+    "confidence": 0.0,
+    "is_question": false
 }}
 """
     try:
