@@ -11,7 +11,6 @@ from app.db.session import SessionLocal
 from app.core.rental_utils import is_variant_available
 from app.core.product_search import pinecone_fetch_records
 import json
-from typing import Optional
 
 load_dotenv()
 api_key = os.getenv("GPT_API_KEY")
@@ -20,7 +19,7 @@ if not api_key:
     print("❌ Error: GPT_API_KEY not found in environment variables")
     exit(1)
 
-# --- In-memory session stores
+# --- In-memory session stores (now keyed by session_key, NOT tenant_id)
 session_memory: Dict[Any, List[Dict[str, str]]] = {}  # Conversation history
 session_entities: Dict[Any, Dict[str, Any]] = {}       # Merged entities per session
 last_main_intent_by_session: Dict[Any, str] = {}       # Remember last main intent
@@ -225,7 +224,6 @@ async def FollowUP_Question(
         f"Do not mention any other fields. Keep it very brief. "
         f"Reply in {language.upper()}. Only output the question."
         f"Write in {lang_hint}. Output only one question."
-
     )
 
     client = AsyncOpenAI(api_key=api_key)
@@ -314,16 +312,7 @@ def dedupe_products(pinecone_data):
     return out
 
 
-# def normalize_entities(entities):
-#     new_entities = {}
-#     for k, v in entities.items():
-#         if isinstance(v, str):
-#             new_entities[k] = v.lower().replace(" ", "")
-#         else:
-#             new_entities[k] = v
-#     return new_entities
-
-async def generate_greeting_reply(language, tenant_name,session_history=None,mode: str = "call") -> str:
+async def generate_greeting_reply(language, tenant_name, session_history=None, mode: str = "call") -> str:
     # More concise, shop-aware greeting 
     emoji_instruction = "Do not use emojis." if mode == "call" else "Use emojis if you like."
     prompt = Textile_Prompt + (
@@ -515,7 +504,21 @@ async def extract_user_name(text: str, language: Optional[str]) -> Optional[str]
         logging.warning(f"extract_user_name failed: {e}")
     return None
 
-async def analyze_message(text: str, tenant_id: int, tenant_name: str, language: str = "en-US", intent: str | None = None, new_entities: dict | None = None, intent_confidence: float = 0.0, mode: str = "call") -> Dict[str, Any]:
+
+# ======================
+# MAIN ORCHESTRATOR (Step-3 applied: per-customer session_key)
+# ======================
+async def analyze_message(
+    text: str,
+    tenant_id: int,
+    tenant_name: str,
+    language: str = "en-US",
+    intent: str | None = None,
+    new_entities: dict | None = None,
+    intent_confidence: float = 0.0,
+    mode: str = "call",
+    session_key: Optional[str] = None,  # ✅ NEW
+) -> Dict[str, Any]:
     language = language
     logging.info(f"Detected language in analyze_message: {language}")
     intent_type = intent
@@ -529,10 +532,22 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
     tenant_name = tenant_name
     logging.info(f"Tenant id ==== {tenant_name}======")
     mode = mode
-    history = session_memory.get(tenant_id, [])
-    acc_entities = session_entities.get(tenant_id, None)
-    last_main_intent = last_main_intent_by_session.get(tenant_id, None)
+
+    # ---- Per-customer session key (fallback to tenant_id for backward-compat) ----
+    sk = session_key or str(tenant_id)
+
+    # Load state for this session_key
+    history = session_memory.get(sk, [])
+    acc_entities = session_entities.get(sk, None)
+    last_main_intent = last_main_intent_by_session.get(sk, None)
+
+    # helper to persist
+    def _commit():
+        session_memory[sk] = history
+        session_entities[sk] = acc_entities
+
     history.append({"role": "user", "content": text})
+
     # --- Merge entities
     if acc_entities is None:
         acc_entities = entities.copy()
@@ -554,20 +569,21 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
     elif is_rental is False:
         acc_entities.pop("rental_price", None) # Remove 'rental_price' if present
 
-    session_entities[tenant_id] = acc_entities
+    # Persist merged entities
+    session_entities[sk] = acc_entities
 
     print('intent_type...................', intent_type)
     # === INTENT STICKY LOGIC ===
     # if intent_type in REFINEMENT_INTENTS and intent_type != "rental_inquiry" and last_main_intent:
     #     intent_type = last_main_intent
     if intent_type in MAIN_INTENTS:
-        last_main_intent_by_session[tenant_id] = intent_type
+        last_main_intent_by_session[sk] = intent_type
 
     # --- Respond
     if intent_type == "greeting":
         reply = await generate_greeting_reply(language, tenant_name, session_history=history, mode=mode)
         history.append({"role": "assistant", "content": reply})
-        session_memory[tenant_id] = history
+        _commit()
         return {
             "input_text": text,
             "language": language,
@@ -576,6 +592,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
             "history": history,
             "collected_entities": acc_entities
         }
+
     elif intent_type == "product_search":
         # 1) Collect and normalize entities for Pinecone filtering
         filtered_entities = filter_non_empty_entities(acc_entities)
@@ -612,9 +629,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
             tags = _build_item_tags(product, collected_for_text)
 
             # URL (with simple normalization + fallbacks)
-            url = (
-                product.get("product_url")
-            )
+            url = product.get("product_url")
             if isinstance(url, str):
                 url = url.strip()
                 if url and not url.startswith(("http://", "https://")):
@@ -633,13 +648,12 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
         followup = await FollowUP_Question(intent_type, acc_entities, language, session_history=history)
         reply_text = f"{products_text}\n\n{followup}"
 
-
         if mode == "call":
             # Generate and speak full response
             spoken_pitch = await generate_product_pitch_prompt(language, acc_entities, pinecone_data)
             voice_response = f"{spoken_pitch} {followup}"
             history.append({"role": "assistant", "content": voice_response})
-            session_memory[tenant_id] = history
+            _commit()
             return {
                 "pinecone_data": pinecone_data,
                 "intent_type": intent_type,
@@ -654,7 +668,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
             }
         elif mode == "chat":
             history.append({"role": "assistant", "content": reply_text})
-            session_memory[tenant_id] = history
+            _commit()
             print("="*20)
             print(reply_text)
             print("="*20)
@@ -669,6 +683,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
                 "reply_text": reply_text,
                 "media": image_urls 
             }
+
     elif intent_type == "availability_check":
         # --- Extract/resolve dates ---
         start_date = None
@@ -693,7 +708,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
             except Exception:
                 reply = "❌ I couldn't understand the date. Please say a date like '15 August'."
                 history.append({"role": "assistant", "content": reply})
-                session_memory[tenant_id] = history
+                _commit()
                 return {
                     "input_text": text,
                     "language": language,
@@ -712,7 +727,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
         if not variant_id:
             reply = "❌ Please select a specific product variant first."
             history.append({"role": "assistant", "content": reply})
-            session_memory[tenant_id] = history
+            _commit()
             return {
                 "input_text": text,
                 "language": language,
@@ -733,7 +748,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
 
         # Return in the same shape as your other branches
         history.append({"role": "assistant", "content": reply})
-        session_memory[tenant_id] = history
+        _commit()
         if mode == "call":
             return {
                 "input_text": text,
@@ -752,13 +767,9 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
                 "history": history,
                 "collected_entities": acc_entities
             } 
+
     elif intent_type == "asking_inquiry":
         lang_root = (language or "en-IN").split("-")[0].lower()
-        lang_hint = {
-            "en": "English (India) — English only, no Hinglish.",
-            "hi": "Hindi (Devanagari) only — no English/Hinglish.",
-            "gu": "Gujarati script only — no Hindi/English.",
-        }.get(lang_root, f"Use the exact locale: {language}")
 
         async with SessionLocal() as db:
             result = await db.execute(
@@ -775,32 +786,28 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
                 else "માફ કરશો, હાલમાં કોઈ કેટેગરી ઉપલબ્ધ નથી.")
             )
         else:
-            # 1) Deterministic fallback (always works)
+            # Deterministic fallback
             reply = render_categories_reply(lang_root, categories)
-
-            # 2) Try GPT to polish — keep only if it actually mentions a category
+            # Optional polish
             try:
-                cat_list = ", ".join(sorted(set(categories)))
-                prompt = Textile_Prompt
                 client = AsyncOpenAI(api_key=api_key)
+                prompt = Textile_Prompt
                 completion = await client.chat.completions.create(
                     model="gpt-4.1-mini",
                     messages=[{"role": "user", "content": prompt}],
                 )
                 gpt_reply = completion.choices[0].message.content.strip()
-
-                # Use GPT reply only if it includes at least one known category (prevents generic greetings)
                 if any(c.lower() in gpt_reply.lower() for c in categories[:3]):
                     reply = gpt_reply
             except Exception as e:
                 logging.warning(f"GPT polish failed, using fallback. Error: {e}")
 
         history.append({"role": "assistant", "content": reply})
-        session_memory[tenant_id] = history
+        _commit()
 
         if mode == "call":
             return {
-                "input_text": text,          # rename from `text` to avoid shadowing
+                "input_text": text,
                 "language": language,
                 "intent_type": intent_type,
                 "answer": reply,
@@ -816,6 +823,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
                 "history": history,
                 "collected_entities": acc_entities
             }
+
     elif intent_type == "fabric_inquiry":
         # --- language setup ---
         lang_root = (language or "en-IN").split("-")[0].lower()
@@ -894,7 +902,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
 
         # --- record + return ---
         history.append({"role": "assistant", "content": reply})
-        session_memory[tenant_id] = history
+        _commit()
 
         if mode == "call":
             return {
@@ -912,6 +920,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
                 "history": history,
                 "collected_entities": acc_entities
             }        
+
     elif intent_type == "other" or intent_type is None:  # NEW
         routed = await llm_route_other(text, language, tenant_id, acc_entities, history)
         # Simple language-aware fallback if router returned empty reply
@@ -926,7 +935,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
             reply = routed["reply"]
 
         history.append({"role": "assistant", "content": reply})
-        session_memory[tenant_id] = history
+        _commit()
 
         if mode == "call":
             return {
@@ -948,6 +957,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
                 "collected_entities": acc_entities,
                 "router": routed
             }
+
     elif intent_type == "price_inquiry":
         # --- language setup ---
         lang_root = (language or "en-IN").split("-")[0].lower()
@@ -973,7 +983,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
                 else "કૃપા કરીને કિંમત તપાસવા માટે એક શ્રેણી નિર્દિષ્ટ કરો.")
             )
             history.append({"role": "assistant", "content": reply})
-            session_memory[tenant_id] = history
+            _commit()
 
             if mode == "call":
                 return {
@@ -1032,6 +1042,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
         else:
             reply = render_price_reply(lang_root, min_price, max_price, category)
             try:
+                client = AsyncOpenAI(api_key=api_key)
                 prompt = Textile_Prompt+ (
                     f"Language: {language}. "
                     f"Category: {category}. Min price: {min_price}. Max price: {max_price}. "
@@ -1050,7 +1061,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
 
         # --- record + return ---
         history.append({"role": "assistant", "content": reply})
-        session_memory[tenant_id] = history
+        _commit()
 
         if mode == "call":
             return {
@@ -1068,6 +1079,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
                 "history": history,
                 "collected_entities": acc_entities
             }
+
     elif intent_type == "size_query":
         # --- language setup ---
         lang_root = (language or "en-IN").split("-")[0].lower()
@@ -1094,7 +1106,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
                 else "કૃપા કરીને કદ તપાસવા માટે એક શ્રેણી નિર્દિષ્ટ કરો.")
             )
             history.append({"role": "assistant", "content": reply})
-            session_memory[tenant_id] = history
+            _commit()
 
             if mode == "call":
                 return {
@@ -1153,6 +1165,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
         else:
             reply = render_sizes_reply(lang_root, sizes, category)
             try:
+                client = AsyncOpenAI(api_key=api_key)
                 prompt = Textile_Prompt + (
                     f"Language: {language}. "
                     f"Category: {category}. Sizes available: {', '.join(sizes)}. "
@@ -1171,7 +1184,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
 
         # --- record + return ---
         history.append({"role": "assistant", "content": reply})
-        session_memory[tenant_id] = history
+        _commit()
 
         if mode == "call":
             return {
@@ -1189,6 +1202,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
                 "history": history,
                 "collected_entities": acc_entities
             }
+
     elif intent_type == "color_preference":
         # --- language setup ---
         lang_root = (language or "en-IN").split("-")[0].lower()
@@ -1215,7 +1229,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
                 else "કૃપા કરીને રંગ તપાસવા માટે એક શ્રેણી નિર્દિષ્ટ કરો.")
             )
             history.append({"role": "assistant", "content": reply})
-            session_memory[tenant_id] = history
+            _commit()
 
             if mode == "call":
                 return {
@@ -1274,6 +1288,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
         else:
             reply = render_colors_reply(lang_root, colors, category)
             try:
+                client = AsyncOpenAI(api_key=api_key)
                 prompt = Textile_Prompt + (
                     f"Language: {language}. "
                     f"Category: {category}. Colors available: {', '.join(colors)}. "
@@ -1292,7 +1307,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
 
         # --- record + return ---
         history.append({"role": "assistant", "content": reply})
-        session_memory[tenant_id] = history
+        _commit()
 
         if mode == "call":
             return {
@@ -1320,7 +1335,7 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
              else "હું કેવી રીતે મદદ કરી શકું — ભાડે કે ખરીદી?")
         )
         history.append({"role": "assistant", "content": reply})
-        session_memory[tenant_id] = history
+        _commit()
 
         if mode == "call":
             return {
@@ -1342,4 +1357,3 @@ async def analyze_message(text: str, tenant_id: int, tenant_name: str, language:
                 "collected_entities": acc_entities,
                 "router": routed
             }
-
