@@ -294,6 +294,14 @@ async def suggest_categories_advanced(tenant_id: int, acc_entities: dict) -> Lis
             params[key] = f
         where.append("(" + " OR ".join(ors) + ")")
 
+    if occs:
+        ors = []
+        for idx, o in enumerate(occs):
+            key = f"occ_{idx}"
+            ors.append("p.occasion ILIKE :%s" % key)
+            params[key] = f"%{o}%"
+        where.append("(" + " OR ".join(ors) + ")")
+
     # Sizes (IN)
     sizes = expand_size_terms(_split_multi(local.get("size")))
     if sizes:
