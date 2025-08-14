@@ -170,9 +170,23 @@ async def FollowUP_Question(
     """
     Generates a short, merged follow-up question asking for only the top 2-3 missing entities.
     """
+    def _is_missing(val):
+        return (val is None) or (val == "") or (isinstance(val, (list, dict)) and not val)
+
+    is_rental_val = entities.get("is_rental", None)
+    base_keys = [
+        "is_rental", "occasion", "fabric", "size", "color", "category",
+        "product_name", "quantity", "location", "type"
+    ]
+    # Only ask for the correct price field
+    price_keys = ["rental_price"] if is_rental_val is True else (["price"] if is_rental_val is False else ["price", "rental_price"])
+
+    # This is the canonical ordered set we will evaluate for missing-ness
+    entity_priority = base_keys + price_keys
+
     # Find missing fields (consider empty as missing)
-    missing_fields = [k for k, v in entities.items()
-                      if v is None or v == "" or (isinstance(v, (list, dict)) and not v)]
+    missing_fields = [k for k in entity_priority if _is_missing(entities.get(k))]
+
     if not missing_fields:
         return "Thank you. I have all the information I need for your request!"
 
