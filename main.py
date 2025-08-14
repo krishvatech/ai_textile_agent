@@ -8,4 +8,4 @@ app.include_router(api_router)
 
 @app.get("/")
 def root():
-    return {"message": "✅ API is live"}
+    return {"message": " ✅ API is live"}
