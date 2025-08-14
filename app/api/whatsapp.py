@@ -41,6 +41,17 @@ USE_GRAPH = True  # route main inbound through graph
 processed_message_sids = {}
 mode = "chat"
 
+def extract_reply_text(payload) -> str:
+    # Accept dicts from analyze_message / graph result, or plain strings
+    if isinstance(payload, dict):
+        for k in ("reply", "reply_text", "text", "message"):
+            v = payload.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    if isinstance(payload, str):
+        return payload.strip()
+    return "Thanks! How can I help you with fabrics or clothing today?"
+
 async def get_tenant_id_by_phone(phone_number: str, db):
     """
     Fetch tenant id by phone number from the database.
@@ -158,7 +169,7 @@ async def receive_whatsapp_message_graph(request: Request):
                 tenant_name=tenant_name,
                 text=text
             )
-            reply_text = (result or {}).get("reply") or "Thanks! Noted."
+            reply_text = extract_reply_text(result)
             detected_lang = (result or {}).get("language")
 
             # 5) Send reply
@@ -283,12 +294,11 @@ async def receive_whatsapp_message(request: Request):
                     )
                     print('reply..................................!')
                     print(raw_reply)
-                    reply = raw_reply if isinstance(raw_reply, dict) else {"reply_text": str(raw_reply)}
-
-                    reply_text    = reply.get("reply_text") or reply.get("answer") \
-                                    or "Sorry, I could not process your request right now."
-                    followup_text = reply.get("followup_reply")
-                    media_urls    = reply.get("media") or []
+                    reply_text    = extract_reply_text(raw_reply)
+                    # followup can be str OR dict from some handlers — normalize it:
+                    _followup_raw = raw_reply.get("followup_reply") if isinstance(raw_reply, dict) else None
+                    followup_text = extract_reply_text(_followup_raw) if _followup_raw else None
+                    media_urls    = raw_reply.get("media") if isinstance(raw_reply, dict) else []
             except Exception:
                 logging.exception("AI analyze_message failed")
                 reply_text, followup_text = (
