@@ -1,23 +1,29 @@
-# import redis.asyncio as aioredis
-import os
-import json
+# session_manager.py
+from typing import Dict, Any
 
-# REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-# redis = aioredis.from_url(REDIS_URL, decode_responses=True)
+# Process-local store (no Redis)
+_SESS: Dict[str, Dict[str, Any]] = {}
+
+
+def _key(user_id: str, tenant_id: int | str, channel: str) -> str:
+    return f"{tenant_id}:{channel.lower()}:{user_id}"
+
 
 class SessionManager:
     @staticmethod
-    async def get_session(user_id: str):
-        # data = await redis.get(user_id)
-        # return json.loads(data) if data else {}
-        pass
+    async def get_session(
+        user_id: str, *, tenant_id: int | str, channel: str
+    ) -> Dict[str, Any]:
+        return _SESS.get(_key(user_id, tenant_id, channel), {})
 
     @staticmethod
-    async def set_session(user_id: str, data: dict):
-        # await redis.set(user_id, json.dumps(data), ex=3600)
-        pass
+    async def set_session(
+        user_id: str, data: Dict[str, Any], *, tenant_id: int | str, channel: str
+    ) -> None:
+        _SESS[_key(user_id, tenant_id, channel)] = dict(data)
 
     @staticmethod
-    async def clear_session(user_id: str):
-        # await redis.delete(user_id)
-        pass
+    async def clear_session(
+        user_id: str, *, tenant_id: int | str, channel: str
+    ) -> None:
+        _SESS.pop(_key(user_id, tenant_id, channel), None)
