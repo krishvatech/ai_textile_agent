@@ -232,6 +232,8 @@ async def receive_whatsapp_message(request: Request):
                     mode="chat",             # important for WhatsApp
                     session_key=session_key  # ✅ this isolates memory/entities
                 )
+                print("Message................................!")
+                print("message=",text)
                 print('reply..................................!')
                 # print(raw_reply)
                 reply = raw_reply if isinstance(raw_reply, dict) else {"reply_text": str(raw_reply)}
@@ -247,6 +249,8 @@ async def receive_whatsapp_message(request: Request):
                     None,
                 )
             print("reply=",reply_text)
+            print('reply..................................!')
+            print("Followup=",followup_text)
             # 6) Send replies
             await send_whatsapp_reply(to=from_number, body=reply_text)
             if followup_text:
