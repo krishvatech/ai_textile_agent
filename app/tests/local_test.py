@@ -36,7 +36,7 @@ async def simulate_incoming_whatsapp_message(url, from_number, message_body):
     headers = {"Content-Type": "application/json"}
     
     print(f"{datetime.now(timezone.utc)}: Simulating incoming WhatsApp message to {url}")
-    print(f"Payload: {json.dumps(payload, indent=2)}")
+    # print(f"Payload: {json.dumps(payload, indent=2)}")
     
     async with httpx.AsyncClient() as client:
         try:

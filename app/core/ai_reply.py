@@ -10,7 +10,7 @@ from sqlalchemy import text as sql_text  # Import if not already present
 from app.db.session import SessionLocal
 from app.core.rental_utils import is_variant_available
 from app.core.product_search import pinecone_fetch_records
-from app.core.phase_ask_inquiry import detect_requested_attributes,fetch_distinct_options,render_attr_options,suggest_categories_advanced,scope_filters_for_attr,clean_filters_for_turn,resolve_color_list,apply_price_parsing_to_entities,fetch_starting_price,render_starting_price_single,render_starting_price_table
+from app.core.phase_ask_inquiry import detect_requested_attributes,fetch_distinct_options,apply_price_parsing_to_entities,fetch_starting_price,render_starting_price_single,render_starting_price_table,_price_mode_from_text_and_entities,render_options_reply,_build_product_lines,clean_filters_for_turn
 import json
 
 load_dotenv()
@@ -572,7 +572,44 @@ async def analyze_message(
         acc_entities.pop("rental_price", None) # Remove 'rental_price' if present
 
     # Persist merged entities
-    session_entities[sk] = acc_entities
+    sp_probe = apply_price_parsing_to_entities(text or "", acc_entities)
+    if sp_probe.get("__starting_price__"):
+        # merge back everything EXCEPT the private flag
+        acc_entities.update({k: v for k, v in sp_probe.items() if k != "__starting_price__"})
+
+        # For true "starting", drop granular filters so min isn't inflated
+        local_sp = dict(acc_entities)
+        for k in ("size", "color", "fabric", "occasion"):
+            local_sp.pop(k, None)
+
+        lang_root = (language or "en-IN").split("-")[0].lower()
+        price_mode = _price_mode_from_text_and_entities(text, local_sp)  # 'price' or 'rental_price'
+        sp = await fetch_starting_price(tenant_id, local_sp, price_mode)
+
+        if isinstance(sp, dict):  # category present
+            reply = render_starting_price_single(
+                lang_root,
+                sp.get("category") or "Items",
+                sp.get("value"),
+                price_mode
+            )
+        else:  # no category -> table by category
+            reply = render_starting_price_table(lang_root, sp or [], price_mode)
+        
+        acc_entities.pop("__starting_price__", None)
+        local_sp.pop("__starting_price__", None)
+
+        history.append({"role": "assistant", "content": reply})
+        _commit()
+        return {
+            "input_text": text,
+            "language": language,
+            "intent_type": intent_type or "asking_inquiry",
+            "reply_text": reply if mode != "call" else None,
+            "answer": reply if mode == "call" else None,
+            "history": history,
+            "collected_entities": local_sp
+        }
 
     print('intent_type...................', intent_type)
     # === INTENT STICKY LOGIC ===
@@ -773,141 +810,178 @@ async def analyze_message(
             } 
 
     elif intent_type == "asking_inquiry":
+        # Language root (en/hi/gu etc.)
         lang_root = (language or "en-IN").split("-")[0].lower()
+
+        # 0) What did the user ask this turn? (color/fabric/size/price etc.)
         asked_now = detect_requested_attributes(text or "")
+
+        # 1) Merge + clean entities for this turn
         acc_clean = clean_filters_for_turn(acc_entities, asked_now)
-        acc_clean = apply_price_parsing_to_entities(text or "", acc_clean) 
+        acc_clean = apply_price_parsing_to_entities(text or "", acc_clean)
         reply = None
 
-        # ---- Case: Explicit COLOR question with a color value (e.g., "royle blue")
-        # For your #2/#5/#7/#9 flows, we return CATEGORY NAMES filtered by that color (+ other filters if present).
-        if "color" in asked_now and (acc_entities or {}).get("color"):
-            # Resolve possibly multi colors and/or typos, then suggest categories
-            acc_local = dict(acc_entities or {})
-            colors_resolved, sugg_pool = await resolve_color_list(tenant_id, acc_local, acc_local.get("color"))
-            # keep as list for advanced suggester
-            if colors_resolved:
-                acc_local["color"] = colors_resolved  # pass list; advanced suggester accepts lists via _split_multi
-            cats = await suggest_categories_advanced(tenant_id, acc_local)
-            if cats:
-                reply = render_categories_reply(lang_root, cats)
-            else:
-                if sugg_pool:
-                    top = ", ".join(sugg_pool[:3])
-                    reply = (f"No categories found in that color.\nDid you mean: {top}?"
-                            if lang_root == "en" else
-                            (f"इस रंग में कोई कैटेगरी नहीं मिली।\nक्या आपका मतलब था: {top}?"
-                            if lang_root == "hi" else
-                            f"આ રંગમાં કોઈ કેટેગરી મળી નથી.\nશું તમે કહ્યુ હતુ: {top}?"))
-            history.append({"role": "assistant", "content": reply})
-            session_memory[tenant_id] = history
-            return {
-                "input_text": text, "language": language, "intent_type": intent_type,
-                "reply_text": reply if mode != "call" else None, "answer": reply if mode == "call" else None,
-                "history": history, "collected_entities": acc_entities
-            }
+        logging.info(f"[ASKING] asked_now={asked_now}")
+        logging.info(f"[ASKING] acc_entities(before)={acc_entities}")
+        logging.info(f"[ASKING] acc_clean(before)={acc_clean}")
 
-        # ---- Case: "what colors do you have?" (#1 variant asking for color list)
-        if "color" in asked_now and not (acc_entities or {}).get("color"):
-            scoped = scope_filters_for_attr(acc_entities, "color", asked_now)
-            options = await fetch_distinct_options(tenant_id, scoped, "color")
-            reply = render_attr_options(lang_root, "color", options) if options else \
-                    ("No colors available right now." if lang_root == "en"
-                    else ("अभी रंग उपलब्ध नहीं हैं." if lang_root == "hi" else "હાલમાં કોઈ કલર્સ ઉપલબ્ધ નથી."))
-            history.append({"role": "assistant", "content": reply})
-            session_memory[tenant_id] = history
-            return {
-                "input_text": text, "language": language, "intent_type": intent_type,
-                "reply_text": reply if mode != "call" else None, "answer": reply if mode == "call" else None,
-                "history": history, "collected_entities": acc_entities
-            }
+        # 2) STICKY: keep previously chosen filters (incl. is_rental)
+        for key in ("category", "occasion", "fabric", "color", "size", "is_rental"):
+            if (acc_clean.get(key) in (None, "", [], {})) and ((acc_entities or {}).get(key) not in (None, "", [], {})):
+                acc_clean[key] = acc_entities[key]
 
-        # ---- Case: "which fabrics do you have?" (#3)
-        if "fabric" in asked_now and not (acc_entities or {}).get("fabric"):
-            try:
-                scoped = scope_filters_for_attr(acc_entities, "fabric", asked_now)
-                options = await fetch_distinct_options(tenant_id, scoped, "fabric")
-                if options:
-                    reply = render_attr_options(lang_root, "fabric", options)
-                else:
-                    reply = ("No fabrics available right now." if lang_root == "en"
-                            else ("अभी फैब्रिक उपलब्ध नहीं है." if lang_root == "hi"
-                                else "હાલમાં કોઈ ફેબ્રિક ઉપલબ્ધ નથી."))
-            except Exception as e:
-                logging.warning(f"[list-fabrics] failed: {e}")
-                reply = ("No fabrics available right now." if lang_root == "en"
-                        else ("अभी फैब्रिक उपलब्ध नहीं है." if lang_root == "hi"
-                            else "હાલમાં કોઈ ફેબ્રિક ઉપલબ્ધ નથી."))
+        # Make rent/buy intent resilient if the text explicitly mentions it this turn
+        text_lc = (text or "").lower()
+        rent_triggers = ("rent pe", "rent per", "on rent", "for rent", "rent chahiye",
+                         "kiraye", "kiraye pe", "भाड़े", "भाड़े", "भाड़े पर", "भाडे", "hire")
+        sale_triggers = ("buy", "purchase", "khareed", "खरीद", "खरीदना")
+        if acc_clean.get("is_rental") in (None, "", []):
+            if any(t in text_lc for t in rent_triggers):
+                acc_clean["is_rental"] = True
+            elif any(t in text_lc for t in sale_triggers):
+                acc_clean["is_rental"] = False
 
-            history.append({"role": "assistant", "content": reply})
-            session_memory[tenant_id] = history
-            return {
-                "input_text": text, "language": language, "intent_type": intent_type,
-                "reply_text": reply if mode != "call" else None, "answer": reply if mode == "call" else None,
-                "history": history, "collected_entities": acc_entities
-            }
+        logging.info(f"[ASKING] acc_clean(after sticky)={acc_clean}")
+
+        # 3) EARLY EXIT: 'starting price' queries (must run BEFORE generic listing)
         if acc_clean.get("__starting_price__"):
-            mode = acc_clean["__starting_price__"]  # 'price' or 'rental_price'
-            # normalize marriage/shaadi => wedding if you do that elsewhere (optional)
-            lang_root = (language or "en-IN").split("-")[0].lower()
-            try:
-                result = await fetch_starting_price(tenant_id, acc_clean, mode=mode)
-                if isinstance(result, dict):
-                    # category present
-                    reply = render_starting_price_single(lang_root, result["category"], result["value"], mode)
-                else:
-                    # no category -> show table per category
-                    reply = render_starting_price_table(lang_root, result, mode)
-            except Exception as e:
-                logging.warning(f"[starting-price] failed: {e}")
-                reply = ("Sorry, I couldn't fetch the starting price right now."
-                        if lang_root == "en" else
-                        ("अभी शुरुआती कीमत नहीं मिल पाई." if lang_root == "hi" else "હવે શરૂઆતની કિંમત મેળવી શક્યો નથી."))
-            history.append({"role": "assistant", "content": reply})
-            session_memory[tenant_id] = history
-            return {
-                "input_text": text, "language": language, "intent_type": intent_type,
-                "reply_text": reply if mode != "call" else None, "answer": reply if mode == "call" else None,
-                "history": history, "collected_entities": acc_clean
-            }
-        # ---- If user provided ANY filters (fabric/color/size/price/is_rental/occasion) -> categories by ADVANCED filters
-        # Any filters present? (now includes price_min/price_max or rental_price_min/rental_price_max)
-        has_any_filter = any((acc_clean or {}).get(k) not in (None, "", []) for k in (
-            "fabric","color","size","price","price_min","price_max",
-            "rental_price","rental_price_min","rental_price_max",
-            "is_rental","occasion"
-        ))
-        if has_any_filter:
-            cats = await suggest_categories_advanced(tenant_id, acc_clean)
-            if cats:
-                reply = render_categories_reply(lang_root, cats)
+            # For true "starting", ignore size/color/fabric to avoid inflating minimums
+            local_sp = dict(acc_clean)
+            for k in ("size", "color", "fabric","occasion"):
+                local_sp.pop(k, None)
+
+            price_mode = _price_mode_from_text_and_entities(text, local_sp)  # 'price' or 'rental_price'
+            sp = await fetch_starting_price(tenant_id, local_sp, price_mode)
+
+            if isinstance(sp, dict):
+                reply = render_starting_price_single(lang_root, sp["category"], sp["value"], price_mode)
             else:
-                reply = ("No matching categories found for your filters." if lang_root == "en"
-                        else ("आपके फ़िल्टर के अनुसार कोई कैटेगरी नहीं मिली." if lang_root == "hi"
-                            else "તમારા ફિલ્ટર અનુસાર કોઈ કેટેગરી મળી નથી."))
+                reply = render_starting_price_table(lang_root, sp, price_mode)
+
+            # persist cleaned state and return
+            acc_entities.pop("__starting_price__", None)
+            local_sp.pop("__starting_price__", None)
             history.append({"role": "assistant", "content": reply})
-            session_memory[tenant_id] = history
+            _commit()
             return {
-                "input_text": text, "language": language, "intent_type": intent_type,
-                "reply_text": reply if mode != "call" else None, "answer": reply if mode == "call" else None,
-                "history": history, "collected_entities": acc_clean
+                "input_text": text,
+                "language": language,
+                "intent_type": intent_type,
+                "reply_text": reply if mode != "call" else None,
+                "answer": reply if mode == "call" else None,
+                "history": history,
+                "collected_entities": local_sp
             }
 
-        # ---- Default / #1: "I want to buy clothes" (no filters) -> show categories
-        options = await fetch_distinct_options(tenant_id, {}, "category")
-        reply = render_attr_options(lang_root, "category", options) if options else \
-                ("Sorry, nothing to suggest right now."
-                if lang_root == "en" else
-                ("माफ़ कीजिए, अभी सुझाव उपलब्ध नहीं हैं." if lang_root == "hi"
-                else "માફ કરશો, હાલમાં સૂચનો ઉપલબ્ધ નથી."))
+        # 4) PRODUCT LISTING when we already know the category
+        if acc_clean.get("category"):
+            # Drop private keys like "__starting_price__" before Pinecone
+            filtered_entities = {k: v for k, v in filter_non_empty_entities(acc_clean).items() if not str(k).startswith("__")}
+            filtered_entities.pop('user_name', None)
 
+            filtered_entities_norm = normalize_entities(filtered_entities)
+            filtered_entities_norm = clean_entities_for_pinecone(filtered_entities_norm)
+
+            pinecone_data = await pinecone_fetch_records(filtered_entities_norm, tenant_id)
+
+            # Collect up to 4 unique images
+            seen, image_urls = set(), []
+            for p in (pinecone_data or []):
+                for u in (p.get("image_urls") or []):
+                    if u and u not in seen:
+                        seen.add(u)
+                        image_urls.append(u)
+            image_urls = image_urls[:4]
+
+            # Build heading + lines based ONLY on collected entities so far
+            collected_for_text = {
+                k: v for k, v in (filtered_entities or {}).items()
+                if k in ("category", "is_rental", "color", "fabric", "size")
+            }
+
+            # If no products found, graceful fallback
+            if not pinecone_data:
+                # Offer the user to try changing color/fabric/size or check other categories
+                # Optionally list available options for one missing attribute
+                try_attr = None
+                for a in ("fabric", "color", "size"):
+                    if not acc_clean.get(a):
+                        try_attr = a
+                        break
+                if try_attr:
+                    opts = await fetch_distinct_options(tenant_id, acc_clean, try_attr, limit=12)
+                    if opts:
+                        reply = render_options_reply(lang_root, try_attr, opts)
+                    else:
+                        reply = "Sorry, no products match your search so far."
+                else:
+                    reply = "Sorry, no products match your search so far."
+
+                acc_entities = acc_clean
+                history.append({"role": "assistant", "content": reply})
+                _commit()
+                return {
+                    "pinecone_data": [],
+                    "intent_type": "product_search",
+                    "language": language,
+                    "tenant_id": tenant_id,
+                    "history": history,
+                    "collected_entities": acc_entities,
+                    "reply_text": reply,
+                    "media": image_urls
+                }
+
+            # Otherwise, build a concise list message
+            heading = _build_dynamic_heading(collected_for_text)
+            lines = _build_product_lines(pinecone_data, collected_for_text)
+            reply = f"{heading}\n" + "\n".join(lines)
+
+            # Persist and return
+            acc_entities = acc_clean
+            history.append({"role": "assistant", "content": reply})
+            _commit()
+            return {
+                "pinecone_data": pinecone_data,
+                "intent_type": "product_search",
+                "language": language,
+                "tenant_id": tenant_id,
+                "history": history,
+                "collected_entities": acc_entities,
+                "reply_text": reply,
+                "media": image_urls
+            }
+
+        # 5) If category not chosen yet, help the user narrow down (show categories/options)
+        # Prefer to ask for one missing attribute and show top options
+        ask_attr = None
+        for a in ("category", "fabric", "color", "size"):
+            if not acc_clean.get(a):
+                ask_attr = a
+                break
+
+        if ask_attr:
+            opts = await fetch_distinct_options(tenant_id, acc_clean, ask_attr, limit=12)
+            if ask_attr == "category":
+                reply = render_categories_reply(lang_root, opts or [])
+            else:
+                reply = render_options_reply(lang_root, ask_attr, opts or [])
+        else:
+            # Fallback prompt
+            reply = "Tell me the category or fabric/color you’re looking for."
+
+        acc_entities = acc_clean
         history.append({"role": "assistant", "content": reply})
-        session_memory[tenant_id] = history
+        _commit()
         return {
-            "input_text": text, "language": language, "intent_type": intent_type,
-            "reply_text": reply if mode != "call" else None, "answer": reply if mode == "call" else None,
-            "history": history, "collected_entities": acc_entities
+            "input_text": text,
+            "language": language,
+            "intent_type": intent_type,
+            "reply_text": reply if mode != "call" else None,
+            "answer": reply if mode == "call" else None,
+            "history": history,
+            "collected_entities": acc_entities
         }
+
 
     elif intent_type == "other" or intent_type is None:  # NEW
         routed = await llm_route_other(text, language, tenant_id, acc_entities, history)

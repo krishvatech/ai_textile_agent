@@ -124,7 +124,7 @@ async def send_whatsapp_reply(to: str, body: str):
 
     async with httpx.AsyncClient() as client:
         response = await client.post(url, json=payload, headers=headers)
-        logging.info(f"Exotel API Response: {response.status_code} {response.text}")
+        # logging.info(f"Exotel API Response: {response.status_code} {response.text}")
 
 @router.post("/")
 async def receive_whatsapp_message(request: Request):
@@ -233,7 +233,7 @@ async def receive_whatsapp_message(request: Request):
                     session_key=session_key  # ✅ this isolates memory/entities
                 )
                 print('reply..................................!')
-                print(raw_reply)
+                # print(raw_reply)
                 reply = raw_reply if isinstance(raw_reply, dict) else {"reply_text": str(raw_reply)}
 
                 reply_text    = reply.get("reply_text") or reply.get("answer") \
@@ -246,7 +246,7 @@ async def receive_whatsapp_message(request: Request):
                     "Sorry, our assistant is having trouble responding at the moment. We'll get back to you soon!",
                     None,
                 )
-
+            print("reply=",reply_text)
             # 6) Send replies
             await send_whatsapp_reply(to=from_number, body=reply_text)
             if followup_text:
