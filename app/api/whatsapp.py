@@ -77,15 +77,19 @@ async def get_tenant_name_by_phone(phone_number: str, db):
     row = result.fetchone()
     return row[0] if row else None
 
-async def send_whatsapp_reply(to: str, body: str):
+async def send_whatsapp_reply(to: str, body):
     """
     Send WhatsApp reply using Exotel API.
+    Always coerces payload to a plain string body.
     """
+    # ---- FORCE STRING HERE ----
+    msg = extract_reply_text(body)
+
     url = (
         f"https://{EXOTEL_API_KEY}:{EXOTEL_TOKEN}@{SUBDOMAIN}"
         f"/v2/accounts/{EXOTEL_SID}/messages"
     )
-    logging.info(f"Sending WhatsApp reply to {to} via {EXOPHONE}")
+    logging.info(f"Sending WhatsApp reply to {to} via {EXOPHONE} :: body_type={type(msg).__name__}")
 
     payload = {
         "channel": "whatsapp",
@@ -96,7 +100,7 @@ async def send_whatsapp_reply(to: str, body: str):
                     "to": to,
                     "content": {
                         "type": "text",
-                        "text": {"body": body}
+                        "text": {"body": msg}
                     }
                 }
             ]
@@ -106,8 +110,7 @@ async def send_whatsapp_reply(to: str, body: str):
 
     async with httpx.AsyncClient() as client:
         response = await client.post(url, json=payload, headers=headers)
-        logging.info(f"Exotel API Response: {response.status_code} {response.text}")
-
+    logging.info(f"Exotel API Response: {response.status_code} {response.text}")
 
 @router.post("/graph")
 async def receive_whatsapp_message_graph(request: Request):
@@ -274,12 +277,17 @@ async def receive_whatsapp_message(request: Request):
             logging.info(f"Using language: {current_language}")
 
             tenant_name = await get_tenant_name_by_phone(EXOPHONE, db) or "Your Shop"
-            intent_type, entities, confidence = await detect_textile_intent_openai(text, current_language)
+            # intent_type, entities, confidence = await detect_textile_intent_openai(text, current_language)
 
             try:
                 if USE_GRAPH:
-                    result = await run_graph_for_text(user_id=str(customer.id), tenant_id=tenant_id, tenant_name=tenant_name, text=text)
-                    reply_text = (result or {}).get('reply') or 'Thanks!'
+                    result = await run_graph_for_text(
+                        user_id=str(customer.id),
+                        tenant_id=tenant_id,
+                        tenant_name=tenant_name,
+                        text=text
+                    )
+                    reply_text = extract_reply_text(result)   # <— force plain text
                     followup_text = None
                 else:
                     raw_reply = await analyze_message(
@@ -305,6 +313,10 @@ async def receive_whatsapp_message(request: Request):
                     "Sorry, our assistant is having trouble responding at the moment. We'll get back to you soon!",
                     None,
                 )
+
+            reply_text = extract_reply_text(reply_text)
+            if followup_text:
+                followup_text = extract_reply_text(followup_text)
 
             # 6) Send replies
             await send_whatsapp_reply(to=from_number, body=reply_text)
