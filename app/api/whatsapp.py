@@ -8,6 +8,7 @@ from sqlalchemy import text
 from app.db.session import get_db
 from app.core.lang_utils import detect_language
 from app.core.intent_utils import detect_textile_intent_openai
+from app.agent.graph import run_graph_for_text
 # from app.core.chat_persistence import create_chat_session
 from app.core.ai_reply import analyze_message
 from app.core.chat_persistence import (
@@ -34,6 +35,7 @@ EXOPHONE = os.getenv("EXOPHONE")
 SUBDOMAIN = os.getenv("EXOTEL_SUBDOMAIN")
 
 router = APIRouter()
+USE_GRAPH = True  # route main inbound through graph
 
 # Simple in-memory deduplication for processed incoming message SIDs
 processed_message_sids = {}
@@ -94,6 +96,93 @@ async def send_whatsapp_reply(to: str, body: str):
     async with httpx.AsyncClient() as client:
         response = await client.post(url, json=payload, headers=headers)
         logging.info(f"Exotel API Response: {response.status_code} {response.text}")
+
+
+@router.post("/graph")
+async def receive_whatsapp_message_graph(request: Request):
+    """
+    Graph-powered inbound WhatsApp handler.
+    Runs LangGraph pipeline (language -> intent -> retrieval -> respond)
+    and sends a single reply back via Exotel.
+    """
+    global processed_message_sids
+    data = await request.json()
+    logging.info(f"[GRAPH] Incoming payload: {data}")
+
+    message = data.get("whatsapp", {}).get("messages", [{}])[0]
+    callback_type = message.get("callback_type", "")
+    sid = message.get("sid", None)
+
+    # Only handle real incoming user messages
+    if callback_type != "incoming_message" or not sid:
+        return {"status": "ignored"}
+
+    now = datetime.now()
+    if sid in processed_message_sids and now - processed_message_sids[sid] < timedelta(minutes=5):
+        logging.info(f"[GRAPH] Duplicate SID {sid} ignored")
+        return {"status": f"duplicate_{sid}"}
+    processed_message_sids[sid] = now
+    # Trim map periodically
+    if len(processed_message_sids) > 1000:
+        processed_message_sids = {k: v for k, v in processed_message_sids.items() if now - v < timedelta(hours=1)}
+
+    from_number = message.get("from", "")
+    msg_type = message.get("content", {}).get("type")
+    text = message["content"]["text"]["body"] if msg_type == "text" else f"[{msg_type} message received]"
+    logging.info(f"[GRAPH] From {from_number}: {text}")
+
+    # DB flow
+    async for db in get_db():
+        try:
+            # 1) Resolve tenant from EXOPHONE
+            tenant_id = await get_tenant_id_by_phone(EXOPHONE, db)
+            tenant_name = await get_tenant_name_by_phone(EXOPHONE, db) or "Your Shop"
+            if not tenant_id:
+                logging.error("[GRAPH] No tenant found for EXOPHONE")
+                return {"status": "no_tenant"}
+
+            # 2) Customer + session
+            customer = await get_or_create_customer(db, tenant_id=tenant_id, phone=from_number)
+            chat_session = await get_or_open_active_session(db, customer_id=customer.id)
+
+            # 3) Save inbound
+            await append_transcript_message(
+                db, chat_session, role="user", text=text, msg_id=sid, direction="in",
+                meta={"raw": data, "channel": "whatsapp", "graph": True}
+            )
+
+            # 4) Run graph
+            result = await run_graph_for_text(
+                user_id=str(customer.id),
+                tenant_id=tenant_id,
+                tenant_name=tenant_name,
+                text=text
+            )
+            reply_text = (result or {}).get("reply") or "Thanks! Noted."
+            detected_lang = (result or {}).get("language")
+
+            # 5) Send reply
+            await send_whatsapp_reply(to=from_number, body=reply_text)
+
+            # 6) Persist outbound
+            await append_transcript_message(
+                db, chat_session, role="assistant", text=reply_text, direction="out",
+                meta={"reply_to": sid, "graph_result": result}
+            )
+
+            # 7) Update preferred language if changed
+            if detected_lang and detected_lang != (customer.preferred_language or "en"):
+                await update_customer_language(db, customer.id, detected_lang)
+
+            # 8) Commit
+            await db.commit()
+
+            return {"status": "ok", "intent": result.get("intent"), "entities": result.get("entities")}
+        except Exception as e:
+            logging.exception("[GRAPH] Error handling inbound; rolling back")
+            await db.rollback()
+            return {"status": "error", "detail": str(e)}
+
 
 @router.post("/")
 async def receive_whatsapp_message(request: Request):
@@ -177,24 +266,29 @@ async def receive_whatsapp_message(request: Request):
             intent_type, entities, confidence = await detect_textile_intent_openai(text, current_language)
 
             try:
-                raw_reply = await analyze_message(
-                    text=text,
-                    tenant_id=tenant_id,
-                    tenant_name=tenant_name,
-                    language=current_language,
-                    intent=intent_type,
-                    new_entities=entities,
-                    intent_confidence=confidence,
-                    mode="chat",   # important for WhatsApp
-                )
-                print('reply..................................!')
-                print(raw_reply)
-                reply = raw_reply if isinstance(raw_reply, dict) else {"reply_text": str(raw_reply)}
+                if USE_GRAPH:
+                    result = await run_graph_for_text(user_id=str(customer.id), tenant_id=tenant_id, tenant_name=tenant_name, text=text)
+                    reply_text = (result or {}).get('reply') or 'Thanks!'
+                    followup_text = None
+                else:
+                    raw_reply = await analyze_message(
+                        text=text,
+                        tenant_id=tenant_id,
+                        tenant_name=tenant_name,
+                        language=current_language,
+                        intent=intent_type,
+                        new_entities=entities,
+                        intent_confidence=confidence,
+                        mode="chat",   # important for WhatsApp
+                    )
+                    print('reply..................................!')
+                    print(raw_reply)
+                    reply = raw_reply if isinstance(raw_reply, dict) else {"reply_text": str(raw_reply)}
 
-                reply_text    = reply.get("reply_text") or reply.get("answer") \
-                                or "Sorry, I could not process your request right now."
-                followup_text = reply.get("followup_reply")
-                media_urls    = reply.get("media") or []
+                    reply_text    = reply.get("reply_text") or reply.get("answer") \
+                                    or "Sorry, I could not process your request right now."
+                    followup_text = reply.get("followup_reply")
+                    media_urls    = reply.get("media") or []
             except Exception:
                 logging.exception("AI analyze_message failed")
                 reply_text, followup_text = (

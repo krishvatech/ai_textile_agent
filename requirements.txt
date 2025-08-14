@@ -31,3 +31,12 @@ open-clip-torch
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 python-dotenv==1.0.1
+
+# Orchestration + RAG
+langgraph>=0.2.19
+langchain>=0.2.12
+
+# LlamaIndex core + Pinecone vector store + OpenAI LLM glue
+llama-index>=0.10.64
+llama-index-vector-stores-pinecone>=0.1.7
+llama-index-llms-openai>=0.1.20
