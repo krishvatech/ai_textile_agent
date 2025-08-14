@@ -173,8 +173,8 @@ async def FollowUP_Question(
     # Find missing fields (consider empty as missing)
     missing_fields = [k for k, v in entities.items()
                       if v is None or v == "" or (isinstance(v, (list, dict)) and not v)]
-    # if not missing_fields:
-    #     return "Thank you. I have all the information I need for your request!"
+    if not missing_fields:
+        return "Thank you. I have all the information I need for your request!"
 
     entity_priority = [
         "is_rental","occasion", "fabric",
