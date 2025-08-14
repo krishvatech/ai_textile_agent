@@ -8,6 +8,7 @@ from sqlalchemy import text
 from app.db.session import get_db
 from app.core.lang_utils import detect_language
 from app.core.intent_utils import detect_textile_intent_openai
+# from app.core.chat_persistence import create_chat_session
 from app.core.ai_reply import analyze_message
 from app.core.chat_persistence import (
     get_or_create_customer,
@@ -48,6 +49,14 @@ async def get_tenant_id_by_phone(phone_number: str, db):
     if row:
         return row[0]
     return None
+
+async def update_customer_language(db, customer_id: int, language: str):
+    """
+    Update the preferred_language for a customer in the database.
+    """
+    query = text("UPDATE customers SET preferred_language = :language WHERE id = :customer_id")
+    await db.execute(query, {"language": language, "customer_id": customer_id})
+    # No commit here; it's handled in the main flow
 
 async def get_tenant_name_by_phone(phone_number: str, db):
     query = text("SELECT name FROM tenants WHERE whatsapp_number = :phone AND is_active = true LIMIT 1")
@@ -93,6 +102,7 @@ async def receive_whatsapp_message(request: Request):
     Only process 'incoming_message' events and reply only ONCE per message SID.
     """
     global processed_message_sids
+    SUPPORTED_LANGUAGES = ["gu-IN", "hi-IN", "en-IN", "en-US"]
     data = await request.json()
     logging.info(f"Full incoming payload: {data}")
 
@@ -152,12 +162,16 @@ async def receive_whatsapp_message(request: Request):
             )
 
             # 5) Detect language + AI reply
-            try:
-                detected = await detect_language(text, "en-IN")
+            current_language = customer.preferred_language or "en-IN"
+            if current_language not in SUPPORTED_LANGUAGES:
+                logging.info("Detecting language...")
+                detected = await detect_language(text, "en-IN")  # Pass text and default
+                # Handle tuple output (e.g., (lang, confidence)) or single value
                 current_language = detected[0] if isinstance(detected, tuple) else detected
-            except Exception:
-                logging.exception("Language detection failed; defaulting to en-US")
-                current_language = "en-US"
+                # Update customer's preferred language for future sessions
+                await update_customer_language(db, customer.id, current_language)  # Assume this function exists or add it
+
+            logging.info(f"Using language: {current_language}")
 
             tenant_name = await get_tenant_name_by_phone(EXOPHONE, db) or "Your Shop"
             intent_type, entities, confidence = await detect_textile_intent_openai(text, current_language)

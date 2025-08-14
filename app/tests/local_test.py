@@ -1,97 +1,67 @@
 import asyncio
-from types import SimpleNamespace
-from datetime import datetime
-# Import your existing functions
-from app.db.session import get_db
-from app.core.lang_utils import detect_language
-from app.core.intent_utils import detect_textile_intent_openai
-from app.core.ai_reply import analyze_message
-from sqlalchemy import text as sql_text
 import logging
 import os
+from dotenv import load_dotenv
+import httpx
+import json
+from datetime import datetime, timezone
 
-logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
+# Load environment variables (if needed for auth)
+load_dotenv()
 
-EXOPHONE = os.getenv("EXOPHONE")
+# Configure logging
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    level=logging.INFO
+)
 
-async def get_tenant_id_by_phone(phone_number: str, db):
-    query = sql_text("SELECT id FROM tenants WHERE whatsapp_number = :phone AND is_active = true LIMIT 1")
-    result = await db.execute(query, {"phone": phone_number})
-    row = result.fetchone()
-    return row[0] if row else None
-
-async def get_tenant_name_by_phone(phone_number: str, db):
-    """
-    Fetch tenant id by phone number from the database.
-    """
-    query = sql_text("SELECT name FROM tenants WHERE whatsapp_number = :phone AND is_active = true LIMIT 1")
-    result = await db.execute(query, {"phone": phone_number})
-    row = result.fetchone()
-    if row:
-        return row[0]
-    return None
-
-async def whatsapp_test_local(user_text: str):
-    # Database lookup for tenant ID
-    async for db in get_db():
-        tenant_id = await get_tenant_id_by_phone(EXOPHONE, db)
-        tenant_name = await get_tenant_name_by_phone(EXOPHONE, db)
-        break
-
-    # Language detection
-    current_language = None
-    last_user_lang = "en-IN"  # Default
-    language = await detect_language(user_text, last_user_lang)
-    if isinstance(language, tuple):
-        language = language[0]
-
-    if current_language is None:
-        current_language = language
-        logging.info(f"Conversation language set to {current_language}")
-    else:
-        if current_language in ['neutral', 'en-IN'] and language in ['hi-IN', 'gu-IN']:
-            current_language = language
-            logging.info(f"Conversation language updated to {current_language}")
-
-    lang = current_language
-    last_user_lang = current_language
-
-    # Intent detection
-    intent_type, entities, confidence = await detect_textile_intent_openai(user_text, lang)
-    logging.info(f"intent_type: {intent_type}")
-    logging.info(f"entities: {entities}")
-    logging.info(f"confidence: {confidence}")
-
-    # AI Reply
-    try:
-        print("calling analayze message=",datetime.now())
-        reply = await analyze_message(
-            text=user_text,
-            tenant_id=tenant_id,
-            tenant_name=tenant_name,
-            language=last_user_lang,
-            intent=intent_type,
-            new_entities=entities,
-            intent_confidence=confidence,
-            mode="chat"
-        )
-        print("geeting analayze message=",datetime.now())
-        reply_text = reply.get("reply_text") or reply.get("answer") or "Sorry, I could not process your request right now."
-    except Exception as e:
-        logging.error(f"AI analyze_message failed: {e}")
-        reply_text = "Sorry, our assistant is having trouble responding at the moment."
-
-    return reply_text
+async def simulate_incoming_whatsapp_message(url, from_number, message_body):
+    # Sample payload mimicking an incoming WhatsApp message
+    payload = {
+        "whatsapp": {
+            "messages": [
+                {
+                    "callback_type": "incoming_message",
+                    "sid": "test_sid_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
+                    "from": from_number,  # e.g., "919999999999"
+                    "content": {
+                        "type": "text",
+                        "text": {"body": message_body}
+                    }
+                }
+            ]
+        }
+    }
+    
+    headers = {"Content-Type": "application/json"}
+    
+    print(f"{datetime.now(timezone.utc)}: Simulating incoming WhatsApp message to {url}")
+    print(f"Payload: {json.dumps(payload, indent=2)}")
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(url, json=payload, headers=headers)
+            logging.info(f"Response from /whatsapp: {response.status_code} {response.text}")
+            if response.status_code == 200:
+                print("Simulation successful! Check server logs for processing details.")
+                # Simulate "getting reply" by printing the server's response body (if any)
+                print(f"Server Reply (if any): {response.text}")
+            else:
+                print("Simulation failed.")
+        except Exception as e:
+            logging.error(f"Error during simulation: {str(e)}")
+            print("Simulation failed due to an error.")
 
 async def main():
-    print("📲 WhatsApp Bot Local Test — type 'q' or 'quit' to exit")
+    url = "http://localhost:8001/whatsapp/"  # Adjust port if needed
+    from_number = "919999999998"  # Replace with your test sender number
+    
+    print("Interactive WhatsApp Message Simulator. Type 'exit' to stop.")
     while True:
-        user_input = input("> ").strip()
-        if user_input.lower() in ("q", "quit"):
-            print("👋 Exiting local test.")
+        message_body = input("Enter message to simulate (or 'exit' to quit): ")
+        if message_body.lower() == 'exit':
             break
-        bot_reply = await whatsapp_test_local(user_input)
-        print(f"Bot: {bot_reply}")
+        await simulate_incoming_whatsapp_message(url, from_number, message_body)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+# Run the simulation loop
+asyncio.run(main())
