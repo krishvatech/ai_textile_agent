@@ -68,6 +68,7 @@ User: any size → product_search (rental filter without full category but in co
 User: any fabric → product_search (rental filter without full category but in context)
 User: any color → product_search (rental filter without full category but in context)
 User: Buy → product_search (rental filter without full category but in context)
+User: Which Colors Do You Have? → color_preference (rental filter without full category but in context)
 
 -If the user’s reply directly answers a bot’s filtering question (about rent/buy, occasion, size, fabric, price, color) and there is existing product context → intent = product_search.
 
@@ -75,7 +76,7 @@ User: Buy → product_search (rental filter without full category but in context
 
 1. **product_search** - Looking for clothes (saree, lehenga, kurti, suit, etc.), including when a category is explicitly mentioned (e.g., "I want kurta") or refinements to prior messages/context (e.g., adding "for wedding" or "on rent" after a product list or bot question).
 2. **price_inquiry** - Asking about price, cost, budget
-3. **color_preference** - Mentioning specific colors
+3. **color_preference** - Mentioning specific colors or ask which colours or colors do you have? releted
 4. **size_query** - Size, measurement, fitting questions
 5. **fabric_inquiry** - Trigger when the user asks about fabric types, fabric details, fabric availability, or expresses preference/requirements related to fabric for clothing/textiles (e.g., “What fabrics do you have?”, “Which fabric is best for me?”).
 6. **order_placement** - Ready to buy, place order

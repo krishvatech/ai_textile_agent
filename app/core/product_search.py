@@ -262,7 +262,7 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
         )
 
     response = await anyio.to_thread.run_sync(_do_query)
-    print(response)
+    # print(response)
     # Build matches directly from returned metadata (single round-trip)
     matches: List[Dict[str, Any]] = []
     for m in getattr(response, "matches", []) or []:
