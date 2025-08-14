@@ -55,22 +55,39 @@ async def new_stt_stream() -> SarvamSTTStreamHandler:
     await stt.start_stream()
     return stt
 
+# --- NEW: helper to normalize phone strings into a stable caller id
+def _canonical_caller(val: str | None) -> str | None:
+    if not val:
+        return None
+    s = str(val).strip()
+    # keep leading + and digits only
+    s2 = re.sub(r'[^0-9+]', '', s)
+    if not s2 and s:
+        # fallback if Twilio-style "client:xyz"
+        return s
+    return s2 or None
+
 @router.websocket("/stream")
-async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
+async def stream_audio(websocket: WebSocket, db=Depends(get_db)):
     logging.info("Incoming WebSocket connection - before accept")
     await websocket.accept()
     logging.info("✅ WebSocket connection accepted at /stream")
     print("✅ WebSocket connection accepted at /stream")
-    # analyze_message.reset()  # <-- you need to add this method inside TextileAnalyzer
+
     stt = await new_stt_stream()
+
     stream_sid = None
-    mode="call"
+    mode = "call"
     lang_code = 'en-IN'  # Default language
     bot_is_speaking = False
     tts_task = None
     current_language = None
     tenant_id = None
-    
+
+    # --- NEW: keep per-connection session key
+    session_key: str | None = None
+    caller_number: str | None = None   # NEW
+
     async def stop_tts():
         """Stop TTS if bot is speaking"""
         nonlocal bot_is_speaking, tts_task
@@ -78,52 +95,76 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
             logging.info("Interrupt detected, stopping TTS.")
             bot_is_speaking = False
             if tts_task:
-                tts_task.cancel()  # Cancel the ongoing TTS task
-                await tts_task  #
+                try:
+                    tts_task.cancel()
+                    await tts_task
+                except Exception:
+                    pass
+
     async def receive_messages():
         """Receive WebSocket messages and feed audio to STT"""
-        nonlocal stream_sid, tenant_id, db
+        nonlocal stream_sid, tenant_id, db, session_key, caller_number
         is_outbound_call = None  # Track call type
         try:
             while True:
                 data = await websocket.receive_text()
                 message = json.loads(data)
                 event_type = message.get("event")
+
                 if bot_is_speaking:
                     await stop_tts()
-                
-                
+
                 if event_type == "connected":
-                    print("greetings")
-                    greeting = "Hello..I am From Krishvatech Texttile"
+                    # NOTE: stream_sid may not be set yet; greet is optional
+                    greeting = "Hello.. I am from KrishvaTech Textile."
                     audio = await synthesize_text(greeting, 'en-IN')
+                    # optional: don't block on TTS
                     await speak_pcm(audio, websocket, stream_sid)
-                    
+
                 if event_type == "start":
                     stream_sid = message.get("stream_sid")
-                    start_payload = message.get("start", {})
+                    start_payload = message.get("start", {}) or {}
                     logging.info(f"start_payload : {start_payload}")
-                    phone_number = start_payload.get("to", "unknown")
-                    logging.info(f"Final phone: {phone_number}")
-                    
-                    if phone_number:
-                        tenant_id = await get_tenant_id_by_phone(phone_number, db)
+
+                    # Bot's DID (tenant) is usually 'to'; caller is 'from'
+                    phone_to   = start_payload.get("to", "unknown")     # bot number
+                    phone_from = start_payload.get("from") or start_payload.get("caller")  # user number
+
+                    logging.info(f"Raw to={phone_to}, from={phone_from}")
+                    if phone_to:
+                        tenant_id = await get_tenant_id_by_phone(phone_to, db)
+                    caller_number = _canonical_caller(phone_from)
+
                     logging.info(f"Tenant ID resolved: {tenant_id}")
+                    logging.info(f"Caller number canonical: {caller_number}")
                     logging.info(f"stream_sid: {stream_sid}")
-                    custom_params = start_payload.get("custom_parameters", {})
-                    print("custom_params=",custom_params)
+
+                    # --- NEW: build stable per-customer session key
+                    if tenant_id is not None:
+                        who = caller_number or stream_sid or "unknown"
+                        session_key = f"{tenant_id}:voice:{who}"
+                        logging.info(f"[SESSION_KEY] {session_key}")
+                    else:
+                        # still build something to avoid None (isolates to stream)
+                        session_key = f"unknown_tenant:voice:{stream_sid or 'unknown'}"
+                        logging.warning("Tenant not resolved; using stream-scoped session_key")
+
+                    custom_params = start_payload.get("custom_parameters", {}) or {}
+                    print("custom_params=", custom_params)
+
                 if event_type == "media":
                     pcm = base64.b64decode(message["media"]["payload"])
                     await stt.send_audio_chunk(pcm)  # Feed chunk to STT (non-blocking)
+
                 if event_type == "stop":
                     logging.info("Call ended.")
                     break
         except WebSocketDisconnect:
             logging.info(":octagonal_sign: WebSocket disconnected")
-            
+
     async def process_transcripts():
         """Process STT transcripts, generate replies, and handle TTS"""
-        nonlocal current_language
+        nonlocal current_language, session_key, stream_sid
         last_activity = time.time()
         last_user_lang = lang_code
         while True:
@@ -131,21 +172,18 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
                 txt, is_final, lang = await asyncio.wait_for(stt.get_transcript(), timeout=0.2)
                 if is_final and txt:
                     print(f"Final Transcript={txt}")
-                    print("final transcript time=",datetime.now())
+                    print("final transcript time=", datetime.now())
                     logging.info(f"Final transcript: {txt}")
                     if re.fullmatch(r'[\W_]+', txt.strip()):
                         logging.info("Transcript only punctuation, ignoring")
                         continue
-                    # print("calling Detect language = ",datetime.now())
-                    detected_lang,_ = await detect_language(txt, last_user_lang)
-                    # print("after Detect language = ",datetime.now())
 
-                    # Fix conversation language once set, but update if neutral or English greetings only
+                    detected_lang, _ = await detect_language(txt, last_user_lang)
+
                     if current_language is None:
                         current_language = detected_lang
                         logging.info(f"Conversation language set to {current_language}")
                     else:
-                        # If current_language is neutral or en-IN (greeting), update to detected_lang if meaningful
                         if current_language in ['neutral', 'en-IN'] and detected_lang in ['hi-IN', 'gu-IN']:
                             current_language = detected_lang
                             logging.info(f"Conversation language updated to {current_language}")
@@ -154,63 +192,66 @@ async def stream_audio(websocket: WebSocket,db=Depends(get_db)):
 
                     lang = current_language
                     last_user_lang = current_language
-                    
-                    start_intent = time.perf_counter()
+
                     intent, new_entities, intent_confidence = await detect_textile_intent_openai(txt, lang)
-                    elapsed_intent = (time.perf_counter() - start_intent) * 1000
-                    # logging.info(f"detect_textile_intent_openai took {elapsed_intent:.2f} ms")
-                    # print(f"detect_textile_intent_openai took {elapsed_intent:.2f} ms")
                     if intent_confidence < 0.5:
                         logging.info(f"Ignoring transcript due to low intent confidence: {intent_confidence}")
-                        continue  # Skip processing
-                    last_activity = time.time()  # Reset silence timer
-                    
-                    start_analyzer = time.perf_counter()
+                        continue
+                    last_activity = time.time()
+
+                    # --- NEW: safety fallback if start event didn't run yet
+                    if not session_key:
+                        who = caller_number or stream_sid or "unknown"
+                        session_key = f"{tenant_id or 'unknown_tenant'}:voice:{who}"
+                        logging.info(f"[SESSION_KEY:late] {session_key}")
+
+                    # --- PASS THE SESSION KEY HERE ---
                     ai_reply = await analyze_message(
                         text=txt,
-                        tenant_id=tenant_id ,
+                        tenant_id=tenant_id,
                         language=lang,
                         intent=intent,
-                        new_entities=new_entities,         # correct keyword
-                        intent_confidence=intent_confidence, # correct keyword
-                        mode=mode
+                        new_entities=new_entities,
+                        intent_confidence=intent_confidence,
+                        mode=mode,
+                        session_key=session_key,          # ✅ critical
                     )
-                    print("ai-reply=",ai_reply)
-                    elapsed_analyzer = (time.perf_counter() - start_analyzer) * 1000
-                    # logging.info(f"analyzer.analyze_message took {elapsed_analyzer:.2f} ms")
-                    print(f"analyzer.analyze_message took {elapsed_analyzer:.2f} ms")
-                    last_activity = time.time()
-                    
+
+                    print("ai-reply=", ai_reply)
+
                     if isinstance(ai_reply, dict):
-                        answer_text = ai_reply.get('answer', '') or ai_reply.get("reply_text") or ai_reply.get("reply") or ai_reply.get("followup_reply")or ""
+                        answer_text = (
+                            ai_reply.get('answer', '')
+                            or ai_reply.get("reply_text")
+                            or ai_reply.get("reply")
+                            or ai_reply.get("followup_reply")
+                            or ""
+                        )
                     else:
-                        # Handle string case: perhaps it's an error message or fallback
-                        answer_text = str(ai_reply)  # Or set a default like "Sorry, this feature is under development."
+                        answer_text = str(ai_reply)
                         logging.warning(f"ai_reply is not a dict: {ai_reply}")
 
-                    if lang == "neutral":
-                        tts_lang = 'en-IN'  # or set your preferred default language
-                    else:
-                        tts_lang = lang
-                    print("calling tts=",datetime.now())
+                    tts_lang = 'en-IN' if lang == "neutral" else lang
                     audio = await synthesize_text(answer_text, language_code=tts_lang)
+
+                    # optional: run TTS as task to allow interruption
+                    # nonlocal captured above
+                    # tts_task = asyncio.create_task(speak_pcm(audio, websocket, stream_sid))
+                    # bot_is_speaking = True
                     await speak_pcm(audio, websocket, stream_sid)
 
                 elif txt:
                     logging.info(f"Interim: {txt}")
                     last_activity = time.time()
             except asyncio.TimeoutError:
-                # Check for prolonged silence (e.g., no response after TTS)
-                if time.time() - last_activity > 15:  # Adjustable timeout
+                if time.time() - last_activity > 15:
                     logging.info("No response from user after TTS.")
-                    last_activity = time.time()  # Reset or handle end of turn
+                    last_activity = time.time()
                 continue
 
     try:
-        # Start both tasks concurrently
         receiver_task = asyncio.create_task(receive_messages())
         processor_task = asyncio.create_task(process_transcripts())
-        # Wait for either task to complete (e.g., disconnect or stop)
         done, pending = await asyncio.wait(
             [receiver_task, processor_task],
             return_when=asyncio.FIRST_COMPLETED

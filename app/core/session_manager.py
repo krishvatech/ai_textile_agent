@@ -1,29 +1,20 @@
-# session_manager.py
-from typing import Dict, Any
+# app/core/session_manager.py
+from typing import Any, Dict, Union
 
-# Process-local store (no Redis)
 _SESS: Dict[str, Dict[str, Any]] = {}
 
-
-def _key(user_id: str, tenant_id: int | str, channel: str) -> str:
-    return f"{tenant_id}:{channel.lower()}:{user_id}"
-
+def _key(user_id: Union[str, int], tenant_id: Union[str, int], channel: str) -> str:
+    return f"{tenant_id}:{str(channel).lower()}:{user_id}"
 
 class SessionManager:
     @staticmethod
-    async def get_session(
-        user_id: str, *, tenant_id: int | str, channel: str
-    ) -> Dict[str, Any]:
+    async def get_session(user_id: Union[str, int], *, tenant_id: Union[str, int], channel: str) -> Dict[str, Any]:
         return _SESS.get(_key(user_id, tenant_id, channel), {})
 
     @staticmethod
-    async def set_session(
-        user_id: str, data: Dict[str, Any], *, tenant_id: int | str, channel: str
-    ) -> None:
+    async def set_session(user_id: Union[str, int], data: Dict[str, Any], *, tenant_id: Union[str, int], channel: str) -> None:
         _SESS[_key(user_id, tenant_id, channel)] = dict(data)
 
     @staticmethod
-    async def clear_session(
-        user_id: str, *, tenant_id: int | str, channel: str
-    ) -> None:
+    async def clear_session(user_id: Union[str, int], *, tenant_id: Union[str, int], channel: str) -> None:
         _SESS.pop(_key(user_id, tenant_id, channel), None)

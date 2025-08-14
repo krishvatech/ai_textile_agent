@@ -130,15 +130,24 @@ async def receive_whatsapp_message(request: Request):
 
     logging.info(f"Message from {from_number}: {text}")
 
+    # 🔑 NEW: build a per-customer session key (tenant + channel + sender-id)
+    channel = "whatsapp"                          # fixed channel tag
+    external_user_id = f"wa:{from_number}"        # canonical sender id (NOT EXOPHONE)
+    # tenant_id we will resolve below (based on business number)
+
     async for db in get_db():
         try:
-            # 1) Resolve tenant
+            # 1) Resolve tenant (mapped to your business EXOPHONE)
             tenant_id = await get_tenant_id_by_phone(EXOPHONE, db)
             if not tenant_id:
                 logging.error(f"No tenant mapped to business number {EXOPHONE}. Check tenants.whatsapp_number.")
                 return {"status": "no_tenant"}
 
-            # 2) Upsert customer
+            # ✅ build final session_key now (after we know tenant_id)
+            session_key = f"{tenant_id}:{channel}:{external_user_id}"
+            logging.info(f"[SESSION_KEY] {session_key}")   # debug: remove in prod
+
+            # 2) Upsert customer (per-sender)
             customer = await get_or_create_customer(
                 db,
                 tenant_id=tenant_id,
@@ -147,7 +156,7 @@ async def receive_whatsapp_message(request: Request):
                 preferred_language=None,
             )
 
-            # 3) Open (or get) active session
+            # 3) Open (or get) active session (DB-level isolation per customer)
             chat_session = await get_or_open_active_session(db, customer_id=customer.id)
 
             # 4) Save inbound message
@@ -158,18 +167,20 @@ async def receive_whatsapp_message(request: Request):
                 text=text,
                 msg_id=sid,
                 direction="in",
-                meta={"msg_type": msg_type, "raw": data},
+                meta={
+                    "msg_type": msg_type,
+                    "raw": data,
+                    "session_key": session_key,      # optional: for audit
+                },
             )
 
             # 5) Detect language + AI reply
             current_language = customer.preferred_language or "en-IN"
             if current_language not in SUPPORTED_LANGUAGES:
                 logging.info("Detecting language...")
-                detected = await detect_language(text, "en-IN")  # Pass text and default
-                # Handle tuple output (e.g., (lang, confidence)) or single value
+                detected = await detect_language(text, "en-IN")
                 current_language = detected[0] if isinstance(detected, tuple) else detected
-                # Update customer's preferred language for future sessions
-                await update_customer_language(db, customer.id, current_language)  # Assume this function exists or add it
+                await update_customer_language(db, customer.id, current_language)
 
             logging.info(f"Using language: {current_language}")
 
@@ -177,6 +188,7 @@ async def receive_whatsapp_message(request: Request):
             intent_type, entities, confidence = await detect_textile_intent_openai(text, current_language)
 
             try:
+                # 🔑 NEW: pass the per-customer session_key to analyze_message
                 raw_reply = await analyze_message(
                     text=text,
                     tenant_id=tenant_id,
@@ -185,7 +197,8 @@ async def receive_whatsapp_message(request: Request):
                     intent=intent_type,
                     new_entities=entities,
                     intent_confidence=confidence,
-                    mode="chat",   # important for WhatsApp
+                    mode="chat",             # important for WhatsApp
+                    session_key=session_key  # ✅ this isolates memory/entities
                 )
                 print('reply..................................!')
                 print(raw_reply)
@@ -209,12 +222,13 @@ async def receive_whatsapp_message(request: Request):
 
             # 7) Save outbound(s)
             await append_transcript_message(
-                db, chat_session, role="assistant", text=reply_text, direction="out", meta={"reply_to": sid}
+                db, chat_session, role="assistant", text=reply_text, direction="out",
+                meta={"reply_to": sid, "session_key": session_key}  # optional
             )
             if followup_text:
                 await append_transcript_message(
                     db, chat_session, role="assistant", text=followup_text, direction="out",
-                    meta={"reply_to": sid, "followup": True},
+                    meta={"reply_to": sid, "followup": True, "session_key": session_key},
                 )
 
             # 8) Commit
