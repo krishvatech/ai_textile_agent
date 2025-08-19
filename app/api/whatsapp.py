@@ -1,20 +1,24 @@
-from fastapi import FastAPI, Request,APIRouter
+# app/api/whatsapp.py
+from fastapi import FastAPI, Request, APIRouter
 from dotenv import load_dotenv
-from datetime import datetime, timedelta  
+from datetime import datetime, timedelta
 import os
 import logging
 import httpx
 from sqlalchemy import text
+
 from app.db.session import get_db
 from app.core.lang_utils import detect_language
 from app.core.intent_utils import detect_textile_intent_openai
-# from app.core.chat_persistence import create_chat_session
 from app.core.ai_reply import analyze_message
 from app.core.chat_persistence import (
     get_or_create_customer,
     get_or_open_active_session,
     append_transcript_message,
 )
+
+# 🔽 NEW: fuzzy matching for direct product pick
+from rapidfuzz import process, fuzz
 
 # Load environment variables
 load_dotenv()
@@ -24,7 +28,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO
 )
-logging.info(f"Conversation language remains as")
+logging.info("Conversation language remains as")
 
 # Exotel Credentials from environment
 EXOTEL_SID = os.getenv("EXOTEL_SID")
@@ -39,6 +43,7 @@ router = APIRouter()
 processed_message_sids = {}
 mode = "chat"
 
+
 async def get_tenant_id_by_phone(phone_number: str, db):
     """
     Fetch tenant id by phone number from the database.
@@ -50,6 +55,7 @@ async def get_tenant_id_by_phone(phone_number: str, db):
         return row[0]
     return None
 
+
 async def update_customer_language(db, customer_id: int, language: str):
     """
     Update the preferred_language for a customer in the database.
@@ -58,11 +64,13 @@ async def update_customer_language(db, customer_id: int, language: str):
     await db.execute(query, {"language": language, "customer_id": customer_id})
     # No commit here; it's handled in the main flow
 
+
 async def get_tenant_name_by_phone(phone_number: str, db):
     query = text("SELECT name FROM tenants WHERE whatsapp_number = :phone AND is_active = true LIMIT 1")
     result = await db.execute(query, {"phone": phone_number})
     row = result.fetchone()
     return row[0] if row else None
+
 
 async def get_tenant_category_by_phone(phone_number: str, db):
     """
@@ -95,6 +103,7 @@ async def get_tenant_category_by_phone(phone_number: str, db):
     # return a simple Python list of strings
     return [r[0] for r in rows]
 
+
 async def send_whatsapp_reply(to: str, body: str):
     """
     Send WhatsApp reply using Exotel API.
@@ -125,6 +134,50 @@ async def send_whatsapp_reply(to: str, body: str):
     async with httpx.AsyncClient() as client:
         response = await client.post(url, json=payload, headers=headers)
         # logging.info(f"Exotel API Response: {response.status_code} {response.text}")
+
+
+# ---------- NEW HELPERS: direct product pick ----------
+async def get_tenant_products_by_phone(phone_number: str, db):
+    """
+    Return list[(product_id, product_name)] for the tenant mapped to business WhatsApp number.
+    Only non-empty names are returned.
+    """
+    q = text("""
+        WITH t AS (
+          SELECT id FROM tenants WHERE whatsapp_number = :phone AND is_active = true LIMIT 1
+        )
+        SELECT p.id, p.name
+        FROM products p, t
+        WHERE p.tenant_id = t.id
+          AND p.name IS NOT NULL
+          AND TRIM(p.name) <> ''
+    """)
+    rows = (await db.execute(q, {"phone": phone_number})).fetchall() or []
+    return [(r[0], r[1]) for r in rows]
+
+
+async def try_resolve_direct_pick(db, phone_number: str, message: str, threshold: int = 90):
+    """
+    If the user message looks like a direct selection of a product title,
+    resolve it to product_id using fuzzy match against tenant's product names.
+    Returns:
+      dict | None, e.g. {"intent_type": "direct_product_pick",
+                          "entities": {"product_id": 123, "product_name": "Exact Name"}}
+    """
+    prods = await get_tenant_products_by_phone(phone_number, db)
+    if not prods:
+        return None
+
+    names = [n for _, n in prods if n]
+    # Use full message for fuzzy match — downstream flow will confirm missing details
+    best = process.extractOne(message, names, scorer=fuzz.WRatio)
+    if best and best[1] >= threshold:
+        title = best[0]
+        pid = next(i for (i, n) in prods if n == title)
+        return {"intent_type": "direct_product_pick", "entities": {"product_id": pid, "product_name": title}}
+    return None
+# -----------------------------------------------------
+
 
 @router.post("/")
 async def receive_whatsapp_message(request: Request):
@@ -157,9 +210,9 @@ async def receive_whatsapp_message(request: Request):
 
     from_number = message.get("from", "")
     msg_type = message.get("content", {}).get("type")
-    text = message["content"]["text"]["body"] if msg_type == "text" else f"[{msg_type} message received]"
+    text_msg = message["content"]["text"]["body"] if msg_type == "text" else f"[{msg_type} message received]"
 
-    logging.info(f"Message from {from_number}: {text}")
+    logging.info(f"Message from {from_number}: {text_msg}")
 
     # 🔑 NEW: build a per-customer session key (tenant + channel + sender-id)
     channel = "whatsapp"                          # fixed channel tag
@@ -195,7 +248,7 @@ async def receive_whatsapp_message(request: Request):
                 db,
                 chat_session,
                 role="user",
-                text=text,
+                text=text_msg,
                 msg_id=sid,
                 direction="in",
                 meta={
@@ -209,20 +262,30 @@ async def receive_whatsapp_message(request: Request):
             current_language = customer.preferred_language or "en-IN"
             if current_language not in SUPPORTED_LANGUAGES:
                 logging.info("Detecting language...")
-                detected = await detect_language(text, "en-IN")
+                detected = await detect_language(text_msg, "en-IN")
                 current_language = detected[0] if isinstance(detected, tuple) else detected
                 await update_customer_language(db, customer.id, current_language)
 
             logging.info(f"Using language: {current_language}")
 
             tenant_name = await get_tenant_name_by_phone(EXOPHONE, db) or "Your Shop"
-            tenant_categories = await get_tenant_category_by_phone(EXOPHONE, db)
-            intent_type, entities, confidence = await detect_textile_intent_openai(text, current_language,allowed_categories=tenant_categories)
+
+            # 🔥 NEW: Try direct product pick BEFORE intent LLM call
+            direct_pick = await try_resolve_direct_pick(db, EXOPHONE, text_msg)
+            if direct_pick:
+                intent_type = "direct_product_pick"
+                entities = direct_pick["entities"]
+                confidence = 0.99
+            else:
+                tenant_categories = await get_tenant_category_by_phone(EXOPHONE, db)
+                intent_type, entities, confidence = await detect_textile_intent_openai(
+                    text_msg, current_language, allowed_categories=tenant_categories
+                )
 
             try:
-                # 🔑 NEW: pass the per-customer session_key to analyze_message
+                # 🔑 Pass the per-customer session_key to analyze_message
                 raw_reply = await analyze_message(
-                    text=text,
+                    text=text_msg,
                     tenant_id=tenant_id,
                     tenant_name=tenant_name,
                     language=current_language,
@@ -230,27 +293,27 @@ async def receive_whatsapp_message(request: Request):
                     new_entities=entities,
                     intent_confidence=confidence,
                     mode="chat",             # important for WhatsApp
-                    session_key=session_key  # ✅ this isolates memory/entities
+                    session_key=session_key  # ✅ isolates memory/entities
                 )
                 print("Message................................!")
-                print("message=",text)
+                print("message=", text_msg)
                 print('reply..................................!')
-                # print(raw_reply)
                 reply = raw_reply if isinstance(raw_reply, dict) else {"reply_text": str(raw_reply)}
 
-                reply_text    = reply.get("reply_text") or reply.get("answer") \
-                                or "Sorry, I could not process your request right now."
+                reply_text = reply.get("reply_text") or reply.get("answer") \
+                             or "Sorry, I could not process your request right now."
                 followup_text = reply.get("followup_reply")
-                media_urls    = reply.get("media") or []
+                media_urls = reply.get("media") or []
             except Exception:
                 logging.exception("AI analyze_message failed")
                 reply_text, followup_text = (
                     "Sorry, our assistant is having trouble responding at the moment. We'll get back to you soon!",
                     None,
                 )
-            print("reply=",reply_text)
+            print("reply=", reply_text)
             print('reply..................................!')
-            print("Followup=",followup_text)
+            print("Followup=", followup_text)
+
             # 6) Send replies
             await send_whatsapp_reply(to=from_number, body=reply_text)
             if followup_text:
@@ -275,4 +338,3 @@ async def receive_whatsapp_message(request: Request):
             return {"status": "error"}
         finally:
             break
-

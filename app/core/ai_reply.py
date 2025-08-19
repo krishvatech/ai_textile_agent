@@ -10,11 +10,13 @@ from dateutil import parser as dateparser
 from app.core.central_system_prompt import Textile_Prompt 
 import random
 from sqlalchemy import text as sql_text  # Import if not already present
+from sqlalchemy import select  # ✅
 from app.db.session import SessionLocal
 from app.core.rental_utils import is_variant_available
 from app.core.product_search import pinecone_fetch_records
 from app.core.phase_ask_inquiry import format_inquiry_reply,fetch_attribute_values,resolve_categories
 from app.core.asked_now_detector import detect_requested_attributes_async
+from app.db.models import Product, ProductVariant  # ✅
 import json
 
 
@@ -87,7 +89,7 @@ def _build_dynamic_heading(e: dict) -> str:
 
     # ✅ show size only if not "Freesize" (handles Free size / One Size, etc.)
     size_val = str(e.get("size") or "").strip()
-    if size_val and size_val.lower() != "Freesize":
+    if size_val and size_val.lower() != "freesize":
         suffix.append(f"size {size_val}")
 
     tail = (" " + " ".join(suffix)) if suffix else ""
@@ -106,6 +108,46 @@ def _build_item_tags(product: dict, collected: dict) -> str:
             tags.append(str(val).strip())
     return " ".join(f"- {t}" for t in tags)
 
+def _normalize_url(url: Optional[str]) -> Optional[str]:
+    """
+    Ensure a usable http(s) link. Accepts bare domain or /path URLs too.
+    """
+    if not url or not isinstance(url, str):
+        return None
+    u = url.strip()
+    if not u:
+        return None
+    if u.startswith(("http://", "https://")):
+        return u
+    if u.startswith("//"):
+        return "https:" + u
+    if u.startswith("/"):
+        # If you have a SITE_BASE env, prepend it. Otherwise return as-is.
+        base = os.getenv("SITE_BASE", "").rstrip("/")
+        return (base + u) if base else ("https://" + u.lstrip("/"))
+    # bare domain or slug
+    return "https://" + u
+
+def _product_link_from_model(prod: Any) -> Optional[str]:
+    """
+    Try common attribute names on Product to get a URL.
+    """
+    for attr in ("product_url", "url", "page_url", "link", "permalink", "web_url"):
+        val = getattr(prod, attr, None)
+        if val:
+            n = _normalize_url(str(val))
+            if n:
+                return n
+    return None
+
+def _ack_line(prod: Any) -> str:
+    """
+    Build the acknowledgement line with product name + link.
+    """
+    name = getattr(prod, "name", "") or "Selected product"
+    link = _product_link_from_model(prod)
+    return f"✅ Samjha: ‘{name}’" + (f" — {link}" if link else "")
+
 
 async def generate_product_pitch_prompt(language: str, entities: Dict[str, Any], products: Optional[list] = None) -> str:
     """
@@ -117,6 +159,7 @@ async def generate_product_pitch_prompt(language: str, entities: Dict[str, Any],
     if not isinstance(entities, dict):
         logging.warning(f"generate_product_pitch_prompt: entities is not a dict ({type(entities)}), using empty.")
         entities = {}
+    # ✅ clean and simple
     lang_root = (language or "en-IN").split("-")[0].lower()
     lang_hint = {
         "en": "English (India) — use English words only. No Hindi, no Hinglish.",
@@ -149,7 +192,6 @@ async def generate_product_pitch_prompt(language: str, entities: Dict[str, Any],
             {"role": "system", "content": sys_msg},
             {"role": "user", "content": prompt},
         ],
-        # gpt_model: do not send temperature/max_tokens
     )
     return completion.choices[0].message.content.strip()
 
@@ -257,7 +299,6 @@ async def FollowUP_Question(
             {"role": "system", "content": "You are an expert, concise, friendly assistant. Respect language instructions strictly."},
             {"role": "user", "content": prompt}
         ]
-        # gpt_model: don't pass temperature/max_tokens
     )
     return completion.choices[0].message.content.strip()
 
@@ -279,10 +320,8 @@ def normalize_entities(entities):
     for k, v in entities.items():
         if isinstance(v, str):
             if k in preserve_space_keys:
-                # Lowercase but keep spaces and trim extras
-                new_entities[k] = v.lower().strip()  # e.g., 'Kurta Sets' -> 'kurta sets'
+                new_entities[k] = v.lower().strip()
             else:
-                # Full normalization for other keys
                 new_entities[k] = v.lower().replace(" ", "").strip()
         else:
             new_entities[k] = v
@@ -292,7 +331,6 @@ def normalize_entities(entities):
 def dedupe_products(pinecone_data):
     grouped = {}
     for p in (pinecone_data or []):
-        # Prefer a stable product id; fall back to name+tenant+rent/sale
         key = (
             p.get("product_id")
             or p.get("id")
@@ -337,7 +375,6 @@ def dedupe_products(pinecone_data):
 
 
 async def generate_greeting_reply(language, tenant_name, session_history=None, mode: str = "call") -> str:
-    # More concise, shop-aware greeting 
     emoji_instruction = "Do not use emojis." if mode == "call" else "Use emojis if you like."
     prompt = Textile_Prompt + (
         f"You are a friendly WhatsApp assistant for our {tenant_name} textile and clothing business.\n"
@@ -355,7 +392,6 @@ async def generate_greeting_reply(language, tenant_name, session_history=None, m
                 {"role": "system", "content": "You are an expert conversation starter and friendly textile assistant."},
                 {"role": "user", "content": prompt}
             ]
-            # gpt_model: don't pass temperature/max_tokens
         )
         reply = completion.choices[0].message.content.strip()
         if reply:
@@ -393,7 +429,6 @@ async def llm_route_other(
         ask_fields: list[str] (≤3),
         confidence: float }
     """
-    # 1) Pull live categories (helps the model craft a helpful 'help' reply)
     categories: List[str] = []
     try:
         async with SessionLocal() as db:
@@ -424,15 +459,12 @@ async def llm_route_other(
 
     user_payload = {
         "locale_instruction": _lang_hint(language),
-        "business_prompt": Textile_Prompt,  # your global policy block
+        "business_prompt": Textile_Prompt,
         "user_message": text,
-        # "entities_collected": {k: v for k, v in (acc_entities or {}).items() if v not in [None, "", [], {}]},
-         "entities_collected": {k: v for k, v in (acc_entities or {}).items() if v not in [None, "", [], {}] and k != 'user_name'},
+        "entities_collected": {k: v for k, v in (acc_entities or {}).items() if v not in [None, "", [], {}] and k != 'user_name'},
         "recent_history": recent_history,
         "categories": categories[:12],
-        "known_profile": {
-            "name": (acc_entities or {}).get("user_name") or ""
-        },
+        "known_profile": {"name": (acc_entities or {}).get("user_name") or ""},
         "allowed_actions": ["smalltalk","help","followup","handoff","unknown"],
         "allowed_followup_fields": [
             "is_rental","occasion","fabric","size","color","category",
@@ -455,20 +487,16 @@ async def llm_route_other(
             messages=[
                 {"role": "system", "content": sys_msg},
                 {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-                # Safety nudge so 'json' definitely appears in messages:
                 {"role": "system", "content": "Remember: respond with JSON only — a single JSON object."}
             ],
         )
-
         data = json.loads(completion.choices[0].message.content)
     except Exception as e:
         logging.warning(f"LLM router JSON parse/error: {e}")
-        # Safe language-aware help fallback
         lr = (language or "en-IN").split("-")[0].lower()
         fallback = render_categories_reply(lr, categories or ["Sarees","Kurta Sets","Lehengas","Blouses","Gowns"])
         return {"action": "help", "reply": fallback, "ask_fields": [], "confidence": 0.4}
 
-    # Defaults + clamps
     data.setdefault("action", "unknown")
     data.setdefault("reply", "")
     data.setdefault("ask_fields", [])
@@ -478,13 +506,8 @@ async def llm_route_other(
 
     return data
 
-# NEW: extract a user's name from free text (LLM, JSON mode)
+# Extract user's name (optional)
 async def extract_user_name(text: str, language: Optional[str]) -> Optional[str]:
-    """
-    Ask gpt-5-mini (JSON mode) to see if the message states the user's name.
-    Returns a clean display name or None.
-    """
-    # Quick short-circuit: empty or trivial text → skip
     if not text or len(text.strip()) < 2:
         return None
 
@@ -492,7 +515,6 @@ async def extract_user_name(text: str, language: Optional[str]) -> Optional[str]
         "You are a precise NER helper.\n"
         "Identify if the user is stating THEIR OWN NAME in the message.\n"
         "Only return JSON (json) with keys: has_name (bool), name (string).\n"
-        "The 'name' must be the person's display name as said (e.g., 'Avinash' or 'Avinash Od').\n"
         "If unsure, has_name=false and name=\"\".\n"
     )
     user_payload = {
@@ -515,14 +537,12 @@ async def extract_user_name(text: str, language: Optional[str]) -> Optional[str]
             messages=[
                 {"role":"system","content":sys_msg},
                 {"role":"user","content":json.dumps(user_payload, ensure_ascii=False)},
-                {"role":"system","content":"Respond with JSON only — a single JSON object."}  # ensures 'json' appears
+                {"role":"system","content":"Respond with JSON only — a single JSON object."}
             ],
         )
         data = json.loads(resp.choices[0].message.content)
         if data.get("has_name") and isinstance(data.get("name"), str) and data["name"].strip():
-            # Basic cleanup: collapse inner spaces
             name = " ".join(data["name"].strip().split())
-            # Cap length to avoid prompt injection
             if len(name) <= 60:
                 return name
     except Exception as e:
@@ -535,7 +555,7 @@ async def handle_asking_inquiry_variants(
     acc_entities: Dict[str, Any],
     db: AsyncSession,
     tenant_id: int,
-    detect_requested_attributes_async,  # inject your function
+    detect_requested_attributes_async,
 ) -> str:
     try:
         asked_now = await detect_requested_attributes_async(text or "", acc_entities or {})
@@ -544,11 +564,8 @@ async def handle_asking_inquiry_variants(
         asked_now = []
         
     if not asked_now:
-        # sensible default for generic browsing messages
         asked_now = ["category"]
 
-    # 2) If they asked for price/rental_price but no category was set upstream,
-    #    don't guess. Ask for a category (keep it minimal).
     needs_category = any(k in asked_now for k in ("price", "rental_price")) and not (acc_entities or {}).get("category")
     if needs_category:
         try:
@@ -560,16 +577,13 @@ async def handle_asking_inquiry_variants(
             return f"Please choose a category for the price range:\n{bullets}"
         return "Please tell me the category for the price range."
 
-    # 3) Fetch values strictly based on provided entities (no mutation)
     values = await fetch_attribute_values(db, tenant_id, asked_now, acc_entities or {})
-
-    # 4) Render reply (falls back to 'Nothing found for that query.' if empty)
     return format_inquiry_reply(values,acc_entities)
 
 
 
 # ======================
-# MAIN ORCHESTRATOR (Step-3 applied: per-customer session_key)
+# MAIN ORCHESTRATOR
 # ======================
 async def analyze_message(
     text: str,
@@ -580,7 +594,7 @@ async def analyze_message(
     new_entities: dict | None = None,
     intent_confidence: float = 0.0,
     mode: str = "call",
-    session_key: Optional[str] = None,  # ✅ NEW
+    session_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     language = language
     logging.info(f"Detected language in analyze_message: {language}")
@@ -597,10 +611,10 @@ async def analyze_message(
     logging.info(f"Tenant id ==== {tenant_name}======")
     mode = mode
 
-    # ---- Per-customer session key (fallback to tenant_id for backward-compat) ----
+    # Per-customer session key
     sk = session_key or str(tenant_id)
 
-    # Load state for this session_key
+    # Load state
     history = session_memory.get(sk, [])
     acc_entities = session_entities.get(sk, None)
     last_main_intent = last_main_intent_by_session.get(sk, None)
@@ -617,8 +631,7 @@ async def analyze_message(
             
     def _lc(x): return (str(x or "").strip().lower())
 
-    # If the user picked a new/different category this turn,
-    # drop sticky fields that would wrongly constrain the search.
+    # Reset dependent filters if category changed
     new_cat = (new_entities or {}).get("category")
     if new_cat:
         prev_cat = acc_entities.get("category")
@@ -627,11 +640,10 @@ async def analyze_message(
                 acc_entities.pop(dep, None)
             acc_entities["category"] = new_cat
             
-    # Better logging: show both detected vs resolved
     logging.info(f"intent_type(detected)..... {detected_intent}")
     logging.info(f"intent_type(resolved)..... {intent_type}")
 
-    # --- Respond
+    # --- greeting
     if intent_type == "greeting":
         reply = await generate_greeting_reply(language, tenant_name, session_history=history, mode=mode)
         history.append({"role": "assistant", "content": reply})
@@ -645,14 +657,8 @@ async def analyze_message(
             "collected_entities": acc_entities
         }
 
+    # --- search results
     elif intent_type == "product_search":
-       
-        # 1) Collect and normalize entities for Pinecone filtering
-        # filtered_entities = filter_non_empty_entities(acc_entities)
-        # if 'user_name' in filtered_entities:
-        #     del filtered_entities['user_name']
-        # filtered_entities_norm = normalize_entities(filtered_entities)
-        # filtered_entities_norm = clean_entities_for_pinecone(filtered_entities_norm)
         turn_filters = {
             k: v for k, v in (new_entities or {}).items()
             if v not in (None, "", [], {}) and k in ("category","color","fabric","size","is_rental","occasion")
@@ -660,7 +666,6 @@ async def analyze_message(
         if not turn_filters.get("category") and acc_entities.get("category"):
             turn_filters["category"] = acc_entities["category"]
 
-        # Don’t carry “Freesize” unless category is Saree
         sz  = str(turn_filters.get("size") or "").strip().lower()
         cat = str(turn_filters.get("category") or "").strip().lower()
         if sz == "freesize" and cat not in ("saree","sari"):
@@ -670,11 +675,9 @@ async def analyze_message(
         filtered_entities_norm  = normalize_entities(filtered_entities)
         filtered_entities_norm  = clean_entities_for_pinecone(filtered_entities_norm)
 
-        # 2) Fetch + dedupe products
         pinecone_data = await pinecone_fetch_records(filtered_entities_norm, tenant_id)
         pinecone_data = dedupe_products(pinecone_data)
 
-        # 3) (Optional) collect a few unique images
         seen, image_urls = set(), []
         for p in (pinecone_data or []):
             for u in (p.get("image_urls") or []):
@@ -683,7 +686,6 @@ async def analyze_message(
                     image_urls.append(u)
         image_urls = image_urls[:4]
 
-        # 4) Build heading + lines using ONLY collected entities so far
         collected_for_text = {
             k: v for k, v in (filtered_entities or {}).items()
             if k in ("category", "color", "fabric", "size", "is_rental","occasion") and v not in (None, "", [], {})
@@ -693,35 +695,23 @@ async def analyze_message(
 
         product_lines = []
         for product in (pinecone_data or []):
-            # Name
             name = product.get("name") or product.get("product_name") or "Unnamed Product"
-
-            # Tags: always include [rent]/[sale], plus collected entities only
             tags = _build_item_tags(product, collected_for_text)
-
-            # URL (with simple normalization + fallbacks)
             url = product.get("product_url")
             if isinstance(url, str):
-                url = url.strip()
-                if url and not url.startswith(("http://", "https://")):
-                    url = "https://" + url.lstrip("/")
-
-            # Final line (include URL only if present)
+                url = _normalize_url(url)
             product_lines.append(f"- {name} {tags}" + (f" — {url}" if url else ""))
         
-        # 5) Final message
         products_text = (
             f"{heading}\n" + "\n".join(product_lines)
             if product_lines else
             "Sorry, no products match your search so far."
         )
 
-
         followup = await FollowUP_Question(intent_type, acc_entities, language, session_history=history)
         reply_text = f"{products_text}"
 
         if mode == "call":
-            # Generate and speak full response
             spoken_pitch = await generate_product_pitch_prompt(language, acc_entities, pinecone_data)
             voice_response = f"{spoken_pitch} {followup}"
             history.append({"role": "assistant", "content": voice_response})
@@ -733,7 +723,7 @@ async def analyze_message(
                 "tenant_id": tenant_id,
                 "history": history,
                 "collected_entities": acc_entities,
-                "answer": voice_response,  # For TTS in call
+                "answer": voice_response,
                 "followup_reply": followup,
                 "reply_text": reply_text,
                 "media": image_urls 
@@ -741,9 +731,7 @@ async def analyze_message(
         elif mode == "chat":
             history.append({"role": "assistant", "content": reply_text})
             _commit()
-            print("="*20)
-            print(reply_text)
-            print("="*20)
+            print("="*20); print(reply_text); print("="*20)
             return {
                 "pinecone_data": pinecone_data,
                 "intent_type": intent_type,
@@ -756,12 +744,135 @@ async def analyze_message(
                 "media": image_urls 
             }
 
+    # --- ✅ DIRECT PRODUCT PICK with ACK (name + link) + separate follow-ups
+    elif intent_type == "direct_product_pick":
+        async with SessionLocal() as session_db:
+            acc_entities = acc_entities or {}
+
+            # Prefer product_id from webhook
+            pid = (new_entities or {}).get("product_id") or acc_entities.get("product_id")
+
+            # Fallback: resolve by name if provided
+            if not pid:
+                name = (new_entities or {}).get("product_name")
+                if name:
+                    row = (await session_db.execute(
+                        select(Product.id).where(Product.name.ilike(name))
+                    )).first()
+                    pid = row[0] if row else None
+
+            if not pid:
+                reply = "Item exact match nahi mila. Kya similar options dikhaun?"
+                history.append({"role": "assistant", "content": reply}); _commit()
+                return {
+                    "input_text": text, "language": language, "intent_type": intent_type,
+                    "reply_text": reply, "history": history, "collected_entities": acc_entities
+                }
+
+            prod = (await session_db.execute(select(Product).where(Product.id == pid))).scalar_one_or_none()
+            if not prod:
+                reply = "Product not found. Similar options dikha du?"
+                history.append({"role": "assistant", "content": reply}); _commit()
+                return {
+                    "input_text": text, "language": language, "intent_type": intent_type,
+                    "reply_text": reply, "history": history, "collected_entities": acc_entities
+                }
+
+            variants = (await session_db.execute(
+                select(ProductVariant).where(ProductVariant.product_id == pid)
+            )).scalars().all()
+
+            acc_entities["product_id"] = pid
+            if getattr(prod, "type", None) and not acc_entities.get("category"):
+                acc_entities["category"] = prod.type
+
+            # ACK line with product name + link
+            ack = _ack_line(prod)
+
+            # Sets for choices
+            mode_set   = {("rent" if getattr(v, "is_rental", False) else "buy") for v in variants}
+            color_set  = {getattr(v, "color", None) for v in variants if getattr(v, "color", None)}
+            size_set   = {getattr(v, "size", None) for v in variants if getattr(v, "size", None)}
+
+            # User choices so far
+            is_rental  = acc_entities.get("is_rental")    # True/False/None
+            color      = acc_entities.get("color")
+            size       = acc_entities.get("size")
+
+            # Saree rule → Freesize
+            cat = (acc_entities.get("category") or "").lower()
+            if cat in ("saree", "sari"):
+                acc_entities["size"] = "Freesize"
+                size = "Freesize"
+
+            # Helper: return primary + optional follow-up (for 2nd message)
+            def _two_step(prim: str, follow: Optional[str] = None):
+                history.append({"role": "assistant", "content": prim})
+                _commit()
+                payload = {
+                    "input_text": text, "language": language, "intent_type": intent_type,
+                    "reply_text": prim, "history": history, "collected_entities": acc_entities
+                }
+                if follow:
+                    payload["followup_reply"] = follow
+                if mode == "call":
+                    payload["answer"] = prim if not follow else f"{prim} {follow}"
+                return payload
+
+            # 1) Ask BUY vs RENT (if both exist and not chosen)
+            if is_rental is None and (mode_set != {"buy"}):
+                return _two_step(ack, "Aap **Buy** karna chahenge ya **Rent**?")
+
+            # 2) Ask color (if multiple colors)
+            if not color and len(color_set) > 1:
+                options = ", ".join(sorted(list(color_set))[:6])
+                return _two_step(ack, f"Kaunsa color chahiye: {options}")
+
+            # 3) Ask size (if needed and multiple)
+            if not size and len(size_set) > 1 and cat not in ("saree","sari"):
+                options = ", ".join(sorted(list(size_set))[:6])
+                return _two_step(ack, f"Size batayiye: {options}")
+
+            # Filter variants by chosen facets
+            def ok(v):
+                c1 = (is_rental is None) or (getattr(v, "is_rental", False) == bool(is_rental))
+                c2 = (not color) or (str(getattr(v, "color", "")).lower() == str(color).lower())
+                c3 = (not acc_entities.get("size")) or (str(getattr(v, "size", "")).lower() == str(acc_entities["size"]).lower())
+                return c1 and c2 and c3
+
+            cands = [v for v in variants if ok(v)]
+
+            # 4) If exactly one variant → show price and ask qty (as follow-up)
+            if len(cands) == 1:
+                v = cands[0]
+                price_txt = (
+                    f"Rent ₹{int(v.rental_price)}/day" if getattr(v, "is_rental", False)
+                    else f"Price ₹{int(v.price) if v.price is not None else 0}"
+                )
+                acc_entities["product_variant_id"] = v.id
+                prim = f"{ack}\n{getattr(v,'color','')} | {getattr(v,'size','')} | {getattr(v,'fabric','')} — {price_txt}."
+                return _two_step(prim, "Qty batayiye?")
+
+            # 5) Else show 2–3 options and ask which one
+            sample = cands[:3] if len(cands) > 3 else cands
+            lines = []
+            for v in sample:
+                price_txt = (
+                    f"Rent ₹{int(v.rental_price)}/day" if getattr(v, "is_rental", False)
+                    else f"Price ₹{int(v.price) if v.price is not None else 0}"
+                )
+                color_txt = getattr(v, "color", "") or "-"
+                size_txt  = getattr(v, "size", "") or "-"
+                fabric_txt= getattr(v, "fabric", "") or "-"
+                lines.append(f"- {color_txt} | {size_txt} | {fabric_txt} — {price_txt}")
+            prim = f"{ack}\nYeh options available hain:\n" + "\n".join(lines)
+            return _two_step(prim, "Konsa chahiye?")
+
+    # --- availability
     elif intent_type == "availability_check":
-        # --- Extract/resolve dates ---
         start_date = None
         end_date = None
 
-        # 1) Try entities first
         if acc_entities.get("start_date"):
             try:
                 start_date = dateparser.parse(str(acc_entities["start_date"]), dayfirst=True, fuzzy=True).date()
@@ -773,7 +884,6 @@ async def analyze_message(
             except Exception:
                 end_date = None
 
-        # 2) Fallback: parse from the user text like "I want rent on 15 August"
         if start_date is None:
             try:
                 start_date = dateparser.parse(text, dayfirst=True, fuzzy=True).date()
@@ -791,9 +901,8 @@ async def analyze_message(
                 }
 
         if end_date is None:
-            end_date = start_date  # default to single-day rental
+            end_date = start_date
 
-        # --- Figure out the variant id from collected entities ---
         variant_id = acc_entities.get("product_variant_id")
 
         if not variant_id:
@@ -809,16 +918,10 @@ async def analyze_message(
                 "collected_entities": acc_entities
             }
 
-        # --- Check availability in DB ---
         async with SessionLocal() as db:
             available = await is_variant_available(db, int(variant_id), start_date, end_date)
 
-        if available:
-            reply = f"✅ Available on {start_date.strftime('%d %b %Y')}."
-        else:
-            reply = f"❌ Not available on {start_date.strftime('%d %b %Y')}."
-
-        # Return in the same shape as your other branches
+        reply = f"✅ Available on {start_date.strftime('%d %b %Y')}." if available else f"❌ Not available on {start_date.strftime('%d %b %Y')}."
         history.append({"role": "assistant", "content": reply})
         _commit()
         if mode == "call":
@@ -826,7 +929,7 @@ async def analyze_message(
                 "input_text": text,
                 "language": language,
                 "intent_type": intent_type,
-                "answer": reply,  # TTS uses this
+                "answer": reply,
                 "history": history,
                 "collected_entities": acc_entities
             }
@@ -840,8 +943,9 @@ async def analyze_message(
                 "collected_entities": acc_entities
             } 
 
+    # --- attribute inquiry
     elif intent_type == "asking_inquiry":
-        async with SessionLocal() as session:  # AsyncSession
+        async with SessionLocal() as session:
             reply_text = await handle_asking_inquiry_variants(
                 text=text,
                 acc_entities=acc_entities or {},
@@ -861,16 +965,15 @@ async def analyze_message(
             "collected_entities": acc_entities,
         }
         if mode == "call":
-            payload["answer"] = reply_text  # TTS payload
+            payload["answer"] = reply_text
         else:
             payload["reply_text"] = reply_text
 
         return payload
        
-
-    elif intent_type == "other" or intent_type is None:  # NEW
+    # --- other / fallback
+    elif intent_type == "other" or intent_type is None:
         routed = await llm_route_other(text, language, tenant_id, acc_entities, history)
-        # Simple language-aware fallback if router returned empty reply
         if not routed.get("reply"):
             if (language or "").lower().startswith("hi"):
                 reply = "मैं आपकी कैसे मदद कर सकता/सकती हूँ — किराये या खरीद?"
@@ -889,7 +992,7 @@ async def analyze_message(
                 "input_text": text,
                 "language": language,
                 "intent_type": "other",
-                "answer": reply,   # TTS payload
+                "answer": reply,
                 "history": history,
                 "collected_entities": acc_entities,
                 "router": routed
@@ -904,7 +1007,7 @@ async def analyze_message(
                 "collected_entities": acc_entities,
                 "router": routed
             }
-    else:  # NEW final fallback → behave like 'other'
+    else:
         routed = await llm_route_other(text, language, tenant_id, acc_entities, history)
         reply = routed.get("reply") or (
             "How can I help you today — rental or purchase?"

@@ -1,6 +1,7 @@
 from datetime import datetime, date
 from variant_sync import update_variant_price, delete_variant
 
+
 import os
 import json
 import enum
@@ -243,4 +244,4 @@ def auto_batch_insert_from_file(file_path):
 
 if __name__ == '__main__':
     # Replace path as needed
-    auto_batch_insert_from_file('app/tests/csvjson.json')
+    auto_batch_insert_from_file('app/tests/blouses_rental_variants.json')
