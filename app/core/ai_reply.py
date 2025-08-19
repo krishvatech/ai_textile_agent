@@ -1,9 +1,11 @@
+from __future__ import annotations
 from dotenv import load_dotenv
 import os
 import re
 import logging
 from typing import Dict, Any, List, Optional
 from openai import AsyncOpenAI
+from sqlalchemy.ext.asyncio import AsyncSession
 from dateutil import parser as dateparser
 from app.core.central_system_prompt import Textile_Prompt 
 import random
@@ -11,8 +13,10 @@ from sqlalchemy import text as sql_text  # Import if not already present
 from app.db.session import SessionLocal
 from app.core.rental_utils import is_variant_available
 from app.core.product_search import pinecone_fetch_records
-from app.core.phase_ask_inquiry import detect_requested_attributes,fetch_distinct_options,apply_price_parsing_to_entities,fetch_starting_price,render_starting_price_single,render_starting_price_table,_price_mode_from_text_and_entities,render_options_reply,_build_product_lines,clean_filters_for_turn
+from app.core.phase_ask_inquiry import format_inquiry_reply,fetch_attribute_values,resolve_categories
+from app.core.asked_now_detector import detect_requested_attributes_async
 import json
+
 
 load_dotenv()
 api_key = os.getenv("GPT_API_KEY")
@@ -366,67 +370,6 @@ async def generate_greeting_reply(language, tenant_name, session_history=None, m
     ]
     return random.choice(greetings)
 
-def _infer_is_rental_from_text(text: str, acc_entities: dict) -> None:
-    """
-    If is_rental not set, infer from keywords in the current user text.
-    Idempotent; mutates acc_entities in place.
-    """
-    if acc_entities.get("is_rental") in (None, "", [], {}):
-        s = (text or "").lower()
-        # rent-side triggers (EN + hi + gu + common variants)
-        if re.search(r"\b(rent|rental|on\s*rent|for\s*rent|hire|kiraye|kiraye\s*pe|भाड़े|भाड़े|भाड़े\s*पर|ભાડે)\b", s):
-            acc_entities["is_rental"] = True
-        # buy-side triggers
-        elif re.search(r"\b(buy|purchase|kharee?d|खरीद(?:ना)?)\b", s):
-            acc_entities["is_rental"] = False
-
-def _infer_occasion_from_text(text: str, acc_entities: dict) -> None:
-    """
-    If occasion not set, map common phrases to: wedding|party|festival|casual.
-    Mutates acc_entities in place.
-    """
-    if (acc_entities or {}).get("occasion") not in (None, "", [], {}):
-        return
-
-    s = (text or "").lower()
-
-    # Hindi/Gujarati + English triggers (keep this small and precise)
-    if any(x in s for x in ["wedding", "shaadi", "shadi", "vivah", "baraat", "reception", "pher", "pherā", "pheras"]):
-        acc_entities["occasion"] = "wedding"
-        return
-    if any(x in s for x in ["party", "partywear", "party wear"]):
-        acc_entities["occasion"] = "party"
-        return
-    if any(x in s for x in ["festival", "festive", "diwali", "navratri", "eid"]):
-        acc_entities["occasion"] = "festival"
-        return
-    if any(x in s for x in ["daily wear", "casual", "office", "regular"]):
-        acc_entities["occasion"] = "casual"
-        return
-
-# --- Heuristic backfill for a facet (e.g., fabric) from user's short message ---
-async def _backfill_facet_from_text(text: str, tenant_id: int, ctx: dict, facet: str) -> str | None:
-    """
-    If the user sends a very short message like 'georgette' or 'silk',
-    try to match it to a known option for the given facet (fabric/color/size).
-    Returns the canonical option string if matched, else None.
-    """
-    raw = (text or "").strip()
-    if not raw or len(raw.split()) > 3:  # only try for short inputs
-        return None
-
-    # fetch available options for this facet in current context (category/rent/occasion, etc.)
-    options = await fetch_distinct_options(tenant_id, ctx or {}, facet, limit=60)
-
-    def _norm(s: str) -> str:
-        return re.sub(r"[\s\._-]+", " ", (s or "").strip().lower())
-
-    needle = _norm(raw)
-    for opt in options or []:
-        if _norm(opt) == needle or needle in _norm(opt):
-            return opt
-    return None
-
 
 def clean_entities_for_pinecone(entities):
     return {k:v for k,v in entities.items() if v not in [None, '', [], {}]}
@@ -587,6 +530,44 @@ async def extract_user_name(text: str, language: Optional[str]) -> Optional[str]
     return None
 
 
+async def handle_asking_inquiry_variants(
+    text: str,
+    acc_entities: Dict[str, Any],
+    db: AsyncSession,
+    tenant_id: int,
+    detect_requested_attributes_async,  # inject your function
+) -> str:
+    try:
+        asked_now = await detect_requested_attributes_async(text or "", acc_entities or {})
+        print("asked_now=",asked_now)
+    except Exception:
+        asked_now = []
+        
+    if not asked_now:
+        # sensible default for generic browsing messages
+        asked_now = ["category"]
+
+    # 2) If they asked for price/rental_price but no category was set upstream,
+    #    don't guess. Ask for a category (keep it minimal).
+    needs_category = any(k in asked_now for k in ("price", "rental_price")) and not (acc_entities or {}).get("category")
+    if needs_category:
+        try:
+            cats = await resolve_categories(db, tenant_id, {})
+        except Exception:
+            cats = []
+        if cats:
+            bullets = "\n".join(f"• {c}" for c in cats[:12])
+            return f"Please choose a category for the price range:\n{bullets}"
+        return "Please tell me the category for the price range."
+
+    # 3) Fetch values strictly based on provided entities (no mutation)
+    values = await fetch_attribute_values(db, tenant_id, asked_now, acc_entities or {})
+
+    # 4) Render reply (falls back to 'Nothing found for that query.' if empty)
+    return format_inquiry_reply(values,acc_entities)
+
+
+
 # ======================
 # MAIN ORCHESTRATOR (Step-3 applied: per-customer session_key)
 # ======================
@@ -624,127 +605,28 @@ async def analyze_message(
     acc_entities = session_entities.get(sk, None)
     last_main_intent = last_main_intent_by_session.get(sk, None)
 
-    # helper to persist
     def _commit():
         session_memory[sk] = history
         session_entities[sk] = acc_entities
-
-    history.append({"role": "user", "content": text})
-    prev_category = (acc_entities or {}).get("category")
-
-    # --- Hard reset on category switch: keep ONLY the new category
-    new_category_from_turn = (entities or {}).get("category")
-    if new_category_from_turn:
-        if (prev_category is None) or (
-            str(new_category_from_turn).strip().lower()
-            != str(prev_category or "").strip().lower()
-        ):
-            # reset to the new category, but keep name and (optionally) rent/buy
-            acc_entities = {
-                "category": new_category_from_turn,
-                # uncomment next line if you want rent/buy to persist across category switches
-                # "is_rental": (acc_entities or {}).get("is_rental"),
-            }
-
-    # --- Merge entities
-    if acc_entities is None:
-        acc_entities = entities.copy()
-    else:
-        for k, v in entities.items():
-            if v not in [None, '', [], {}]:
-                acc_entities[k] = v
-    
-    if not acc_entities.get("user_name"):
-        maybe_name = await extract_user_name(text, language)
-        if maybe_name:
-            acc_entities["user_name"] = maybe_name
-    
-    # 🔎 Infer rent/buy from the current turn before any branching/cleanups
-    _infer_is_rental_from_text(text, acc_entities)
-
-    # 🔎 Infer occasion the same way (e.g., "for wedding")
-    _infer_occasion_from_text(text, acc_entities)
-
-    # 🔎 Backfill FABRIC if user sent a short message like "georgette"
-    if not acc_entities.get("fabric"):
-        guessed_fabric = await _backfill_facet_from_text(text, tenant_id, acc_entities, "fabric")
-        if guessed_fabric:
-            acc_entities["fabric"] = guessed_fabric
-
-    # --- Rental/Purchase logic
-    is_rental = acc_entities.get("is_rental")
-
-    if is_rental is True:
-        acc_entities.pop("price", None)        # Remove 'price' if present
-    elif is_rental is False:
-        acc_entities.pop("rental_price", None) # Remove 'rental_price' if present
-
-    # Persist merged entities
-    sp_probe = apply_price_parsing_to_entities(text or "", acc_entities)
-    if sp_probe.get("__starting_price__"):
-        # merge back everything EXCEPT the private flag
-        acc_entities.update({k: v for k, v in sp_probe.items() if k != "__starting_price__"})
-
-        # For true "starting", drop granular filters so min isn't inflated
-        local_sp = dict(acc_entities)
-        for k in ("size", "color", "fabric", "occasion"):
-            local_sp.pop(k, None)
-
-        lang_root = (language or "en-IN").split("-")[0].lower()
-        price_mode = _price_mode_from_text_and_entities(text, local_sp)  # 'price' or 'rental_price'
-        sp = await fetch_starting_price(tenant_id, local_sp, price_mode)
-
-        if isinstance(sp, dict):  # category present
-            reply = render_starting_price_single(
-                lang_root,
-                sp.get("category") or "Items",
-                sp.get("value"),
-                price_mode
-            )
-        else:  # no category -> table by category
-            reply = render_starting_price_table(lang_root, sp or [], price_mode)
         
-        acc_entities.pop("__starting_price__", None)
-        local_sp.pop("__starting_price__", None)
+    if acc_entities is None:
+        acc_entities = {}
+    for k, v in (new_entities or {}).items():
+        if v not in (None, "", [], {}):
+            acc_entities[k] = v
+            
+    def _lc(x): return (str(x or "").strip().lower())
 
-        history.append({"role": "assistant", "content": reply})
-        _commit()
-        return {
-            "input_text": text,
-            "language": language,
-            "intent_type": intent_type or "asking_inquiry",
-            "reply_text": reply if mode != "call" else None,
-            "answer": reply if mode == "call" else None,
-            "history": history,
-            "collected_entities": local_sp
-        }
-
-    print('intent_type...................', intent_type)
-
-    # ---- What did the user ask in this turn? (needed by sticky logic & guards)
-    asked_now = detect_requested_attributes(text or "")
-    if (new_entities or {}).get("category") and "category" not in asked_now:
-        asked_now.append("category")
-    generic_category_ask = ("category" in asked_now) and not ((new_entities or {}).get("category"))
-
-    # === INTENT STICKY LOGIC ===
-    # if intent_type in REFINEMENT_INTENTS and intent_type != "rental_inquiry" and last_main_intent:
-    #     intent_type = last_main_intent
-
-    # ---- Contextual upgrade: attribute-only messages become product_search when a category is known or we were already searching
-    if intent_type in (None, "other"):
-        has_attr = any(
-            (acc_entities.get(k) not in (None, "", [], {}))
-            for k in ("occasion", "fabric", "color", "size", "is_rental", "price", "rental_price")
-        )
-        if has_attr and ((acc_entities.get("category")) or (last_main_intent == "product_search")):
-            intent_type = "product_search"
-
-    if (intent_type in REFINEMENT_INTENTS) and (last_main_intent in MAIN_INTENTS) and not generic_category_ask:
-        intent_type = last_main_intent
-    if intent_type in MAIN_INTENTS:
-        last_main_intent_by_session[sk] = intent_type
-
+    # If the user picked a new/different category this turn,
+    # drop sticky fields that would wrongly constrain the search.
+    new_cat = (new_entities or {}).get("category")
+    if new_cat:
+        prev_cat = acc_entities.get("category")
+        if not prev_cat or _lc(prev_cat) != _lc(new_cat):
+            for dep in ("size", "color", "fabric", "occasion", "price", "rental_price", "is_rental"):
+                acc_entities.pop(dep, None)
+            acc_entities["category"] = new_cat
+            
     # Better logging: show both detected vs resolved
     logging.info(f"intent_type(detected)..... {detected_intent}")
     logging.info(f"intent_type(resolved)..... {intent_type}")
@@ -764,60 +646,33 @@ async def analyze_message(
         }
 
     elif intent_type == "product_search":
-        # If this is actually a generic category question, show categories instead of listing a stale category
-        if ("category" in asked_now) and not ((new_entities or {}).get("category")):
-            lang_root = (language or "en-IN").split("-")[0].lower()
-            opts = await fetch_distinct_options(tenant_id, {}, "category", limit=12)
-            reply = render_categories_reply(lang_root, opts or [])
-            history.append({"role": "assistant", "content": reply})
-            _commit()
-            return {
-                "input_text": text,
-                "language": language,
-                "intent_type": "asking_inquiry",
-                "reply_text": reply,
-                "history": history,
-                "collected_entities": {},  # clear previous filters for a fresh browse
-            }
-
+       
         # 1) Collect and normalize entities for Pinecone filtering
-        filtered_entities = filter_non_empty_entities(acc_entities)
-        if 'user_name' in filtered_entities:
-            del filtered_entities['user_name']
-        filtered_entities_norm = normalize_entities(filtered_entities)
-        filtered_entities_norm = clean_entities_for_pinecone(filtered_entities_norm)
+        # filtered_entities = filter_non_empty_entities(acc_entities)
+        # if 'user_name' in filtered_entities:
+        #     del filtered_entities['user_name']
+        # filtered_entities_norm = normalize_entities(filtered_entities)
+        # filtered_entities_norm = clean_entities_for_pinecone(filtered_entities_norm)
+        turn_filters = {
+            k: v for k, v in (new_entities or {}).items()
+            if v not in (None, "", [], {}) and k in ("category","color","fabric","size","is_rental","occasion")
+        }
+        if not turn_filters.get("category") and acc_entities.get("category"):
+            turn_filters["category"] = acc_entities["category"]
+
+        # Don’t carry “Freesize” unless category is Saree
+        sz  = str(turn_filters.get("size") or "").strip().lower()
+        cat = str(turn_filters.get("category") or "").strip().lower()
+        if sz == "freesize" and cat not in ("saree","sari"):
+            turn_filters.pop("size", None)
+
+        filtered_entities       = filter_non_empty_entities(turn_filters)
+        filtered_entities_norm  = normalize_entities(filtered_entities)
+        filtered_entities_norm  = clean_entities_for_pinecone(filtered_entities_norm)
 
         # 2) Fetch + dedupe products
         pinecone_data = await pinecone_fetch_records(filtered_entities_norm, tenant_id)
         pinecone_data = dedupe_products(pinecone_data)
-
-        # 👇 EARLY EXIT when no results: be friendly and suggest other products
-        if not pinecone_data:
-            lang_root = (language or "en-IN").split("-")[0].lower()
-            # Suggest top categories so user can pivot quickly
-            try:
-                top_cats = await fetch_distinct_options(tenant_id, {}, "category", limit=6)
-            except Exception:
-                top_cats = []
-            cat_suggestion = " / ".join(top_cats[:3]) if top_cats else "Saree / Kurta Sets / Blouse"
-
-            reply_text = (
-                "Sorry, no products match those filters.\n"
-                f"Would you like to check another product? For example: {cat_suggestion}"
-            )
-
-            history.append({"role": "assistant", "content": reply_text})
-            _commit()
-            return {
-                "pinecone_data": [],
-                "intent_type": intent_type,
-                "language": language,
-                "tenant_id": tenant_id,
-                "history": history,
-                "collected_entities": acc_entities,
-                "reply_text": reply_text,
-                "media": []
-            }
 
         # 3) (Optional) collect a few unique images
         seen, image_urls = set(), []
@@ -860,48 +715,6 @@ async def analyze_message(
             if product_lines else
             "Sorry, no products match your search so far."
         )
-
-        # >>> ADD THIS BLOCK: when no results, return friendly message with NO follow-up
-        if not product_lines:
-            lang_root = (language or "en-IN").split("-")[0].lower()
-            # Suggest a few categories to pivot to
-            try:
-                cats = await fetch_distinct_options(tenant_id, {}, "category", limit=6)
-            except Exception:
-                cats = []
-
-            if lang_root == "hi":
-                base = "माफ़ कीजिए, इन फ़िल्टर के साथ कोई प्रोडक्ट नहीं मिला।"
-                ask  = "क्या आप कोई और कैटेगरी देखना चाहेंगे?"
-            elif lang_root == "gu":
-                base = "માફ કરશો, આ ફિલ્ટર સાથે કોઈ પ્રોડક્ટ મળ્યાં નથી."
-                ask  = "શું તમે બીજી કેટેગરી જોવા માંગો છો?"
-            else:
-                base = "Sorry—no products match those filters."
-                ask  = "Would you like to check another category?"
-
-            bullet_cats = ("\n" + "\n".join(f"• {c}" for c in (cats or []))) if cats else ""
-            reply_text = f"{base}\n{ask}{bullet_cats}"
-
-            history.append({"role": "assistant", "content": reply_text})
-            _commit()
-
-            # Return with NO followup when there are no products
-            payload = {
-                "pinecone_data": [],
-                "intent_type": intent_type,
-                "language": language,
-                "tenant_id": tenant_id,
-                "history": history,
-                "collected_entities": acc_entities,
-                "followup_reply": None,
-                "reply_text": reply_text,
-                "media": image_urls
-            }
-            if mode == "call":
-                payload["answer"] = reply_text
-            return payload
-        # <<< END ADD
 
 
         followup = await FollowUP_Question(intent_type, acc_entities, language, session_history=history)
@@ -1028,190 +841,32 @@ async def analyze_message(
             } 
 
     elif intent_type == "asking_inquiry":
-        # Language root (en/hi/gu etc.)
-        lang_root = (language or "en-IN").split("-")[0].lower()
-
-        # 0) What did the user ask this turn?
-        asked_now = detect_requested_attributes(text or "")
-        if (new_entities or {}).get("category") and "category" not in asked_now:
-            asked_now.append("category")
-        generic_category_ask = ("category" in asked_now) and not ((new_entities or {}).get("category"))
-
-        # 1) Merge + clean entities for this turn
-        acc_clean = clean_filters_for_turn(acc_entities, asked_now)
-        acc_clean = apply_price_parsing_to_entities(text or "", acc_clean)
-
-        # --- HARD RESET for a generic "what do you have (in clothes/categories)" ask
-        #     Do NOT keep any prior filters such as size/occasion/is_rental/fabric/color.
-        if generic_category_ask:
-            acc_clean = {}  # full fresh browse (no sticky filters)
-
-        logging.info(f"[ASKING] asked_now={asked_now}")
-        logging.info(f"[ASKING] acc_entities(before)={acc_entities}")
-        logging.info(f"[ASKING] acc_clean(before sticky)={acc_clean}")
-
-        # 2) STICKY: only re-apply previous filters when it's NOT a generic category ask
-        if not generic_category_ask:
-            for key in ("category", "occasion", "fabric", "color", "size", "is_rental"):
-                if (acc_clean.get(key) in (None, "", [], {})) and ((acc_entities or {}).get(key) not in (None, "", [], {})):
-                    acc_clean[key] = acc_entities[key]
-
-        logging.info(f"[ASKING] acc_clean(after sticky)={acc_clean}")
-
-
-
-        # Make rent/buy intent resilient if the text explicitly mentions it this turn
-        text_lc = (text or "").lower()
-        rent_triggers = ("rent pe", "rent per", "on rent", "for rent", "rent chahiye",
-                         "kiraye", "kiraye pe", "भाड़े", "भाड़े", "भाड़े पर", "भाडे", "hire")
-        sale_triggers = ("buy", "purchase", "khareed", "खरीद", "खरीदना")
-        if acc_clean.get("is_rental") in (None, "", []):
-            if any(t in text_lc for t in rent_triggers):
-                acc_clean["is_rental"] = True
-            elif any(t in text_lc for t in sale_triggers):
-                acc_clean["is_rental"] = False
-
-        logging.info(f"[ASKING] acc_clean(after sticky)={acc_clean}")
-
-        # 3) EARLY EXIT: 'starting price' queries (must run BEFORE generic listing)
-        if acc_clean.get("__starting_price__"):
-            # For true "starting", ignore size/color/fabric to avoid inflating minimums
-            local_sp = dict(acc_clean)
-            for k in ("size", "color", "fabric","occasion"):
-                local_sp.pop(k, None)
-
-            price_mode = _price_mode_from_text_and_entities(text, local_sp)  # 'price' or 'rental_price'
-            sp = await fetch_starting_price(tenant_id, local_sp, price_mode)
-
-            if isinstance(sp, dict):
-                reply = render_starting_price_single(lang_root, sp["category"], sp["value"], price_mode)
-            else:
-                reply = render_starting_price_table(lang_root, sp, price_mode)
-
-            # persist cleaned state and return
-            acc_entities.pop("__starting_price__", None)
-            local_sp.pop("__starting_price__", None)
-            history.append({"role": "assistant", "content": reply})
-            _commit()
-            return {
-                "input_text": text,
-                "language": language,
-                "intent_type": intent_type,
-                "reply_text": reply if mode != "call" else None,
-                "answer": reply if mode == "call" else None,
-                "history": history,
-                "collected_entities": local_sp
-            }
-
-        # 4) PRODUCT LISTING when we already know the category
-        if acc_clean.get("category"):
-            # Drop private keys like "__starting_price__" before Pinecone
-            filtered_entities = {k: v for k, v in filter_non_empty_entities(acc_clean).items() if not str(k).startswith("__")}
-            filtered_entities.pop('user_name', None)
-
-            filtered_entities_norm = normalize_entities(filtered_entities)
-            filtered_entities_norm = clean_entities_for_pinecone(filtered_entities_norm)
-
-            pinecone_data = await pinecone_fetch_records(filtered_entities_norm, tenant_id)
-
-            # Collect up to 4 unique images
-            seen, image_urls = set(), []
-            for p in (pinecone_data or []):
-                for u in (p.get("image_urls") or []):
-                    if u and u not in seen:
-                        seen.add(u)
-                        image_urls.append(u)
-            image_urls = image_urls[:4]
-
-            # Build heading + lines based ONLY on collected entities so far
-            collected_for_text = {
-                k: v for k, v in (filtered_entities or {}).items()
-                if k in ("category", "is_rental", "color", "fabric", "size")
-            }
-
-            # If no products found, graceful fallback
-            if not pinecone_data:
-                # Offer the user to try changing color/fabric/size or check other categories
-                # Optionally list available options for one missing attribute
-                try_attr = None
-                for a in ("fabric", "color", "size"):
-                    if not acc_clean.get(a):
-                        try_attr = a
-                        break
-                if try_attr:
-                    opts = await fetch_distinct_options(tenant_id, acc_clean, try_attr, limit=12)
-                    if opts:
-                        reply = render_options_reply(lang_root, try_attr, opts)
-                    else:
-                        reply = "Sorry, no products match your search so far."
-                else:
-                    reply = "Sorry, no products match your search so far."
-
-                acc_entities = acc_clean
-                history.append({"role": "assistant", "content": reply})
-                _commit()
-                return {
-                    "pinecone_data": [],
-                    "intent_type": "product_search",
-                    "language": language,
-                    "tenant_id": tenant_id,
-                    "history": history,
-                    "collected_entities": acc_entities,
-                    "reply_text": reply,
-                    "media": image_urls
-                }
-
-            # Otherwise, build a concise list message
-            heading = _build_dynamic_heading(collected_for_text)
-            lines = _build_product_lines(pinecone_data, collected_for_text)
-            reply = f"{heading}\n" + "\n".join(lines)
-
-            # Persist and return
-            acc_entities = acc_clean
-            history.append({"role": "assistant", "content": reply})
-            _commit()
-            return {
-                "pinecone_data": pinecone_data,
-                "intent_type": "product_search",
-                "language": language,
-                "tenant_id": tenant_id,
-                "history": history,
-                "collected_entities": acc_entities,
-                "reply_text": reply,
-                "media": image_urls
-            }
-
-        # 5) If category not chosen yet, help the user narrow down (show categories/options)
-        # Prefer to ask for one missing attribute and show top options
-        ask_attr = None
-        for a in ("category", "fabric", "color", "size"):
-            if not acc_clean.get(a):
-                ask_attr = a
-                break
-
-        if ask_attr:
-            opts = await fetch_distinct_options(tenant_id, acc_clean, ask_attr, limit=12)
-            if ask_attr == "category":
-                reply = render_categories_reply(lang_root, opts or [])
-            else:
-                reply = render_options_reply(lang_root, ask_attr, opts or [])
-        else:
-            # Fallback prompt
-            reply = "Tell me the category or fabric/color you’re looking for."
-
-        acc_entities = acc_clean
-        history.append({"role": "assistant", "content": reply})
+        async with SessionLocal() as session:  # AsyncSession
+            reply_text = await handle_asking_inquiry_variants(
+                text=text,
+                acc_entities=acc_entities or {},
+                db=session,
+                tenant_id=tenant_id,
+                detect_requested_attributes_async=detect_requested_attributes_async,
+            )
+            print("reply_text=",reply_text)
+        history.append({"role": "assistant", "content": reply_text})
         _commit()
-        return {
+
+        payload = {
             "input_text": text,
             "language": language,
-            "intent_type": intent_type,
-            "reply_text": reply if mode != "call" else None,
-            "answer": reply if mode == "call" else None,
+            "intent_type": "asking_inquiry",
             "history": history,
-            "collected_entities": acc_entities
+            "collected_entities": acc_entities,
         }
+        if mode == "call":
+            payload["answer"] = reply_text  # TTS payload
+        else:
+            payload["reply_text"] = reply_text
 
+        return payload
+       
 
     elif intent_type == "other" or intent_type is None:  # NEW
         routed = await llm_route_other(text, language, tenant_id, acc_entities, history)

@@ -1,638 +1,536 @@
-import re
+from typing import Dict, List, Callable, Awaitable, Any, Optional, Iterable
 import logging
-from typing import List, Tuple, Dict, Any, Iterable
-from sqlalchemy import text as sql_text
-from app.db.session import SessionLocal
+from sqlalchemy import select, func, and_, or_, literal
+from sqlalchemy.ext.asyncio import AsyncSession
+import re
 
-log = logging.getLogger(__name__)
+# --- import your models ---
+from app.db.models import Product, ProductVariant  # adjust path if needed
 
-# ---------- DETECT WHAT USER ASKED IN THIS MESSAGE ----------
-_PATTERNS: Dict[str, re.Pattern] = {
-    "color":     re.compile(r"\b(colou?rs?|hues?|tones?|shade|shades|palette)\b", re.I),
-    "fabric":    re.compile(r"\b(fabrics?|materials?|cloths?|cloth|weaves?|textiles?)\b", re.I),
-    "size":      re.compile(r"\b(size|sizes|measurement|measurements)\b", re.I),
-    "category":  re.compile(r"\b(category|categories|type|types|kind|kinds|clothes?)\b", re.I),
-    "is_rental": re.compile(r"\b(rent|rental|on\s*rent|hire)\b", re.I),
-    "price":     re.compile(
-        r"\b(price|prices|budget|under|below|upto|up\s*to|less\s*than|within|"
-        r"above|over|greater\s*than|more\s*than|between|starting|start|rate)\b",
-        re.I,
-    ),
-}
-
-def detect_requested_attributes(text: str) -> List[str]:
-    if not text:
-        return []
-    s = text or ""
-    return [a for a, rx in _PATTERNS.items() if rx.search(s)]
+# If you DO have an Occasion model via M2M, this import can stay. If not, the resolver will just skip.
+try:
+    from app.db.models import Occasion, product_variant_occasions
+    HAS_OCCASION = True
+except Exception:
+    Occasion = None
+    product_variant_occasions = None
+    HAS_OCCASION = False
 
 
-# ---------- PRICE PHRASE PARSER ----------
-_PRICE_NUM = re.compile(r"(\d{2,7})")
+# =============== helpers ===============
 
-def parse_price_phrase(text: str) -> Dict[str, float | bool]:
-    """
-    Returns any of: {"starting": bool, "min": float, "max": float}
-    Handles:
-      - under/below/upto/up to/less than/within X  -> {"max": X}
-      - above/over/greater than/more than X        -> {"min": X}
-      - between X and Y / X-Y                      -> {"min": lo, "max": hi}
-      - 'starting'/'starting price'/'starting rate'/ 'rate se starting'
-      - bare single number                         -> {"max": X}
-    """
-    s = (text or "").lower()
-
-    # between X and Y / X - Y
-    m = re.search(r"between\s*(\d{2,7})\s*(?:and|to|-)\s*(\d{2,7})", s)
-    if m:
-        a, b = float(m.group(1)), float(m.group(2))
-        lo, hi = (a, b) if a <= b else (b, a)
-        return {"min": lo, "max": hi}
-
-    # under / below / upto / up to / less than / within
-    if re.search(r"\b(under|below|upto|up\s*to|less\s*than|within)\b", s):
-        m = _PRICE_NUM.search(s)
-        if m:
-            return {"max": float(m.group(1))}
-
-    # above / over / greater than / more than / upper
-    if re.search(r"\b(above|over|greater\s*than|more\s*than|upper)\b", s):
-        m = _PRICE_NUM.search(s)
-        if m:
-            return {"min": float(m.group(1))}
-
-    # starting variants (incl. Hinglish)
-    if (
-        re.search(r"\bstart(?:ing)?\b", s)
-        or re.search(r"\b(start(?:ing)?\s*price|start(?:ing)?\s*from|price\s*starts|starting\s*(?:price|rate)|rate\s*se\s*starting)\b", s)
-    ):
-        m = _PRICE_NUM.search(s)  # e.g., "starting from 999"
-        if m:
-            return {"starting": True, "min": float(m.group(1))}
-        return {"starting": True}
-
-    # bare single number => budget/max
-    nums = _PRICE_NUM.findall(s)
-    if len(nums) == 1:
-        return {"max": float(nums[0])}
-
-    return {}
-
-
-# ---------- NORMALIZATION HELPERS ----------
-def _norm_py(s: str) -> str:
-    """Lower, strip, collapse whitespace + punctuation to normalize text."""
-    if not isinstance(s, str):
-        s = str(s or "")
-    s = s.strip().lower()
-    s = re.sub(r"[\s\._-]+", " ", s)
-    return s
-
-def _split_multi(raw: Any) -> List[str]:
-    """Split 'Red & Pink, Navy' => ['Red','Pink','Navy'] ; accept list/str/None."""
-    if raw is None:
-        return []
-    if isinstance(raw, (list, tuple)):
-        vals = [str(x) for x in raw]
-    else:
-        vals = [str(raw)]
-    out: List[str] = []
-    for v in vals:
-        parts = [p.strip() for p in re.split(r"(?:,|/|&|\band\b|\bor\b)", v, flags=re.I) if p and p.strip()]
-        out.extend(parts)
-    # de-dup preserving order
-    seen = set()
-    uniq = []
-    for p in out:
-        k = _norm_py(p)
-        if k not in seen:
-            seen.add(k); uniq.append(p)
-    return uniq
-
-
-# ---------- OCCASION JOIN ----------
-def _add_occasion_join_and_filter(
-    occs: Iterable[str],
-    where: List[str],
-    params: Dict[str, Any],
-) -> Tuple[str, List[str], Dict[str, Any]]:
-    """
-    If 'occasion' or occasions present, add the join and WHERE with OR across values.
-    Returns (join_sql, where, params)
-    """
-    occs = [str(o) for o in (_split_multi(occs) or [])]
-    if not occs:
-        return "", where, params
-
-    join_sql = """
-        JOIN public.product_variant_occasions pvo ON pvo.variant_id = pv.id
-        JOIN public.occasions o ON o.id = pvo.occasion_id
-    """
-
-    ors = []
-    for i, occ in enumerate(occs):
-        key = f"occ_{i}"
-        ors.append(f"LOWER(o.name) = LOWER(:{key})")
-        params[key] = str(occ)
-    where.append("(" + " OR ".join(ors) + ")")
-    return join_sql, where, params
-
-
-# ---------- COERCE RENTAL BOOLEAN ----------
-def _coerce_bool(v: Any) -> bool | None:
+def _as_list(v: Any) -> List[str]:
     if v is None:
-        return None
-    if isinstance(v, bool):
-        return v
-    s = str(v).strip().lower()
-    if s in {"1","true","yes","y","rent","rental","on rent","hire"}:
-        return True
-    if s in {"0","false","no","n","buy","purchase","sale"}:
-        return False
-    return None
+        return []
+    if isinstance(v, (list, tuple, set)):
+        return [str(x) for x in v if str(x).strip()]
+    return [str(v)]
+
+def _add_if(attr_exists: bool, conds: List[Any], cond: Any):
+    if attr_exists:
+        conds.append(cond)
+
+def _norm_nonempty(col):
+    return func.nullif(func.trim(col), "")
+
+def _add_active_trueish(model, conds: List[Any]):
+    """
+    Treat is_active=True or NULL as 'active' to avoid unintentionally filtering out data.
+    Only adds a condition if the model has an is_active column.
+    """
+    if hasattr(model, "is_active"):
+        col = getattr(model, "is_active")
+        conds.append(or_(col.is_(True), col.is_(None)))
+
+def _get_product_col(*candidates: str):
+    """
+    Return the first matching SQLAlchemy column on Product from candidate names.
+    Useful when schema differs (e.g., 'category', 'category_name', 'type', etc.).
+    """
+    for name in candidates:
+        col = getattr(Product, name, None)
+        if col is not None:
+            return col, name
+    return None, None
 
 
-# ---------- PRICE BOUNDS FROM ENTITIES ----------
-def _price_bounds(acc: dict, key: str) -> Tuple[float | None, float | None]:
+async def _distinct_variant_col(
+    db: AsyncSession,
+    col,
+    tenant_id: int,
+    extra_where: Optional[Iterable[Any]] = None,
+    only_in_stock: bool = True,
+) -> List[str]:
     """
-    Interpret a price value in entities:
-    - If only one number is present (e.g., 'under 5000'), treat as MAX.
-    - If you store min/max separately, respect 'price_min'/'price_max' keys when present.
-    Returns (min, max) for the given key: 'price' or 'rental_price'.
+    Distinct non-empty values from ProductVariant.<col>, joined with Product for tenant scoping.
     """
-    if key == "price":
-        return acc.get("price_min"), acc.get("price_max")
+    conds: List[Any] = [Product.id == ProductVariant.product_id, Product.tenant_id == tenant_id]
+
+    _add_active_trueish(Product, conds)
+    _add_active_trueish(ProductVariant, conds)
+
+    if only_in_stock and hasattr(ProductVariant, "available_stock"):
+        conds.append(ProductVariant.available_stock > 0)
+
+    if extra_where:
+        conds.extend(extra_where)
+
+    val = func.trim(col).label("val")
+    stmt = (
+        select(val)
+        .join(Product, Product.id == ProductVariant.product_id)
+        .where(and_(*conds))
+        .where(_norm_nonempty(col).isnot(None))
+        .distinct()
+        .order_by(val)  # ORDER BY expression is in the select list -> ok for DISTINCT
+    )
+
+    res = await db.execute(stmt)
+    return [r[0] for r in res.all()]
+
+
+async def _price_min_max(
+    db: AsyncSession,
+    tenant_id: int,
+    extra_where: Optional[Iterable[Any]] = None,
+    use_rental_price: Optional[bool] = None,
+) -> List[str]:
+    """
+    Returns ["min – max"] for price range.
+    If use_rental_price is True -> use rental_price over variants that are rental.
+    If use_rental_price is False -> use price over purchase variants (is_rental=False).
+    If None -> compute over all variants' price (ignores rental_price).
+    """
+    conds: List[Any] = [Product.id == ProductVariant.product_id, Product.tenant_id == tenant_id]
+    _add_active_trueish(Product, conds)
+    _add_active_trueish(ProductVariant, conds)
+
+    if use_rental_price is True:
+        conds.append(ProductVariant.is_rental.is_(True))
+        target_col = ProductVariant.rental_price
+        conds.append(ProductVariant.rental_price.isnot(None))
+    elif use_rental_price is False:
+        conds.append(ProductVariant.is_rental.is_(False))
+        target_col = ProductVariant.price
+        conds.append(ProductVariant.price.isnot(None))
     else:
-        return acc.get("rental_price_min"), acc.get("rental_price_max")
+        target_col = ProductVariant.price
+        conds.append(ProductVariant.price.isnot(None))
+
+    if extra_where:
+        conds.extend(extra_where)
+
+    stmt = (
+        select(func.min(target_col), func.max(target_col))
+        .join(Product, Product.id == ProductVariant.product_id)
+        .where(and_(*conds))
+    )
+    res = await db.execute(stmt)
+    mn, mx = res.first() or (None, None)
+    if mn is None or mx is None:
+        return []
+    return [f"{int(mn)} – {int(mx)}"]
 
 
-# ---------- WHERE FROM ENTITIES (WITH OCCASION SUPPORT) ----------
-def _where_from_entities_for_price(acc_entities: dict, price_col: str) -> Tuple[List[str], Dict[str, Any], str]:
+def _filters_from_entities(entities: Dict[str, Any]) -> List[Any]:
     """
-    Build WHERE pieces and params from entities for a price-oriented query.
-    Returns (where_clauses, params, occ_join_sql)
+    Build WHERE conditions from already-chosen filters.
+    Case-insensitive matching for category/color/size/fabric.
+    Ignores 'Freesize'/'Free size'/'One Size' to avoid over-filtering.
     """
-    acc = acc_entities or {}
-    where: List[str] = ["p.tenant_id = :tid", "COALESCE(pv.is_active, TRUE) = TRUE"]
-    params: Dict[str, Any] = {}
+    conds: List[Any] = []
 
-    # category
-    if acc.get("category"):
-        where.append("LOWER(p.category) = LOWER(:category)")
-        params["category"] = str(acc["category"])
+    # category (on Product) — case-insensitive
+    cat_col, _cat_name = _get_product_col(
+        "category", "category_name", "product_category", "category_type", "type"
+    )
+    if entities.get("category") and cat_col is not None:
+        categories = [str(c).strip().lower() for c in _as_list(entities["category"])]
+        if categories:
+            conds.append(func.lower(cat_col).in_(categories))
 
-    # fabric (loose normalize)
-    if acc.get("fabric"):
-        where.append(
-            "(REGEXP_REPLACE(LOWER(pv.fabric), '[\\s._-]+', '', 'g') "
-            "LIKE '%' || REGEXP_REPLACE(LOWER(:fabric), '[\\s._-]+', '', 'g') || '%')"
-        )
-        params["fabric"] = str(acc["fabric"])
+    # color (on ProductVariant) — case-insensitive
+    if entities.get("color"):
+        colors = [str(c).strip().lower() for c in _as_list(entities["color"])]
+        if colors:
+            conds.append(func.lower(ProductVariant.color).in_(colors))
 
-    # color (loose)
-    if acc.get("color"):
-        where.append(
-            "(REGEXP_REPLACE(LOWER(pv.color), '[\\s._-]+', '', 'g') "
-            "LIKE '%' || REGEXP_REPLACE(LOWER(:color), '[\\s._-]+', '', 'g') || '%')"
-        )
-        params["color"] = str(acc["color"])
+    # size (on ProductVariant) — ignore free/one-size, otherwise case-insensitive
+    size_val = str((entities or {}).get("size") or "").strip().lower()
+    if size_val and size_val not in ("freesize", "free size", "one size", "onesize"):
+        sizes = [str(s).strip().lower() for s in _as_list(entities["size"])]
+        if sizes:
+            conds.append(func.lower(ProductVariant.size).in_(sizes))
 
-    # size (loose)
-    if acc.get("size"):
-        where.append(
-            "(REGEXP_REPLACE(LOWER(pv.size), '[\\s._-]+', '', 'g') "
-            "LIKE '%' || REGEXP_REPLACE(LOWER(:size), '[\\s._-]+', '', 'g') || '%')"
-        )
-        params["size"] = str(acc["size"])
+    # fabric (on ProductVariant) — case-insensitive
+    if entities.get("fabric"):
+        fabrics = [str(f).strip().lower() for f in _as_list(entities["fabric"])]
+        if fabrics:
+            conds.append(func.lower(ProductVariant.fabric).in_(fabrics))
 
-    # rental vs sale
-    is_rental = _coerce_bool(acc.get("is_rental"))
-    if is_rental is True:
-        where.append("COALESCE(pv.is_rental, FALSE) = TRUE")
-    elif is_rental is False:
-        where.append("COALESCE(pv.is_rental, FALSE) = FALSE")
+    # rental flag
+    if "is_rental" in entities and entities["is_rental"] is not None:
+        conds.append(ProductVariant.is_rental.is_(bool(entities["is_rental"])))
+    elif entities.get("rental") in ("Rent", "Purchase"):
+        conds.append(ProductVariant.is_rental.is_(entities["rental"] == "Rent"))
 
-    # numeric bounds
-    price_min, price_max = _price_bounds(acc, "price")
-    rental_price_min, rental_price_max = _price_bounds(acc, "rental_price")
-
-    if price_col.endswith(".price"):
-        if price_min is not None:
-            where.append("pv.price IS NOT NULL AND pv.price >= :pmin")
-            params["pmin"] = float(price_min)
-        if price_max is not None:
-            where.append("pv.price IS NOT NULL AND pv.price <= :pmax")
-            params["pmax"] = float(price_max)
-    else:
-        if rental_price_min is not None:
-            where.append("pv.rental_price IS NOT NULL AND pv.rental_price >= :rpmin")
-            params["rpmin"] = float(rental_price_min)
-        if rental_price_max is not None:
-            where.append("pv.rental_price IS NOT NULL AND pv.rental_price <= :rpmax")
-            params["rpmax"] = float(rental_price_max)
-
-    # occasions
-    occs = acc.get("occasion") or acc.get("occasions") or []
-    occ_join_sql, where, params = _add_occasion_join_and_filter(occs, where, params)
-
-    return where, params, occ_join_sql
+    return conds
 
 
-# ---------- CHOOSE PRICE MODE ----------
-def _price_mode_from_text_and_entities(text: str, acc_entities: dict) -> str:
+def _format_list_block(title: str, items: List[str]) -> str:
+    if not items:
+        return ""
+    lines = "\n".join(f"• {x}" for x in items)
+    return f"{title}:\n{lines}"
+
+
+# =============== resolvers ===============
+
+async def resolve_categories(db: AsyncSession, tenant_id: int, entities: Dict[str, Any]) -> List[str]:
     """
-    Decide whether the user is talking about 'price' (sale) or 'rental_price' (rent).
-    Priority:
-      1) Explicit is_rental in entities
-      2) Text contains rent/rental/hire
-      3) Default to 'price'
+    Returns distinct categories for a tenant with robust fallbacks:
+      1) Directly from products (tolerant is_active)
+      2) From products joined via variants (tolerant is_active on both)
+      3) Ignore is_active completely (products only)
+      4) Ignore is_active completely (join via variants)
+      If no category-like column exists, returns [] and logs an error.
     """
-    is_rental = _coerce_bool((acc_entities or {}).get("is_rental"))
-    if is_rental is True:
-        return "rental_price"
-    if is_rental is False:
-        return "price"
-    s = (text or "").lower()
-    if re.search(r"\b(rent|rental|on\s*rent|hire)\b", s):
-        return "rental_price"
-    return "price"
-
-
-# ---------- APPLY PARSED PRICE TO ENTITIES ----------
-def apply_price_parsing_to_entities(text: str, acc_entities: dict) -> dict:
-    """
-    Reads 'price' from text (and rental intent) and writes numeric bounds into acc_entities:
-      - price_min / price_max   OR
-      - rental_price_min / rental_price_max
-    Also sets a private flag "__starting_price__" when the query is "starting price".
-    Returns a new dict; does not mutate input.
-    """
-    out = dict(acc_entities or {})
-    out.pop("__starting_price__", None)
-    parsed = parse_price_phrase(text or "")
-    if not parsed:
-        return out
-
-    mode = _price_mode_from_text_and_entities(text, out)  # 'price' or 'rental_price'
-    if parsed.get("starting"):
-        out["__starting_price__"] = mode   # remember which column to use for "starting"
-        # If a number was present with starting, treat as lower bound
-        if parsed.get("min") is not None:
-            if mode == "price":
-                out["price_min"] = parsed["min"]
-            else:
-                out["rental_price_min"] = parsed["min"]
-        return out
-
-    # Regular bounds
-    if mode == "price":
-        if parsed.get("min") is not None:
-            out["price_min"] = parsed["min"]
-        if parsed.get("max") is not None:
-            out["price_max"] = parsed["max"]
-    else:
-        if parsed.get("min") is not None:
-            out["rental_price_min"] = parsed["min"]
-        if parsed.get("max") is not None:
-            out["rental_price_max"] = parsed["max"]
-
-    return out
-
-
-# ---------- STARTING PRICE QUERY ----------
-async def fetch_starting_price(tenant_id: int, acc_entities: dict, mode: str = "price"):
-    """
-    mode: 'price' or 'rental_price'
-    If category present -> returns {'category': cat, 'value': min_value}
-    Else -> returns list[{'category': cat, 'value': min_value}] for top categories by min price (ascending).
-    """
-    price_col = "pv.price" if mode == "price" else "pv.rental_price"
-    where, params, occ_join_sql = _where_from_entities_for_price(acc_entities, price_col)
-    params["tid"] = tenant_id
-
-    from_sql = f"""
-        FROM public.products p
-        JOIN public.product_variants pv ON pv.product_id = p.id
-        {occ_join_sql}
-    """
-
-    async with SessionLocal() as db:
-        if (acc_entities or {}).get("category"):
-            sql = f"""
-                SELECT MIN({price_col}) AS minv
-                {from_sql}
-                WHERE {' AND '.join(where)}
-            """
-            row = (await db.execute(sql_text(sql), params)).fetchone()
-            v = row[0] if row else None
-            return {"category": acc_entities.get("category"), "value": float(v) if v is not None else None}
-        else:
-            sql = f"""
-                SELECT p.category, MIN({price_col}) AS minv
-                {from_sql}
-                WHERE {' AND '.join(where)}
-                GROUP BY p.category
-                HAVING p.category IS NOT NULL AND p.category <> ''
-                ORDER BY MIN({price_col}) ASC, p.category ASC
-                LIMIT 12
-            """
-            rows = (await db.execute(sql_text(sql), params)).fetchall()
-            return [{"category": r[0], "value": float(r[1])} for r in rows if r and r[1] is not None]
-
-
-# ---------- LISTING HELPERS (colors/fabrics/sizes/categories) ----------
-async def fetch_distinct_options(tenant_id: int, acc_entities: dict, attr: str, limit: int = 50) -> List[str]:
-    """
-    Return distinct values for a given attribute ('color'|'fabric'|'size'|'category')
-    with light normalization and respecting already-selected filters on other attrs.
-    """
-    where = ["p.tenant_id = :tid", "COALESCE(pv.is_active, TRUE) = TRUE"]
-    params: Dict[str, Any] = {"tid": tenant_id}
-    occ_join_sql = ""
-
-    # do not self-filter on the attribute being listed
-    if attr != "category" and (acc_entities or {}).get("category"):
-        where.append("LOWER(p.category) = LOWER(:category)")
-        params["category"] = str(acc_entities["category"])
-
-    if attr != "fabric" and (acc_entities or {}).get("fabric"):
-        where.append(
-            "(REGEXP_REPLACE(LOWER(pv.fabric), '[\\s._-]+', '', 'g') "
-            "LIKE '%' || REGEXP_REPLACE(LOWER(:fabric), '[\\s._-]+', '', 'g') || '%')"
-        )
-        params["fabric"] = str(acc_entities["fabric"])
-
-    if attr != "color" and (acc_entities or {}).get("color"):
-        where.append(
-            "(REGEXP_REPLACE(LOWER(pv.color), '[\\s._-]+', '', 'g') "
-            "LIKE '%' || REGEXP_REPLACE(LOWER(:color), '[\\s._-]+', '', 'g') || '%')"
-        )
-        params["color"] = str(acc_entities["color"])
-
-    if attr != "size" and (acc_entities or {}).get("size"):
-        where.append(
-            "(REGEXP_REPLACE(LOWER(pv.size), '[\\s._-]+', '', 'g') "
-            "LIKE '%' || REGEXP_REPLACE(LOWER(:size), '[\\s._-]+', '', 'g') || '%')"
-        )
-        params["size"] = str(acc_entities["size"])
-
-    # rental vs sale
-    is_rental = _coerce_bool((acc_entities or {}).get("is_rental"))
-    if is_rental is True:
-        where.append("COALESCE(pv.is_rental, FALSE) = TRUE")
-    elif is_rental is False:
-        where.append("COALESCE(pv.is_rental, FALSE) = FALSE")
-
-    # occasions
-    occs = (acc_entities or {}).get("occasion") or (acc_entities or {}).get("occasions") or []
-    occ_join_sql, where, params = _add_occasion_join_and_filter(occs, where, params)
-
-    # Build SELECT
-    col_map = {
-        "category": "p.category",
-        "fabric":   "pv.fabric",
-        "color":    "pv.color",
-        "size":     "pv.size",
-    }
-    sel_col = col_map.get(attr)
-    if not sel_col:
+    cat_col, cat_name = _get_product_col(
+        "category", "category_name", "product_category", "category_type", "type"
+    )
+    if cat_col is None:
+        logging.error("resolve_categories: No category-like column found on Product.")
         return []
 
-    from_sql = f"""
-        FROM public.products p
-        JOIN public.product_variants pv ON pv.product_id = p.id
-        {occ_join_sql}
-    """
-
-    sql = f"""
-        SELECT {sel_col} AS v, COUNT(*) AS cnt
-        {from_sql}
-        WHERE {' AND '.join(where)}
-        GROUP BY {sel_col}
-        HAVING {sel_col} IS NOT NULL AND {sel_col} <> ''
-        ORDER BY COUNT(*) DESC, {sel_col} ASC
-        LIMIT :lim
-    """
-    params["lim"] = int(limit)
-
-    async with SessionLocal() as db:
-        rows = (await db.execute(sql_text(sql), params)).fetchall()
-
-    # Clean + uniq while preserving order
-    out: List[str] = []
-    seen = set()
-    for r in rows or []:
-        v = str(r[0]).strip()
-        if not v:
-            continue
-        k = _norm_py(v)
-        if k not in seen:
-            seen.add(k); out.append(v)
-    return out
-
-
-# ---------- RENDER HELPERS ----------
-def _format_money(v: float | None) -> str:
-    if v is None:
-        return "—"
+    # quick visibility
     try:
-        iv = int(round(float(v)))
+        tot_products = (await db.execute(
+            select(func.count()).select_from(Product).where(Product.tenant_id == tenant_id)
+        )).scalar() or 0
+        logging.info(f"[resolve_categories] tenant={tenant_id} using_col={cat_name} total_products={tot_products}")
     except Exception:
-        return str(v)
-    # Simple Indian style grouping like 1,999 / 12,499
-    s = f"{iv:,}"
-    return s
+        pass
 
-def render_starting_price_single(lang_root: str, category: str, value: float | None, mode: str) -> str:
-    label = "rental" if mode == "rental_price" else "price"
-    amount = _format_money(value)
-    if lang_root == "hi":
-        return f"{category} का starting {label} ₹{amount} से है।"
-    if lang_root == "gu":
-        return f"{category} નો starting {label} ₹{amount} થી છે."
-    return f"Starting {label} for {category}: ₹{amount}."
+    # 1) Primary: products by tenant, tolerant active
+    conds: List[Any] = [Product.tenant_id == tenant_id]
+    _add_active_trueish(Product, conds)
 
-def render_starting_price_table(lang_root: str, items: List[Dict[str, Any]], mode: str) -> str:
-    label = "rental" if mode == "rental_price" else "price"
-    title = {
-        "hi": f"श्रेणी अनुसार starting {label}:",
-        "gu": f"કેટેગરી પ્રમાણે starting {label}:",
-        "en": f"Starting {label} by category:",
-    }.get(lang_root, f"Starting {label} by category:")
-    lines = []
-    for x in (items or [])[:12]:
-        cat = x.get("category") or "—"
-        amt = _format_money(x.get("value"))
-        lines.append(f"• {cat}: ₹{amt}")
-    if not lines:
-        lines = ["• —"]
-    return f"{title}\n" + "\n".join(lines)
+    cat = func.trim(cat_col).label("cat")
+    stmt = (
+        select(cat)
+        .where(and_(*conds))
+        .where(_norm_nonempty(cat_col).isnot(None))
+        .distinct()
+        .order_by(cat)  # Safe for DISTINCT
+    )
+    res = await db.execute(stmt)
+    rows = [r[0] for r in res.all()]
+    if rows:
+        return rows
 
-def render_options_reply(lang_root: str, attr: str, options: List[str]) -> str:
-    title_map = {
-        "en": {"color": "Available colors", "fabric": "Available fabrics", "size": "Available sizes", "category": "Available categories"},
-        "hi": {"color": "उपलब्ध रंग",       "fabric": "उपलब्ध फ़ैब्रिक",    "size": "उपलब्ध साइज",   "category": "उपलब्ध कैटेगरी"},
-        "gu": {"color": "ઉપલબ્ધ કલર્સ",      "fabric": "ઉપલબ્ધ ફેબ્રિક",   "size": "ઉપલબ્ધ સાઇઝ",    "category": "ઉપલબ્ધ કેટેગરી"},
-    }
-    title = title_map.get(lang_root, title_map["en"]).get(attr, "Available options")
-    lines = "\n".join(f"• {o}" for o in options[:12])
-    trail = {"en": "\nWhich one would you like?", "hi": "\nकौन-सा पसंद करेंगे?", "gu": "\nકયું પસંદ કરશો?"}.get(lang_root, "\nWhich one would you like?")
-    return f"{title}:\n{lines}{trail}"
+    # 2) Fallback: join via variants (tolerant active on both)
+    vconds: List[Any] = [Product.id == ProductVariant.product_id, Product.tenant_id == tenant_id]
+    _add_active_trueish(Product, vconds)
+    _add_active_trueish(ProductVariant, vconds)
 
-def render_categories_reply(lang_root: str, categories: List[str]) -> str:
-    title = {"en": "Available categories", "hi": "उपलब्ध कैटेगरी", "gu": "ઉપલબ્ધ કેટેગરી"}.get(lang_root, "Available categories")
-    body  = "\n".join(f"• {c}" for c in categories[:12])
-    trail = {"en": "\nWhich one would you like?", "hi": "\nकौन-सी देखनी है?", "gu": "\nકઈ જોવી ગમશે?"}.get(lang_root, "\nWhich one would you like?")
-    return f"{title}:\n{body}{trail}"
+    vcat = func.trim(cat_col).label("cat")
+    vstmt = (
+        select(vcat)
+        .join(ProductVariant, Product.id == ProductVariant.product_id)
+        .where(and_(*vconds))
+        .where(_norm_nonempty(cat_col).isnot(None))
+        .distinct()
+        .order_by(vcat)
+    )
+    vres = await db.execute(vstmt)
+    rows2 = [r[0] for r in vres.all()]
+    if rows2:
+        return rows2
 
-# ----------------- ASKING/PRODUCT LISTING HELPERS -----------------
+    # 3) Last resort: IGNORE is_active completely (products only)
+    cat_any = func.trim(cat_col).label("cat")
+    stmt_any = (
+        select(cat_any)
+        .where(Product.tenant_id == tenant_id)
+        .where(_norm_nonempty(cat_col).isnot(None))
+        .distinct()
+        .order_by(cat_any)
+    )
+    any_res = await db.execute(stmt_any)
+    rows3 = [r[0] for r in any_res.all()]
+    if rows3:
+        return rows3
 
-_ALLOWED_FILTER_KEYS = {
-    "category", "fabric", "color", "size",
-    "occasion", "occasions", "is_rental",
-    "price_min", "price_max", "rental_price_min", "rental_price_max",
-    "__starting_price__"
+    # 4) Last resort: IGNORE is_active completely (join via variants)
+    vcat_any = func.trim(cat_col).label("cat")
+    vstmt_any = (
+        select(vcat_any)
+        .join(ProductVariant, Product.id == ProductVariant.product_id)
+        .where(Product.tenant_id == tenant_id)
+        .where(_norm_nonempty(cat_col).isnot(None))
+        .distinct()
+        .order_by(vcat_any)
+    )
+    v_any_res = await db.execute(vstmt_any)
+    rows4 = [r[0] for r in v_any_res.all()]
+    if rows4:
+        return rows4
+
+    # nothing found
+    logging.warning(f"[resolve_categories] No categories found for tenant={tenant_id} using_col={cat_name}")
+    return []
+
+
+async def resolve_colors(db: AsyncSession, tenant_id: int, entities: Dict[str, Any]) -> List[str]:
+    return await _distinct_variant_col(
+        db, ProductVariant.color, tenant_id, _filters_from_entities(entities)
+    )
+
+
+async def resolve_sizes(db: AsyncSession, tenant_id: int, entities: Dict[str, Any]) -> List[str]:
+    return await _distinct_variant_col(
+        db, ProductVariant.size, tenant_id, _filters_from_entities(entities)
+    )
+
+
+async def resolve_fabrics(db: AsyncSession, tenant_id: int, entities: Dict[str, Any]) -> List[str]:
+    return await _distinct_variant_col(
+        db, ProductVariant.fabric, tenant_id, _filters_from_entities(entities)
+    )
+
+
+async def resolve_price_range(db: AsyncSession, tenant_id: int, entities: Dict[str, Any]) -> List[str]:
+    # Price band for purchase variants by default; change to use_rental_price=True for rent band
+    return await _price_min_max(db, tenant_id, _filters_from_entities(entities), use_rental_price=False)
+
+
+async def resolve_rental_price_range(db: AsyncSession, tenant_id: int, entities: Dict[str, Any]) -> List[str]:
+    return await _price_min_max(db, tenant_id, _filters_from_entities(entities), use_rental_price=True)
+
+
+async def resolve_rental_options(db: AsyncSession, tenant_id: int, entities: Dict[str, Any]) -> List[str]:
+    # If any variant is rental under current filters -> include Rent; always include Purchase
+    conds: List[Any] = [Product.id == ProductVariant.product_id, Product.tenant_id == tenant_id, ProductVariant.is_rental.is_(True)]
+    _add_active_trueish(Product, conds)
+    _add_active_trueish(ProductVariant, conds)
+    conds.extend(_filters_from_entities(entities))
+
+    stmt = select(func.count()).join(Product, Product.id == ProductVariant.product_id).where(and_(*conds))
+    res = await db.execute(stmt)
+    has_rent = (res.scalar() or 0) > 0
+    return ["Rent", "Purchase"] if has_rent else ["Purchase"]
+
+
+async def resolve_quantity_buckets(db: AsyncSession, tenant_id: int, entities: Dict[str, Any]) -> List[str]:
+    # Buckets based on available_stock of variants that match filters
+    conds: List[Any] = [Product.id == ProductVariant.product_id, Product.tenant_id == tenant_id]
+    _add_active_trueish(Product, conds)
+    _add_active_trueish(ProductVariant, conds)
+    conds.extend(_filters_from_entities(entities))
+    conds += [ProductVariant.available_stock.isnot(None), ProductVariant.available_stock > 0]
+
+    bucket = func.case(
+        (ProductVariant.available_stock >= 10, literal("10+")),
+        (ProductVariant.available_stock >= 5, literal("5–9")),
+        else_=literal("1–4"),
+    )
+
+    stmt = (
+        select(bucket)
+        .join(Product, Product.id == ProductVariant.product_id)
+        .where(and_(*conds))
+        .distinct()
+    )
+    res = await db.execute(stmt)
+    buckets = [r[0] for r in res.all()]
+    order = {"1–4": 0, "5–9": 1, "10+": 2}
+    return [b for b in sorted(buckets, key=lambda x: order.get(x, 99))]
+
+
+async def resolve_occasions(db: AsyncSession, tenant_id: int, entities: Dict[str, Any]) -> List[str]:
+    if not HAS_OCCASION:
+        return []
+    # Distinct Occasion.name via M2M with variants, honoring filters
+    v_conds: List[Any] = [Product.id == ProductVariant.product_id, Product.tenant_id == tenant_id]
+    _add_active_trueish(Product, v_conds)
+    _add_active_trueish(ProductVariant, v_conds)
+    v_conds.extend(_filters_from_entities(entities))
+
+    v_stmt = (
+        select(ProductVariant.id)
+        .join(Product, Product.id == ProductVariant.product_id)
+        .where(and_(*v_conds))
+    )
+    v_ids = [r[0] for r in (await db.execute(v_stmt)).all()]
+    if not v_ids:
+        return []
+
+    name_expr = func.trim(Occasion.name).label("val")
+    stmt = (
+        select(name_expr)
+        .select_from(Occasion)
+        .join(product_variant_occasions, product_variant_occasions.c.occasion_id == Occasion.id)
+        .where(product_variant_occasions.c.variant_id.in_(v_ids))
+        .where(_norm_nonempty(Occasion.name).isnot(None))
+        .distinct()
+        .order_by(name_expr)  # Safe with DISTINCT
+    )
+    res = await db.execute(stmt)
+    return [r[0] for r in res.all()]
+
+
+# Map NLP keys -> resolvers (all variant-aware)
+RESOLVERS: Dict[str, Callable[[AsyncSession, int, Dict[str, Any]], Awaitable[List[str]]]] = {
+    "category":      resolve_categories,         # from Product (+ dynamic col + fallbacks)
+    "color":         resolve_colors,             # from ProductVariant
+    "size":          resolve_sizes,              # from ProductVariant
+    "fabric":        resolve_fabrics,            # from ProductVariant
+    "price":         resolve_price_range,        # purchase price band
+    "rental_price":  resolve_rental_price_range, # rental price band
+    "rental":        resolve_rental_options,     # ["Rent","Purchase"] depending on data
+    "quantity":      resolve_quantity_buckets,   # stock buckets
+    "occasion":      resolve_occasions,          # only if you actually have it
 }
 
-def _is_empty(v):
-    if v is None: return True
-    if isinstance(v, str) and not v.strip(): return True
-    if isinstance(v, (list, tuple, dict)) and not v: return True
-    return False
 
-def _split_listish(v):
-    """Split 'Red & Pink, Navy' -> ['Red','Pink','Navy'] ; pass lists through."""
-    if v is None: return []
-    if isinstance(v, (list, tuple)): return [str(x).strip() for x in v if str(x).strip()]
-    s = str(v)
-    parts = [p.strip() for p in re.split(r"(?:,|/|&|\band\b|\bor\b)", s, flags=re.I) if p and p.strip()]
-    # de-dup preserving order
-    seen, out = set(), []
-    for p in parts:
-        k = re.sub(r"[\s._-]+", " ", p.lower())
-        if k not in seen:
-            seen.add(k); out.append(p)
-    return out
-
-def clean_filters_for_turn(acc_entities: dict | None, asked_now: list[str] | None) -> dict:
-    """
-    Keep only allowed keys, normalize empties, coerce types, and unify occasion(s) => list[str].
-    Does NOT drop prior sticky values — caller handles "sticky" logic.
-    """
-    src = dict(acc_entities or {})
-    out = {}
-
-    # pass through only allowed keys
-    for k, v in src.items():
-        if k not in _ALLOWED_FILTER_KEYS:
+async def fetch_attribute_values(
+    db: AsyncSession,
+    tenant_id: int,
+    asked_now: List[str],
+    entities: Dict[str, Any]
+) -> Dict[str, List[str]]:
+    out: Dict[str, List[str]] = {}
+    for key in asked_now or []:
+        resolver = RESOLVERS.get(key)
+        if not resolver:
             continue
-        # normalize empties like "any"/"none"
-        if isinstance(v, str) and v.strip().lower() in {"any", "none", "no", "na", "n/a"}:
-            v = None
-
-        if k in {"occasion", "occasions"}:
-            vals = _split_listish(v)
+        try:
+            vals = await resolver(db, tenant_id, entities)
             if vals:
-                out["occasion"] = vals  # unify to 'occasion'
-            continue
-
-        if k == "is_rental":
-            s = str(v).strip().lower()
-            if v is True or s in {"1","true","yes","y","rent","rental","on rent","hire"}:
-                out["is_rental"] = True
-            elif v is False or s in {"0","false","no","n","buy","purchase","sale"}:
-                out["is_rental"] = False
-            else:
-                # leave unset if ambiguous
-                pass
-            continue
-
-        # numeric bounds
-        if k in {"price_min","price_max","rental_price_min","rental_price_max"}:
-            try:
-                out[k] = float(v)
-            except Exception:
-                pass
-            continue
-
-        # plain strings (category/fabric/color/size) incl. __starting_price__
-        if not _is_empty(v):
-            out[k] = v
-
+                out[key] = vals
+        except Exception as e:
+            logging.exception(f"Resolver failed for key={key}: {e}")
+            out[key] = []
     return out
 
-def _format_money_inr(v):
-    try:
-        return f"{int(round(float(v))):,}"
-    except Exception:
-        return str(v)
 
-def _build_dynamic_heading(filters: dict) -> str:
+def format_inquiry_reply(values_by_attr: Dict[str, List[str]], ctx: Dict[str, Any] | None = None) -> str:
     """
-    Compose a friendly heading like:
-    'Here are our Kurta Sets — Rent • Wedding • (Fabric | Color | Size)'
+    Render a natural-sentence reply.
+
+    values_by_attr: result from fetch_attribute_values, e.g. {"price": ["0 – 1699"]}
+    ctx: optional accumulated entities (e.g., {"category": "Saree"}) to enrich phrasing
+         when values_by_attr doesn't include category.
     """
-    cat = filters.get("category") or "Products"
-    rent_tag = "Rent" if str(filters.get("is_rental")).lower() == "true" or filters.get("is_rental") is True else "Buy"
-    chips = []
+    ctx = ctx or {}
 
-    # add high-signal facets in a stable order
-    if filters.get("occasion"):
-        occs = filters["occasion"] if isinstance(filters["occasion"], list) else [filters["occasion"]]
-        chips.extend(occs[:2])
-    if filters.get("fabric"): chips.append(str(filters["fabric"]))
-    if filters.get("color"):  chips.append(str(filters["color"]))
-    if filters.get("size"):   chips.append(str(filters["size"]))
+    # ---- helpers ----
+    def _human_join(items: List[str]) -> str:
+        items = [str(i).strip() for i in items if str(i).strip()]
+        if not items:
+            return ""
+        if len(items) == 1:
+            return items[0]
+        return ", ".join(items[:-1]) + " and " + items[-1]
 
-    chip_txt = f" — {rent_tag}" + ((" • " + " | ".join(chips)) if chips else "")
-    return f"Here are our {cat}:{chip_txt}"
+    def _parse_min_max(s: str):
+        if not isinstance(s, str):
+            return None
+        parts = re.split(r"\s*[–-]\s*", s.strip())  # supports en dash or hyphen
+        if len(parts) == 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
+            return parts[0].strip(), parts[1].strip()
+        return None
 
-def _extract_meta(item: dict) -> dict:
-    """Support both Pinecone-style {'metadata': {...}} and plain dicts."""
-    if not isinstance(item, dict): return {}
-    return item.get("metadata") or item
+    def _rupee(n) -> str:
+        try:
+            n = int(float(n))
+        except Exception:
+            return str(n)
+        return f"₹{n}"
 
-def _best_name(m: dict) -> str:
-    return (m.get("product_name")
-            or m.get("name")
-            or m.get("title")
-            or (f"{m.get('category','Item')}".strip())
-            or "Item")
+    out: List[str] = []
 
-def _detect_is_rental(m: dict, fallback: bool | None) -> bool | None:
-    if m.get("is_rental") is True: return True
-    if m.get("is_rental") is False: return False
-    # some datasets store is_rental as 1/0 or "true"/"false"
-    s = str(m.get("is_rental")).strip().lower()
-    if s in {"1","true","yes"}: return True
-    if s in {"0","false","no"}: return False
-    return fallback
+    # Categories: prefer DB values; else use context
+    cats = values_by_attr.get("category") or []
+    if not cats:
+        c = ctx.get("category")
+        if isinstance(c, list):
+            cats = [str(x) for x in c if str(x).strip()]
+        elif isinstance(c, str) and c.strip():
+            cats = [c.strip()]
 
-def _build_product_lines(pinecone_data: list[dict], filters: dict) -> list[str]:
-    """
-    Render concise list lines. Example:
-      "New Partywear Jimmy Chu Saree — Rent • Jimmy Chu | Rani | Freesize"
-    Falls back gracefully if fields are missing.
-    """
-    lines = []
-    fallback_rent = filters.get("is_rental")
-    for it in (pinecone_data or [])[:10]:
-        m = _extract_meta(it)
-        if not m: continue
+    if cats:
+        out.append(f"We currently carry {_human_join(cats)}.")
 
-        is_rent = _detect_is_rental(m, fallback_rent)
-        tag = "Rent" if is_rent else "Buy"
+    # Fabrics / Colors / Sizes / Occasions
+    fabrics = values_by_attr.get("fabric") or []
+    colors  = values_by_attr.get("color") or []
+    sizes   = values_by_attr.get("size") or []
+    occs    = values_by_attr.get("occasion") or []
 
-        name = _best_name(m)
-        bits = []
-        if m.get("fabric"): bits.append(str(m.get("fabric")))
-        if m.get("color"):  bits.append(str(m.get("color")))
-        if m.get("size"):   bits.append(str(m.get("size")))
+    if fabrics:
+        out.append(f"Available fabrics include {_human_join(fabrics)}.")
+    if colors:
+        out.append(f"Available colors include {_human_join(colors)}.")
+    if sizes:
+        out.append(f"Available sizes include {_human_join(sizes)}.")
+    if occs:
+        out.append(f"We carry outfits for {_human_join(occs)} occasions.")
 
-        # If you want to append price, uncomment below:
-        # price = m.get("rental_price" if is_rent else "price")
-        # tail_price = f" — ₹{_format_money_inr(price)}" if price not in (None, "", 0) else ""
+    # Purchase price
+    pr_list = values_by_attr.get("price") or []
+    if pr_list:
+        cat_for_price = cats[0] if len(cats) == 1 else None
+        rng = _parse_min_max(pr_list[0])
+        if rng:
+            mn, mx = rng
+            if mn == mx:
+                out.append(
+                    f"The starting price{' for ' + cat_for_price if cat_for_price else ''} is {_rupee(mn)}."
+                )
+            else:
+                out.append(
+                    f"The price range{' for ' + cat_for_price if cat_for_price else ''} is {_rupee(mn)} to {_rupee(mx)}."
+                )
+        else:
+            out.append(
+                f"Prices{' for ' + cat_for_price if cat_for_price else ''} start at {_rupee(pr_list[0])}."
+            )
 
-        line = f"{name} — {tag}" + (f" • {' | '.join(bits)}" if bits else "")
-        lines.append(line)
-    return lines or ["(No items to show)"]
+    # Rental price
+    rpr_list = values_by_attr.get("rental_price") or []
+    if rpr_list:
+        cat_for_rent = cats[0] if len(cats) == 1 else None
+        rng = _parse_min_max(rpr_list[0])
+        if rng:
+            mn, mx = rng
+            if mn == mx:
+                out.append(
+                    f"The rental price{' for ' + cat_for_rent if cat_for_rent else ''} starts at {_rupee(mn)}."
+                )
+            else:
+                out.append(
+                    f"The rental price range{' for ' + cat_for_rent if cat_for_rent else ''} is {_rupee(mn)} to {_rupee(mx)}."
+                )
+        else:
+            out.append(
+                f"Rental prices{' for ' + cat_for_rent if cat_for_rent else ''} start at {_rupee(rpr_list[0])}."
+            )
+
+    # Rent/Purchase options
+    rentopts = values_by_attr.get("rental") or []
+    if rentopts:
+        opts = {str(x).strip().lower() for x in rentopts}
+        if opts == {"rent", "purchase"}:
+            out.append("Items are available for both rent and purchase.")
+        elif "rent" in opts:
+            out.append("Items are available for rent.")
+        elif "purchase" in opts:
+            out.append("Items are available for purchase.")
+
+    # Quantity buckets
+    qty = values_by_attr.get("quantity") or []
+    if qty:
+        out.append(f"Typical stock availability buckets are {_human_join(qty)} pieces.")
+
+    return " ".join(out) if out else "Nothing found for that query."

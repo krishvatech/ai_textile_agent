@@ -60,7 +60,7 @@ Goal: Analyze the customer message and return a single intent plus normalized en
 Intents (lowercase values):
 - greeting — short salutations/pleasantries only.
 - product_search — message explicitly names a product category (garment/product type), optionally with attributes (fabric, color, size, price, quantity, location, occasion, rental).
-- asking_inquiry — message asks about availability/options/prices/rental without clearly naming a product category.
+- asking_inquiry — message asks about availability/options/prices/price range/starting price/rental price, with or without a category, and is NOT a request to show items.
 - other — order status, tracking, delivery, payment, returns, complaints, small talk, or unrelated topics.
 
 Decision rules (apply in order; pick exactly one):
