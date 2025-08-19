@@ -97,39 +97,93 @@ async def _price_min_max(
 ) -> List[str]:
     """
     Returns ["min – max"] for price range.
-    If use_rental_price is True -> use rental_price over variants that are rental.
-    If use_rental_price is False -> use price over purchase variants (is_rental=False).
-    If None -> compute over all variants' price (ignores rental_price).
+
+    Modes:
+      • use_rental_price=True   -> rental band over variants with is_rental=True and rental_price IS NOT NULL
+      • use_rental_price=False  -> purchase band over variants with is_rental=False and price IS NOT NULL.
+                                   First, prefer rows where rental_price is NULL or 0 (clean purchase rows).
+                                   If none found, gracefully fallback to just is_rental=False & price IS NOT NULL.
+      • use_rental_price=None   -> generic purchase band (price IS NOT NULL across all variants)
     """
-    conds: List[Any] = [Product.id == ProductVariant.product_id, Product.tenant_id == tenant_id]
-    _add_active_trueish(Product, conds)
-    _add_active_trueish(ProductVariant, conds)
+    def _run_minmax(conds_list):
+        stmt = (
+            select(func.min(target_col), func.max(target_col))
+            .join(Product, Product.id == ProductVariant.product_id)
+            .where(and_(*conds_list))
+        )
+        return stmt
 
+    # ----- base conds -----
+    base: List[Any] = [Product.id == ProductVariant.product_id, Product.tenant_id == tenant_id]
+    _add_active_trueish(Product, base)
+    _add_active_trueish(ProductVariant, base)
+
+    # ----- branch logic -----
     if use_rental_price is True:
-        conds.append(ProductVariant.is_rental.is_(True))
+        # Rental band
         target_col = ProductVariant.rental_price
+        conds = list(base)
+        conds.append(ProductVariant.is_rental.is_(True))
         conds.append(ProductVariant.rental_price.isnot(None))
+        if extra_where:
+            conds.extend(extra_where)
+
+        res = await db.execute(_run_minmax(conds))
+        mn, mx = res.first() or (None, None)
+        logging.info(f"[_price_min_max] RENTAL tenant={tenant_id} -> min={mn}, max={mx}")
+        if mn is None or mx is None:
+            return []
+        return [f"{int(mn)} – {int(mx)}"]
+
     elif use_rental_price is False:
-        conds.append(ProductVariant.is_rental.is_(False))
+        # Purchase band — prefer rows with no rental_price set (NULL or 0), else fallback.
         target_col = ProductVariant.price
-        conds.append(ProductVariant.price.isnot(None))
+
+        # pass 1: clean purchase variants (is_rental=False, price not null, rental_price null/0)
+        conds1 = list(base)
+        conds1.append(ProductVariant.is_rental.is_(False))
+        conds1.append(ProductVariant.price.isnot(None))
+        conds1.append(or_(ProductVariant.rental_price.is_(None),
+                          ProductVariant.rental_price == 0))
+        if extra_where:
+            conds1.extend(extra_where)
+
+        res1 = await db.execute(_run_minmax(conds1))
+        mn1, mx1 = res1.first() or (None, None)
+        logging.info(f"[_price_min_max] PURCHASE (clean) tenant={tenant_id} -> min={mn1}, max={mx1}")
+
+        if mn1 is not None and mx1 is not None:
+            return [f"{int(mn1)} – {int(mx1)}"]
+
+        # pass 2: relaxed purchase variants (ignore rental_price column completely)
+        conds2 = list(base)
+        conds2.append(ProductVariant.is_rental.is_(False))
+        conds2.append(ProductVariant.price.isnot(None))
+        if extra_where:
+            conds2.extend(extra_where)
+
+        res2 = await db.execute(_run_minmax(conds2))
+        mn2, mx2 = res2.first() or (None, None)
+        logging.info(f"[_price_min_max] PURCHASE (fallback) tenant={tenant_id} -> min={mn2}, max={mx2}")
+
+        if mn2 is None or mx2 is None:
+            return []
+        return [f"{int(mn2)} – {int(mx2)}"]
+
     else:
+        # Generic purchase price band (no is_rental filter)
         target_col = ProductVariant.price
+        conds = list(base)
         conds.append(ProductVariant.price.isnot(None))
+        if extra_where:
+            conds.extend(extra_where)
 
-    if extra_where:
-        conds.extend(extra_where)
-
-    stmt = (
-        select(func.min(target_col), func.max(target_col))
-        .join(Product, Product.id == ProductVariant.product_id)
-        .where(and_(*conds))
-    )
-    res = await db.execute(stmt)
-    mn, mx = res.first() or (None, None)
-    if mn is None or mx is None:
-        return []
-    return [f"{int(mn)} – {int(mx)}"]
+        res = await db.execute(_run_minmax(conds))
+        mn, mx = res.first() or (None, None)
+        logging.info(f"[_price_min_max] GENERIC tenant={tenant_id} -> min={mn}, max={mx}")
+        if mn is None or mx is None:
+            return []
+        return [f"{int(mn)} – {int(mx)}"]
 
 
 def _filters_from_entities(entities: Dict[str, Any]) -> List[Any]:
@@ -168,7 +222,7 @@ def _filters_from_entities(entities: Dict[str, Any]) -> List[Any]:
         if fabrics:
             conds.append(func.lower(ProductVariant.fabric).in_(fabrics))
 
-    # rental flag
+    # rental flag (only if explicitly present from NLP)
     if "is_rental" in entities and entities["is_rental"] is not None:
         conds.append(ProductVariant.is_rental.is_(bool(entities["is_rental"])))
     elif entities.get("rental") in ("Rent", "Purchase"):
@@ -300,12 +354,27 @@ async def resolve_fabrics(db: AsyncSession, tenant_id: int, entities: Dict[str, 
 
 
 async def resolve_price_range(db: AsyncSession, tenant_id: int, entities: Dict[str, Any]) -> List[str]:
-    # Price band for purchase variants by default; change to use_rental_price=True for rent band
-    return await _price_min_max(db, tenant_id, _filters_from_entities(entities), use_rental_price=False)
+    """
+    Purchase-only price band:
+      • is_rental = False
+      • price IS NOT NULL
+      • Prefer rows with rental_price NULL/0; else fallback to all purchase rows
+    """
+    return await _price_min_max(
+        db,
+        tenant_id,
+        _filters_from_entities(entities),
+        use_rental_price=False
+    )
 
 
 async def resolve_rental_price_range(db: AsyncSession, tenant_id: int, entities: Dict[str, Any]) -> List[str]:
-    return await _price_min_max(db, tenant_id, _filters_from_entities(entities), use_rental_price=True)
+    return await _price_min_max(
+        db,
+        tenant_id,
+        _filters_from_entities(entities),
+        use_rental_price=True
+    )
 
 
 async def resolve_rental_options(db: AsyncSession, tenant_id: int, entities: Dict[str, Any]) -> List[str]:
@@ -385,7 +454,7 @@ RESOLVERS: Dict[str, Callable[[AsyncSession, int, Dict[str, Any]], Awaitable[Lis
     "color":         resolve_colors,             # from ProductVariant
     "size":          resolve_sizes,              # from ProductVariant
     "fabric":        resolve_fabrics,            # from ProductVariant
-    "price":         resolve_price_range,        # purchase price band
+    "price":         resolve_price_range,        # purchase price band (prefers rental_price NULL/0; fallback supported)
     "rental_price":  resolve_rental_price_range, # rental price band
     "rental":        resolve_rental_options,     # ["Rent","Purchase"] depending on data
     "quantity":      resolve_quantity_buckets,   # stock buckets
@@ -477,7 +546,7 @@ def format_inquiry_reply(values_by_attr: Dict[str, List[str]], ctx: Dict[str, An
     if occs:
         out.append(f"We carry outfits for {_human_join(occs)} occasions.")
 
-    # Purchase price
+    # Purchase price (from purchase-only resolver)
     pr_list = values_by_attr.get("price") or []
     if pr_list:
         cat_for_price = cats[0] if len(cats) == 1 else None
@@ -497,7 +566,7 @@ def format_inquiry_reply(values_by_attr: Dict[str, List[str]], ctx: Dict[str, An
                 f"Prices{' for ' + cat_for_price if cat_for_price else ''} start at {_rupee(pr_list[0])}."
             )
 
-    # Rental price
+    # Rental price (shown only if explicitly asked for rental_price)
     rpr_list = values_by_attr.get("rental_price") or []
     if rpr_list:
         cat_for_rent = cats[0] if len(cats) == 1 else None
