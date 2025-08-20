@@ -89,11 +89,17 @@ def _build_dynamic_heading(e: dict) -> str:
 
     # ✅ show size only if not "Freesize" (handles Free size / One Size, etc.)
     size_val = str(e.get("size") or "").strip()
-    if size_val and size_val.lower() != "freesize":
+    if size_val and not is_free_size(size_val):
         suffix.append(f"size {size_val}")
+
 
     tail = (" " + " ".join(suffix)) if suffix else ""
     return f"Here are {base}{tail}:"
+
+def is_free_size(val: str | None) -> bool:
+    v = str(val or "").strip().lower().replace(" ", "")
+    return v in {"freesize", "onesize", "one-size", "one_sz", "one"}
+
 
 def _build_item_tags(product: dict, collected: dict) -> str:
     """
@@ -102,10 +108,13 @@ def _build_item_tags(product: dict, collected: dict) -> str:
     """
     tags = []
     tags.append("rent" if product.get("is_rental") else "sale")  # always show
-    for k in ("color", "fabric", "size"):
-        val = collected.get(k)
-        if val not in [None, "", [], {}]:
-            tags.append(str(val).strip())
+    if collected.get("color"):
+        tags.append(str(collected["color"]).strip())
+    if collected.get("fabric"):
+        tags.append(str(collected["fabric"]).strip())
+    sz = collected.get("size")
+    if sz and not is_free_size(sz):
+        tags.append(str(sz).strip())
     return " ".join(f"- {t}" for t in tags)
 
 def _normalize_url(url: Optional[str]) -> Optional[str]:
@@ -227,7 +236,7 @@ async def FollowUP_Question(
     is_rental_val = entities.get("is_rental", None)
     base_keys = [
         "is_rental", "occasion", "fabric", "size", "color", "category",
-        "product_name", "quantity", "location", "type"
+        "product_name", "quantity"
     ]
     # Only ask for the correct price field
     price_keys = ["rental_price"] if is_rental_val is True else (["price"] if is_rental_val is False else ["price", "rental_price"])
@@ -244,7 +253,7 @@ async def FollowUP_Question(
     entity_priority = [
         "is_rental","occasion", "fabric",
         "size", "color", "category", "product_name",
-        "quantity", "location","type","price","rental_price",
+        "quantity","price","rental_price",
     ]
     field_display_names = {
         "is_rental": "rental",
@@ -255,8 +264,6 @@ async def FollowUP_Question(
         "category": "category",
         "product_name": "product",
         "quantity": "quantity",
-        "location": "location",
-        "type": "gender/type",
         "price": "price",
         "rental_price": "rental price",
     }
@@ -549,6 +556,44 @@ async def extract_user_name(text: str, language: Optional[str]) -> Optional[str]
         logging.warning(f"extract_user_name failed: {e}")
     return None
 
+async def llm_infer_quantity(text: str, language: Optional[str]) -> Optional[int]:
+    """
+    Pure LLM fallback: extract integer quantity from short chat text.
+    JSON-only; no static dictionaries or regex lists.
+    """
+    if not text or len(text.strip()) < 2:
+        return None
+
+    prompt = (
+        "Return only JSON. "
+        "Task: from the user's short shopping message, extract the requested quantity as a positive integer. "
+        "Convert number-words to integers. Handle English/Hinglish/Hindi/Gujarati in native or roman scripts. "
+        "If quantity is not clearly stated, set quantity=null. "
+        "Output must be a single JSON object with the key 'quantity'."
+    )
+    user_payload = {
+        "message": text,
+        "locale": language,
+        "output_contract": {"quantity": "integer or null"}
+    }
+
+    client = AsyncOpenAI(api_key=api_key)
+    resp = await client.chat.completions.create(
+        model=gpt_model,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+        ],
+    )
+    try:
+        data = json.loads(resp.choices[0].message.content or "{}")
+        q = data.get("quantity", None)
+        if isinstance(q, (int, float)) and q > 0:
+            return int(q)
+    except Exception:
+        logging.exception("llm_infer_quantity failed")
+    return None
 
 async def handle_asking_inquiry_variants(
     text: str,
@@ -602,6 +647,17 @@ async def analyze_message(
     detected_intent = intent_type
     logging.info(f"Detected intent_type in analyze_message: {intent_type}")
     entities = new_entities or {}
+    if (entities.get("quantity") in (None, "", [], {})):
+        try:
+            q = await llm_infer_quantity(text, language)
+            if q is not None:
+                # Update both the local 'entities' and 'new_entities' so merge logic sees it
+                entities["quantity"] = q
+                if new_entities is None:
+                    new_entities = {}
+                new_entities["quantity"] = q
+        except Exception:
+            logging.exception("quantity fallback failed")
     logging.info(f"Detected entities in analyze_message: {entities}")
     confidence = intent_confidence
     logging.info(f"Detected confidence in analyze_message: {confidence}")
