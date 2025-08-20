@@ -41,6 +41,152 @@ REFINEMENT_INTENTS = {
     "delivery_inquiry", "payment_query"
 }
 
+# =============== Website inquiry ===========
+
+# --- price + formatting helpers ---
+def _get_currency_symbol(p: dict) -> str:
+    curr = (p.get("currency") or "INR").upper()
+    return {"INR": "₹", "USD": "$", "EUR": "€", "GBP": "£"}.get(curr, "")
+
+def _to_float(x):
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+def _fmt_money(val, sym: str) -> str:
+    v = _to_float(val)
+    if v is None:
+        return str(val) if val is not None else ""
+    num = f"{v:,.2f}".rstrip("0").rstrip(".")
+    return f"{sym}{num}" if sym else num
+
+def _extract_price_fields(p: dict):
+    """Return numeric values when possible for price, mrp, min_price, max_price."""
+    price = next((p.get(k) for k in
+                  ["sale_price", "price", "variant_price", "selling_price", "current_price"]
+                  if p.get(k) not in (None, "")), None)
+    mrp   = next((p.get(k) for k in
+                  ["mrp", "list_price", "compare_at_price"]
+                  if p.get(k) not in (None, "")), None)
+    min_price = next((p.get(k) for k in ["min_price", "price_min"] if p.get(k) not in (None, "")), None)
+    max_price = next((p.get(k) for k in ["max_price", "price_max"] if p.get(k) not in (None, "")), None)
+    return _to_float(price), _to_float(mrp), _to_float(min_price), _to_float(max_price)
+
+def _format_price_line(p: dict) -> str:
+    """
+    Pretty price line for WhatsApp:
+    - "₹1,799" (only price)
+    - "₹1,799 (MRP ₹2,199)" (price + mrp)
+    - "₹1,799–₹2,499" (range)
+    - "—" when nothing found
+    """
+    sym = _get_currency_symbol(p)
+    price, mrp, pmin, pmax = _extract_price_fields(p)
+
+    # Range takes priority if min/max present and meaningful
+    if pmin is not None and pmax is not None and pmax >= pmin:
+        return f"{_fmt_money(pmin, sym)}–{_fmt_money(pmax, sym)}"
+
+    # Price + MRP (typical sale formatting)
+    if price is not None and mrp is not None and mrp > price:
+        return f"{_fmt_money(price, sym)} (MRP {_fmt_money(mrp, sym)})"
+
+    # Single values
+    if price is not None:
+        return _fmt_money(price, sym)
+    if mrp is not None:
+        return f"MRP {_fmt_money(mrp, sym)}"
+    if pmin is not None:
+        return _fmt_money(pmin, sym)
+    if pmax is not None:
+        return _fmt_money(pmax, sym)
+
+    return "—"
+
+
+def _format_one_product_compact(p: dict) -> str:
+    name   = p.get("name") or "Unnamed Product"
+    color  = p.get("color")
+    fabric = p.get("fabric")
+    size   = p.get("size")
+    tags   = " / ".join([x for x in [color, fabric, size] if x])
+
+    price_line = _format_price_line(p)
+
+    url = p.get("product_url") or p.get("image_url") or ""
+    url_ln = f"\npreview: {url}" if url else ""
+
+    # Exactly 4 lines (no numbering, lowercase 'preview:')
+    return f"{name}\n{tags}\nPrice: {price_line}{url_ln}"
+
+
+def _format_compact_products_reply(products: list[dict], max_items: int = 1) -> str:
+    if not products:
+        return "No items matched those filters."
+    lines = [_format_one_product_compact(p) for p in products[:max_items]]
+    return "\n\n".join(lines)
+
+
+def _build_header(filters: dict, count: int) -> str:
+    parts = []
+    for k in ("category", "color", "fabric", "size"):
+        v = (filters or {}).get(k)
+        if v:
+            parts.append(str(v).title())
+    spec = " • ".join(parts)
+    found = f"Found {count} match" + ("" if count == 1 else "es")
+    return f"{found}{f' for {spec}' if spec else ''}:"
+
+def _format_one_product(p: dict, idx: int) -> str:
+    name   = p.get("name") or "Unnamed Product"
+    color  = p.get("color")
+    fabric = p.get("fabric")
+    size   = p.get("size")
+    tags   = " / ".join([x for x in [color, fabric, size] if x])
+
+    price_line = _format_price_line(p)
+
+    url = p.get("product_url") or p.get("image_url") or ""
+    url_ln = f"\n   View: {url}" if url else ""
+
+    # No rental text here
+    return f"{idx}) {name}\n   {tags}\n   Price: {price_line}{url_ln}"
+
+
+def format_products_reply(products: list[dict], filters: dict, max_items: int = 4) -> str:
+    if not products:
+        hdr = _build_header(filters, 0).replace("Found 0 matches", "No matches")
+        return f"{hdr}\nNo items matched those filters.\nWould you like to see similar items or a different color/size?"
+
+    header = _build_header(filters, len(products))
+    lines = [_format_one_product(p, i + 1) for i, p in enumerate(products[:max_items])]
+    extra = len(products) - max_items
+    more  = f"\n\n+{extra} more. Reply with the number (e.g., 1/2/3) for details." if extra > 0 else ""
+    return f"{header}\n\n" + "\n\n".join(lines) + more
+
+FOLLOWUP_ADDRESS_TEMPLATE = (
+    "Hello,\n\n"
+    "Please send your First name, Last name and Full Proper address of delivery with pin-code to confirm your order.\n\n"
+    "Name :_\n"
+    "Contact Number :_\n"
+    "Full Address :_\n"
+    "1. 7 Days Return and Replacement Policy\n"
+    "2. Shipping Time 5 to 7 days.\n"
+    "3. Prepaid is Compulsory"
+)
+
+
+def choose_followup(products: list[dict], filters: dict) -> str:
+    if not products:
+        return "Want me to show similar designs or other variants?"
+    if len(products) == 1:
+        return FOLLOWUP_ADDRESS_TEMPLATE
+    return "Reply with the item number (1/2/3/…) for more details. To place an order, share your delivery details in the next message."
+
+
+# =========== website inquiry End ===========
+
 def filter_non_empty_entities(entities: dict) -> dict:
     """
     Returns a dict of only non-empty (not None, '', [], or {}) entity fields.
@@ -948,7 +1094,56 @@ async def analyze_message(
                 "history": history,
                 "collected_entities": acc_entities
             } 
+    elif intent_type == "website_inquiry":
+        print("="*20)
+        print(new_entities)
+        print("="*20)
 
+        filtered_entities = filter_non_empty_entities(new_entities)
+        print("="*20)
+        print("Filtered Entities :", filtered_entities)
+        print("="*20)
+
+        pinecone_filtered = clean_entities_for_pinecone(filtered_entities)
+        print("="*20)
+        print("Pinecone Filteered :", pinecone_filtered)
+        print("="*20)
+
+        print("GO for Pinecone search==========")
+        pinecone_data = await pinecone_fetch_records(pinecone_filtered, tenant_id)
+        print("pinecone data :", pinecone_data)
+        pinecone_data = dedupe_products(pinecone_data)
+
+        # ✅ Nicely formatted WhatsApp text (no rental text, includes price if present)
+        reply_text = _format_compact_products_reply(pinecone_data, max_items=4)
+        followup   = choose_followup(pinecone_data, pinecone_filtered)
+
+        if mode == "chat":
+            # Store the human-readable string in history (previously you were storing a list)
+            history.append({"role": "assistant", "content": reply_text})
+            _commit()
+            print("="*20); print(reply_text); print("="*20)
+            return {
+                "pinecone_data": pinecone_data,
+                "intent_type": intent_type,
+                "language": language,
+                "tenant_id": tenant_id,
+                "history": history,
+                "collected_entities": acc_entities,
+                "followup_reply": followup,
+                "reply_text": reply_text,
+            }
+        else:
+            return {
+                "pinecone_data": pinecone_data,
+                "intent_type": intent_type,
+                "language": language,
+                "tenant_id": tenant_id,
+                "history": history,
+                "collected_entities": acc_entities,
+                "followup_reply": followup,
+                "reply_text": reply_text,
+            }
     # --- attribute inquiry
     elif intent_type == "asking_inquiry":
         async with SessionLocal() as session:

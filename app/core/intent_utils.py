@@ -22,6 +22,7 @@ def process_all_entities(entities: dict) -> dict:
     """
     # Define all possible entities based on your product schema
     all_entities = {
+        "name": None,
         "category": None,
         "fabric": None,
         "color": None,
@@ -65,23 +66,25 @@ Intents (lowercase values):
 - product_search — message explicitly names a product category (garment/product type), optionally with attributes (fabric, color, size, price, quantity, location, occasion, rental).
 - availability_check — user asks about date availability / booking / reserve for a specific product that is already selected in Context (e.g., product_variant_id present or exactly one selected item).
 - asking_inquiry — message asks about availability/options/prices/price range/starting price/rental price, with or without a category, and is NOT a request to show items.
+- website_inquiry — message contains a URL to one of our store domains and refers to a specific website/product/page. Treat ANY Shopify product/collection URL (https://*.myshopify.com/products/... or /collections/...) as our store.
 - other — order status, tracking, delivery, payment, returns, complaints, small talk, or unrelated topics.
 
 Decision rules (apply in order; pick exactly one):
 1) If a product category is explicitly present → product_search.
+2) If the message contains an http(s) URL that points to our store (including any Shopify product/collection URL like https://*.myshopify.com/products/... or .../collections/...) → website_inquiry. This takes precedence even if a product/category is mentioned or the user asks about price/availability.
+3) If this message is ONLY a refinement (e.g., “on rent / rent pe / kiraye par / i want rent / i want on rent / muje kiraye pe chahiye”, buy/purchase, color, fabric, size, occasion, budget) AND the Context above already contains a non-null category, then → product_search (continue browsing with updated filters). Do NOT switch to asking_inquiry in this case. Note: For rental refinements, set is_rental to true in entities. Example: If context has "category": "saree" and message is "muje kiraye pe chahiye" → product_search, with category carried over.
+3a) If the message matches a refinement (as in rule 2) but there is NO non-null category in context, infer a default category from allowed_categories (use the first one if available, e.g., "saree") and set intent to product_search. Only do this if allowed_categories is non-empty; else fall to rule 3.
 
-2) If this message is ONLY a refinement (e.g., “on rent / rent pe / kiraye par / i want rent / i want on rent / muje kiraye pe chahiye”, buy/purchase, color, fabric, size, occasion, budget) AND the Context above already contains a non-null category, then → product_search (continue browsing with updated filters). Do NOT switch to asking_inquiry in this case. Note: For rental refinements, set is_rental to true in entities. Example: If context has "category": "saree" and message is "muje kiraye pe chahiye" → product_search, with category carried over.
-2a) If the message matches a refinement (as in rule 2) but there is NO non-null category in context, infer a default category from allowed_categories (use the first one if available, e.g., "saree") and set intent to product_search. Only do this if allowed_categories is non-empty; else fall to rule 3.
-
-3) If the message includes a calendar date or booking phrasing (e.g., '24 Aug', 'aaj/today', 'kal/tomorrow', 'ke liye'), return availability_check and populate start_date/end_date. 
+4) If the message includes a calendar date or booking phrasing (e.g., '24 Aug', 'aaj/today', 'kal/tomorrow', 'ke liye'), return availability_check and populate start_date/end_date. 
    If no specific product is selected, still return availability_check (the app will ask the user to pick a product).
    
-4) Else if it is only a salutation → greeting.
-5) Else if the message is primarily about availability/options/prices/rental without a clear category → asking_inquiry.
-6) Else → other.
-Never return "other" when rule 1, 2, 2a, or 3 matches.
+5) Else if it is only a salutation → greeting.
+6) Else if the message is primarily about availability/options/prices/rental without a clear category → asking_inquiry.
+7) Else → other.
+Never return "other" when rule 1, 2, 3,3a, or 4 matches.
 
 Entity extraction guidelines (normalize; be conservative; use null when unknown): - product: Type of clothing mentioned; if identified, mirror it to "category" as well.
+- name: Natural product name mentioned (freeform), and mirror its garment type to "category".
 - category: The product/garment type  **Must be normalized to one of {allowed_categories}**
 - color: Normalize to standard English color names regardless of language/script; if uncertain, choose the closest standard color.
 - fabric: Normalize regional/colloquial names to common fabric types (e.g., standard silk/cotton/blends). If uncertain, choose the closest standard fabric.
@@ -116,7 +119,7 @@ Return exactly this JSON shape:
     "intent": "",
     "intent_type": "",
     "entities": {{
-        "product": null,
+        "name": null,
         "category": null,
         "fabric": null,
         "color": null,

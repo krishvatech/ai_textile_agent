@@ -277,6 +277,8 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
             "fabric": md.get("fabric"),
             "color": md.get("color"),
             "size": md.get("size"),
+            "price": md.get("price"),
+            "rental_price": md.get("rental_price"),
             "variant_id": md.get("variant_id"),
             "product_id": md.get("product_id"),
             "image_url": md.get("image_url"),
