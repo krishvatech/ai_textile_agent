@@ -649,23 +649,40 @@ async def analyze_message(
     # --- search results
     elif intent_type == "product_search":
         turn_filters = {
-            k: v for k, v in (clean_new_entities or {}).items()
+            k: v for k, v in (locals().get("clean_new_entities") or {}).items()
             if v not in (None, "", [], {}) and k in ("category","color","fabric","size","is_rental","occasion")
         }
 
-        # Fallback from memory for commonly used filters
+        # Fallback from memory for common facets if missing this turn
         for k in ("category", "is_rental", "color", "fabric", "size", "occasion"):
             if k not in turn_filters and acc_entities.get(k) not in (None, "", [], {}):
                 turn_filters[k] = acc_entities[k]
-                sz  = str(turn_filters.get("size") or "").strip().lower()
-        cat = str(turn_filters.get("category") or "").strip().lower()
-        if sz == "freesize" and cat not in ("saree","sari"):
+
+        # Always work with a dict
+        if not isinstance(turn_filters, dict):
+            turn_filters = {}
+
+        # ---- Defensive lowercase for size/category (never crash) ----
+        _size_val = turn_filters.get("size")
+        _cat_val  = turn_filters.get("category")
+
+        # Normalize to strings safely
+        sz  = str(_size_val or "").strip().lower()
+        cat = str(_cat_val  or "").strip().lower()
+
+        # Saree rule: Free size is meaningless for non-saree categories
+        if sz == "freesize" and cat not in ("saree", "sari"):
             turn_filters.pop("size", None)
+
+        # Now proceed with your existing normalization/search
         filtered_entities       = filter_non_empty_entities(turn_filters)
         filtered_entities_norm  = normalize_entities(filtered_entities)
         filtered_entities_norm  = clean_entities_for_pinecone(filtered_entities_norm)
+
         pinecone_data = await pinecone_fetch_records(filtered_entities_norm, tenant_id)
         pinecone_data = dedupe_products(pinecone_data)
+
+        # Collect images (unchanged)
         seen, image_urls = set(), []
         for p in (pinecone_data or []):
             for u in (p.get("image_urls") or []):
@@ -673,9 +690,11 @@ async def analyze_message(
                     seen.add(u)
                     image_urls.append(u)
         image_urls = image_urls[:4]
+
+        # Build text heading from what we actually showed
         collected_for_text = {
             k: v for k, v in (filtered_entities or {}).items()
-            if k in ("category", "color", "fabric", "size", "is_rental","occasion") and v not in (None, "", [], {})
+            if k in ("category", "color", "fabric", "size", "is_rental", "occasion") and v not in (None, "", [], {})
         }
         heading = _build_dynamic_heading(collected_for_text)
 
@@ -687,13 +706,14 @@ async def analyze_message(
             if isinstance(url, str):
                 url = _normalize_url(url)
             product_lines.append(f"- {name} {tags}" + (f" — {url}" if url else ""))
-        
+
         products_text = (
             f"{heading}\n" + "\n".join(product_lines)
             if product_lines else
             "Sorry, no products match your search so far."
         )
 
+        # Use the merged memory (acc_entities) for follow-up planner
         followup = await FollowUP_Question(intent_type, acc_entities, language, session_history=history)
         reply_text = f"{products_text}"
 
@@ -712,7 +732,7 @@ async def analyze_message(
                 "answer": voice_response,
                 "followup_reply": followup,
                 "reply_text": reply_text,
-                "media": image_urls 
+                "media": image_urls
             }
         elif mode == "chat":
             history.append({"role": "assistant", "content": reply_text})
@@ -727,7 +747,7 @@ async def analyze_message(
                 "collected_entities": acc_entities,
                 "followup_reply": followup,
                 "reply_text": reply_text,
-                "media": image_urls 
+                "media": image_urls
             }
 
     # --- ✅ DIRECT PRODUCT PICK with ACK (name + link) + separate follow-ups
