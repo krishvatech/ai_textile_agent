@@ -68,7 +68,89 @@ async def get_tenant_name_by_phone(phone_number: str, db):
     row = result.fetchone()
     return row[0] if row else None
 
+#fabric by tenant_id
+async def get_tenant_fabric_by_phone(phone_number: str, db):
+    # 1) Find tenant id for this WhatsApp number
+    tid = (await db.execute(
+        text("""SELECT id FROM tenants
+                WHERE whatsapp_number = :phone AND is_active = true
+                LIMIT 1"""),
+        {"phone": phone_number}
+    )).scalar()
+    if not tid:
+        return []
+    # 2) Helper: does table.column exist?
+    async def col_exists(table: str, col: str) -> bool:
+        q = text("""
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_name = :table
+              AND column_name = :col
+              AND table_schema = ANY (current_schemas(false))
+            LIMIT 1
+        """)
+        return (await db.execute(q, {"table": table, "col": col})).first() is not None
+    sources = []
+    # product_variants.fabric (if present)
+    if await col_exists("product_variants", "fabric"):
+        sources.append("""
+            SELECT LOWER(TRIM(pv.fabric)) AS fab
+            FROM product_variants pv
+            JOIN products p ON p.id = pv.product_id
+            WHERE p.tenant_id = :tid
+              AND pv.fabric IS NOT NULL
+              AND TRIM(pv.fabric) <> ''
+        """)
+    if not sources:
+        return []
+    union_sql = " UNION ALL ".join(sources)
+    final_sql = f"SELECT DISTINCT fab FROM ({union_sql}) s"
+    result = await db.execute(text(final_sql), {"tid": tid})
+    rows = result.fetchall() or []
+    return [r[0] for r in rows]
 
+#color by tenant_id
+async def get_tenant_color_by_phone(phone_number: str, db):
+    # 1) Find tenant id for this WhatsApp number
+    tid = (await db.execute(
+        text("""SELECT id FROM tenants
+                WHERE whatsapp_number = :phone AND is_active = true
+                LIMIT 1"""),
+        {"phone": phone_number}
+    )).scalar()
+    if not tid:
+        return []
+    # 2) Helper: does table.column exist?
+    async def col_exists(table: str, col: str) -> bool:
+        q = text("""
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_name = :table
+              AND column_name = :col
+              AND table_schema = ANY (current_schemas(false))
+            LIMIT 1
+        """)
+        return (await db.execute(q, {"table": table, "col": col})).first() is not None
+    sources = []
+    # product_variants.fabric (if present)
+    if await col_exists("product_variants", "color"):
+        sources.append("""
+            SELECT LOWER(TRIM(pv.color)) AS fab
+            FROM product_variants pv
+            JOIN products p ON p.id = pv.product_id
+            WHERE p.tenant_id = :tid
+              AND pv.color IS NOT NULL
+              AND TRIM(pv.fabric) <> ''
+        """)
+    if not sources:
+        return []
+    union_sql = " UNION ALL ".join(sources)
+    final_sql = f"SELECT DISTINCT fab FROM ({union_sql}) s"
+    result = await db.execute(text(final_sql), {"tid": tid})
+    rows = result.fetchall() or []
+    return [r[0] for r in rows]
+
+#category by tenant_id
 async def get_tenant_category_by_phone(phone_number: str, db):
     """
     Return a lowercase, de-duplicated list of category names available for the tenant
@@ -275,8 +357,10 @@ async def receive_whatsapp_message(request: Request):
             #     confidence = 0.99
             # else:
             tenant_categories = await get_tenant_category_by_phone(EXOPHONE, db)
+            tenant_fabric = await get_tenant_fabric_by_phone(EXOPHONE,db)
+            tenant_color = await get_tenant_color_by_phone(EXOPHONE,db)
             intent_type, entities, confidence = await detect_textile_intent_openai(
-                    text_msg, current_language, allowed_categories=tenant_categories
+                    text_msg, current_language, allowed_categories=tenant_categories,allowed_fabric=tenant_fabric,allowed_color=tenant_color
                 )
 
             try:
