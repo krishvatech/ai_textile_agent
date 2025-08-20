@@ -17,9 +17,6 @@ from app.core.chat_persistence import (
     append_transcript_message,
 )
 
-# 🔽 NEW: fuzzy matching for direct product pick
-from rapidfuzz import process, fuzz
-
 # Load environment variables
 load_dotenv()
 
