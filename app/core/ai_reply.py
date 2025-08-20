@@ -471,59 +471,51 @@ def normalize_entities(entities):
     return new_entities
 
 # --- helper: collapse variants so every product appears once ---
-# def dedupe_products(pinecone_data):
-#     grouped = {}
-#     for p in (pinecone_data or []):
-#         key = (
-#             p.get("product_id")
-#             or p.get("id")
-#             or ((p.get("name") or p.get("product_name") or "").strip().lower(),
-#                 p.get("tenant_id"),
-#                 p.get("is_rental"))
-#         )
-#         if not key:
-#             continue
-
-#         g = grouped.setdefault(key, {
-#             "base": p.copy(),
-#             "colors": set(),
-#             "sizes": set(),
-#             "images": set(),
-#             "min_price": None,
-#             "min_rent": None,
-#         })
-
-#         if p.get("color"): g["colors"].add(str(p["color"]).strip())
-#         if p.get("size"):  g["sizes"].add(str(p["size"]).strip())
-#         if p.get("image_url"): g["images"].add(p["image_url"])
-
-#         price = p.get("price")
-#         if isinstance(price, (int, float)):
-#             g["min_price"] = price if g["min_price"] is None else min(g["min_price"], price)
-
-#         rprice = p.get("rental_price")
-#         if isinstance(rprice, (int, float)):
-#             g["min_rent"] = rprice if g["min_rent"] is None else min(g["min_rent"], rprice)
-
-#     out = []
-#     for g in grouped.values():
-#         base = g["base"]
-#         base["available_colors"] = sorted(c for c in g["colors"] if c)
-#         base["available_sizes"]  = sorted(s for s in g["sizes"] if s)
-#         base["image_urls"] = list(g["images"])
-#         if g["min_price"] is not None: base["price"] = g["min_price"]
-#         if g["min_rent"]  is not None: base["rental_price"] = g["min_rent"]
-#         out.append(base)
-#     return out
-def dedupe_by_variant(records):
-    seen, out = set(), []
-    for r in records or []:
-        key = (r.get("product_id"), r.get("size"), r.get("color"))
-        if key in seen:
+def dedupe_products(pinecone_data):
+    grouped = {}
+    for p in (pinecone_data or []):
+        key = (
+            p.get("product_id")
+            or p.get("id")
+            or ((p.get("name") or p.get("product_name") or "").strip().lower(),
+                p.get("tenant_id"),
+                p.get("is_rental"))
+        )
+        if not key:
             continue
-        seen.add(key)
-        out.append(r)
+
+        g = grouped.setdefault(key, {
+            "base": p.copy(),
+            "colors": set(),
+            "sizes": set(),
+            "images": set(),
+            "min_price": None,
+            "min_rent": None,
+        })
+
+        if p.get("color"): g["colors"].add(str(p["color"]).strip())
+        if p.get("size"):  g["sizes"].add(str(p["size"]).strip())
+        if p.get("image_url"): g["images"].add(p["image_url"])
+
+        price = p.get("price")
+        if isinstance(price, (int, float)):
+            g["min_price"] = price if g["min_price"] is None else min(g["min_price"], price)
+
+        rprice = p.get("rental_price")
+        if isinstance(rprice, (int, float)):
+            g["min_rent"] = rprice if g["min_rent"] is None else min(g["min_rent"], rprice)
+
+    out = []
+    for g in grouped.values():
+        base = g["base"]
+        base["available_colors"] = sorted(c for c in g["colors"] if c)
+        base["available_sizes"]  = sorted(s for s in g["sizes"] if s)
+        base["image_urls"] = list(g["images"])
+        if g["min_price"] is not None: base["price"] = g["min_price"]
+        if g["min_rent"]  is not None: base["rental_price"] = g["min_rent"]
+        out.append(base)
     return out
+
 
 def clean_entities_for_pinecone(entities):
     return {k:v for k,v in entities.items() if v not in [None, '', [], {}]}
@@ -834,7 +826,7 @@ async def analyze_message(
         filtered_entities_norm  = clean_entities_for_pinecone(filtered_entities_norm)
 
         pinecone_data = await pinecone_fetch_records(filtered_entities_norm, tenant_id)
-        pinecone_data = dedupe_by_variant(pinecone_data)
+        pinecone_data = dedupe_products(pinecone_data)
 
         # Collect images (unchanged)
         seen, image_urls = set(), []
