@@ -1095,23 +1095,23 @@ async def analyze_message(
                 "collected_entities": acc_entities
             } 
     elif intent_type == "website_inquiry":
-        logging.info("="*20)
-        logging.info(f"Detected Entites in analyze_message: {new_entities}")
-        logging.info("="*20)
+        print("="*20)
+        print(f"Detected Entites in analyze_message: {new_entities}")
+        print("="*20)
 
         filtered_entities = filter_non_empty_entities(new_entities)
-        logging.info("="*20)
-        logging.info(f"Filtered Entites in analyze_message: {filtered_entities}")
-        logging.info("="*20)
+        print("="*20)
+        print(f"Filtered Entites in analyze_message: {filtered_entities}")
+        print("="*20)
 
         pinecone_filtered = clean_entities_for_pinecone(filtered_entities)
-        logging.info("="*20)
-        logging.info("Pinecone Filteered :", pinecone_filtered)
-        logging.info("="*20)
+        print("="*20)
+        print("Pinecone Filteered :", pinecone_filtered)
+        print("="*20)
 
-        logging.info("GO for Pinecone search==========")
+        print("GO for Pinecone search==========")
         pinecone_data = await pinecone_fetch_records(pinecone_filtered, tenant_id)
-        logging.info("pinecone data :", pinecone_data)
+        print("pinecone data :", pinecone_data)
         pinecone_data = dedupe_products(pinecone_data)
 
         # ✅ Nicely formatted WhatsApp text (no rental text, includes price if present)
@@ -1122,9 +1122,9 @@ async def analyze_message(
             # Store the human-readable string in history (previously you were storing a list)
             history.append({"role": "assistant", "content": reply_text})
             _commit()
-            logging.info("="*20)
-            logging.info(reply_text)
-            logging.info("="*20)
+            print("="*20)
+            print(reply_text)
+            print("="*20)
             return {
                 "pinecone_data": pinecone_data,
                 "intent_type": intent_type,
