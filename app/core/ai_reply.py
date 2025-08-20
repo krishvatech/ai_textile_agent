@@ -89,17 +89,11 @@ def _build_dynamic_heading(e: dict) -> str:
 
     # ✅ show size only if not "Freesize" (handles Free size / One Size, etc.)
     size_val = str(e.get("size") or "").strip()
-    if size_val and not is_free_size(size_val):
+    if size_val and size_val.lower() != "freesize":
         suffix.append(f"size {size_val}")
-
 
     tail = (" " + " ".join(suffix)) if suffix else ""
     return f"Here are {base}{tail}:"
-
-def is_free_size(val: str | None) -> bool:
-    v = str(val or "").strip().lower().replace(" ", "")
-    return v in {"freesize", "onesize", "one-size", "one_sz", "one"}
-
 
 def _build_item_tags(product: dict, collected: dict) -> str:
     """
@@ -108,13 +102,10 @@ def _build_item_tags(product: dict, collected: dict) -> str:
     """
     tags = []
     tags.append("rent" if product.get("is_rental") else "sale")  # always show
-    if collected.get("color"):
-        tags.append(str(collected["color"]).strip())
-    if collected.get("fabric"):
-        tags.append(str(collected["fabric"]).strip())
-    sz = collected.get("size")
-    if sz and not is_free_size(sz):
-        tags.append(str(sz).strip())
+    for k in ("color", "fabric", "size"):
+        val = collected.get(k)
+        if val not in [None, "", [], {}]:
+            tags.append(str(val).strip())
     return " ".join(f"- {t}" for t in tags)
 
 def _normalize_url(url: Optional[str]) -> Optional[str]:
@@ -236,7 +227,7 @@ async def FollowUP_Question(
     is_rental_val = entities.get("is_rental", None)
     base_keys = [
         "is_rental", "occasion", "fabric", "size", "color", "category",
-        "product_name", "quantity"
+        "quantity","start_date","end_date"
     ]
     # Only ask for the correct price field
     price_keys = ["rental_price"] if is_rental_val is True else (["price"] if is_rental_val is False else ["price", "rental_price"])
@@ -252,8 +243,8 @@ async def FollowUP_Question(
 
     entity_priority = [
         "is_rental","occasion", "fabric",
-        "size", "color", "category", "product_name",
-        "quantity","price","rental_price",
+        "size", "color", "category",
+        "quantity","start_date","end_date"
     ]
     field_display_names = {
         "is_rental": "rental",
@@ -262,10 +253,9 @@ async def FollowUP_Question(
         "size": "size",
         "color": "color",
         "category": "category",
-        "product_name": "product",
         "quantity": "quantity",
-        "price": "price",
-        "rental_price": "rental price",
+        "start_date":"start_date",
+        "end_date":"end_date"
     }
     # Sort and select only top 2 or 3 missing fields
     missing_sorted = sorted(missing_fields, key=lambda x: entity_priority.index(x) if x in entity_priority else 999)
@@ -379,39 +369,6 @@ def dedupe_products(pinecone_data):
         if g["min_rent"]  is not None: base["rental_price"] = g["min_rent"]
         out.append(base)
     return out
-
-
-async def generate_greeting_reply(language, tenant_name, session_history=None, mode: str = "call") -> str:
-    emoji_instruction = "Do not use emojis." if mode == "call" else "Use emojis if you like."
-    prompt = Textile_Prompt + (
-        f"You are a friendly WhatsApp assistant for our {tenant_name} textile and clothing business.\n"
-        f"{'Recent conversation: ' + str(session_history) if session_history else ''}\n"
-        f"Greet the customer in a warm, short (1-2 sentences), conversational way in {language.upper()}. "
-        f"If this is the first message, welcome them to our shop. "
-        f"If ongoing, give a friendly brief follow-up. {emoji_instruction} "
-        f"Only output the greeting, no product suggestions."
-    )
-    try:
-        client = AsyncOpenAI(api_key=api_key)
-        completion = await client.chat.completions.create(
-            model=gpt_model,
-            messages=[
-                {"role": "system", "content": "You are an expert conversation starter and friendly textile assistant."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        reply = completion.choices[0].message.content.strip()
-        if reply:
-            return reply
-    except Exception as e:
-        print("GPT error, falling back to random greeting. (Error:", str(e), ")")
-    greetings = [
-        "Hello! 👋 Welcome to our textile shop.",
-        "Hi there! 😊 How can I help you with fabrics or clothing?",
-        "Welcome! Let me know what you're searching for today.",
-        "Hello! What are you looking for in clothing or textiles?"
-    ]
-    return random.choice(greetings)
 
 
 def clean_entities_for_pinecone(entities):
@@ -556,44 +513,6 @@ async def extract_user_name(text: str, language: Optional[str]) -> Optional[str]
         logging.warning(f"extract_user_name failed: {e}")
     return None
 
-async def llm_infer_quantity(text: str, language: Optional[str]) -> Optional[int]:
-    """
-    Pure LLM fallback: extract integer quantity from short chat text.
-    JSON-only; no static dictionaries or regex lists.
-    """
-    if not text or len(text.strip()) < 2:
-        return None
-
-    prompt = (
-        "Return only JSON. "
-        "Task: from the user's short shopping message, extract the requested quantity as a positive integer. "
-        "Convert number-words to integers. Handle English/Hinglish/Hindi/Gujarati in native or roman scripts. "
-        "If quantity is not clearly stated, set quantity=null. "
-        "Output must be a single JSON object with the key 'quantity'."
-    )
-    user_payload = {
-        "message": text,
-        "locale": language,
-        "output_contract": {"quantity": "integer or null"}
-    }
-
-    client = AsyncOpenAI(api_key=api_key)
-    resp = await client.chat.completions.create(
-        model=gpt_model,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-        ],
-    )
-    try:
-        data = json.loads(resp.choices[0].message.content or "{}")
-        q = data.get("quantity", None)
-        if isinstance(q, (int, float)) and q > 0:
-            return int(q)
-    except Exception:
-        logging.exception("llm_infer_quantity failed")
-    return None
 
 async def handle_asking_inquiry_variants(
     text: str,
@@ -625,6 +544,28 @@ async def handle_asking_inquiry_variants(
     values = await fetch_attribute_values(db, tenant_id, asked_now, acc_entities or {})
     return format_inquiry_reply(values,acc_entities)
 
+def merge_entities(acc_entities: Optional[Dict[str, Any]], new_entities: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Merge new non-empty values into accumulated entities WITHOUT wiping with None/empty.
+    """
+    acc = dict(acc_entities or {})
+    if not new_entities:
+        return acc
+    for k, v in new_entities.items():
+        if v not in (None, "", [], {}):
+            acc[k] = v
+    return acc
+
+def _lc(x): return (str(x or "").strip().lower())
+
+def filter_non_empty_entities(entities: dict) -> dict:
+    """
+    Drop keys where the value is None, empty string, or empty list/dict.
+    Keeps only meaningful extracted values.
+    """
+    if not entities:
+        return {}
+    return {k: v for k, v in entities.items() if v not in (None, "", [], {})}
 
 
 # ======================
@@ -647,17 +588,6 @@ async def analyze_message(
     detected_intent = intent_type
     logging.info(f"Detected intent_type in analyze_message: {intent_type}")
     entities = new_entities or {}
-    if (entities.get("quantity") in (None, "", [], {})):
-        try:
-            q = await llm_infer_quantity(text, language)
-            if q is not None:
-                # Update both the local 'entities' and 'new_entities' so merge logic sees it
-                entities["quantity"] = q
-                if new_entities is None:
-                    new_entities = {}
-                new_entities["quantity"] = q
-        except Exception:
-            logging.exception("quantity fallback failed")
     logging.info(f"Detected entities in analyze_message: {entities}")
     confidence = intent_confidence
     logging.info(f"Detected confidence in analyze_message: {confidence}")
@@ -672,36 +602,39 @@ async def analyze_message(
 
     # Load state
     history = session_memory.get(sk, [])
-    acc_entities = session_entities.get(sk, None)
+    acc_entities = session_entities.get(sk, {})   # use {} not None
     last_main_intent = last_main_intent_by_session.get(sk, None)
 
-    def _commit():
-        session_memory[sk] = history
-        session_entities[sk] = acc_entities
-        
-    if acc_entities is None:
-        acc_entities = {}
-    for k, v in (new_entities or {}).items():
-        if v not in (None, "", [], {}):
-            acc_entities[k] = v
-            
-    def _lc(x): return (str(x or "").strip().lower())
+    # --- Clean and merge new entities into memory (critical!) ---
+    raw_new_entities = new_entities or {}
+    clean_new_entities = filter_non_empty_entities(raw_new_entities)
+    acc_entities = merge_entities(acc_entities, clean_new_entities)
 
+    # Helpful debug logs: raw vs clean vs merged
+    logging.info(f"NLU raw entities (this turn): {raw_new_entities}")
+    logging.info(f"NLU clean entities (this turn): {clean_new_entities}")
+    logging.info(f"Collected entities AFTER MERGE: {acc_entities}")
+    
     # Reset dependent filters if category changed
     new_cat = (new_entities or {}).get("category")
     if new_cat:
         prev_cat = acc_entities.get("category")
         if not prev_cat or _lc(prev_cat) != _lc(new_cat):
-            for dep in ("size", "color", "fabric", "occasion", "price", "rental_price", "is_rental"):
+            for dep in ("size", "color", "fabric", "occasion", "price", "rental_price"):
                 acc_entities.pop(dep, None)
             acc_entities["category"] = new_cat
+            
+    def _commit():
+        session_memory[sk] = history
+        session_entities[sk] = acc_entities
+            
             
     logging.info(f"intent_type(detected)..... {detected_intent}")
     logging.info(f"intent_type(resolved)..... {intent_type}")
 
     # --- greeting
     if intent_type == "greeting":
-        reply = await generate_greeting_reply(language, tenant_name, session_history=history, mode=mode)
+        reply = "Hello! How can I assist you today?"
         history.append({"role": "assistant", "content": reply})
         _commit()
         return {
@@ -716,24 +649,23 @@ async def analyze_message(
     # --- search results
     elif intent_type == "product_search":
         turn_filters = {
-            k: v for k, v in (new_entities or {}).items()
+            k: v for k, v in (clean_new_entities or {}).items()
             if v not in (None, "", [], {}) and k in ("category","color","fabric","size","is_rental","occasion")
         }
-        if not turn_filters.get("category") and acc_entities.get("category"):
-            turn_filters["category"] = acc_entities["category"]
 
-        sz  = str(turn_filters.get("size") or "").strip().lower()
+        # Fallback from memory for commonly used filters
+        for k in ("category", "is_rental", "color", "fabric", "size", "occasion"):
+            if k not in turn_filters and acc_entities.get(k) not in (None, "", [], {}):
+                turn_filters[k] = acc_entities[k]
+                sz  = str(turn_filters.get("size") or "").strip().lower()
         cat = str(turn_filters.get("category") or "").strip().lower()
         if sz == "freesize" and cat not in ("saree","sari"):
             turn_filters.pop("size", None)
-
         filtered_entities       = filter_non_empty_entities(turn_filters)
         filtered_entities_norm  = normalize_entities(filtered_entities)
         filtered_entities_norm  = clean_entities_for_pinecone(filtered_entities_norm)
-
         pinecone_data = await pinecone_fetch_records(filtered_entities_norm, tenant_id)
         pinecone_data = dedupe_products(pinecone_data)
-
         seen, image_urls = set(), []
         for p in (pinecone_data or []):
             for u in (p.get("image_urls") or []):
@@ -741,12 +673,10 @@ async def analyze_message(
                     seen.add(u)
                     image_urls.append(u)
         image_urls = image_urls[:4]
-
         collected_for_text = {
             k: v for k, v in (filtered_entities or {}).items()
             if k in ("category", "color", "fabric", "size", "is_rental","occasion") and v not in (None, "", [], {})
         }
-
         heading = _build_dynamic_heading(collected_for_text)
 
         product_lines = []
