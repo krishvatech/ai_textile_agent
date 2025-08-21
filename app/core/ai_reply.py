@@ -8,7 +8,7 @@ from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
 from dateutil import parser as dateparser
 from app.core.central_system_prompt import Textile_Prompt 
-import random
+from datetime import date  # local import to avoid touching globals
 from sqlalchemy import text as sql_text  # Import if not already present
 from sqlalchemy import select  # ✅
 from app.db.session import SessionLocal
@@ -16,7 +16,6 @@ from app.core.rental_utils import is_variant_available
 from app.core.product_search import pinecone_fetch_records
 from app.core.phase_ask_inquiry import format_inquiry_reply,fetch_attribute_values,resolve_categories
 from app.core.asked_now_detector import detect_requested_attributes_async
-from app.db.models import Product, ProductVariant  # ✅
 import json
 
 
@@ -358,14 +357,18 @@ def render_categories_reply(lang_root: str, categories: list[str]) -> str:
         "Which category would you like to explore? Rental or purchase, and your budget?"
     )
 
+# --- REPLACE THIS WHOLE FUNCTION ---
 async def FollowUP_Question(
     intent_type: str,
     entities: Dict[str, Any],
     language: Optional[str] = "en-IN",
-    session_history: Optional[List[Dict[str, str]]] = None
+    session_history: Optional[List[Dict[str, str]]] = None,
+    only_fields: Optional[List[str]] = None,   # restrict what we ask
+    max_fields: int = 2                        # cap how many we ask
 ) -> str:
     """
-    Generates a short, merged follow-up question asking for only the top 2-3 missing entities.
+    Generates a short, merged follow-up question asking ONLY for specific missing fields,
+    optionally restricted to `only_fields` and capped by `max_fields`.
     """
     def _is_missing(val):
         return (val is None) or (val == "") or (isinstance(val, (list, dict)) and not val)
@@ -373,24 +376,29 @@ async def FollowUP_Question(
     is_rental_val = entities.get("is_rental", None)
     base_keys = [
         "is_rental", "occasion", "fabric", "size", "color", "category",
-        "quantity","start_date","end_date"
+        "quantity", "start_date", "end_date", "confirmation"
     ]
-    # Only ask for the correct price field
-    price_keys = ["rental_price"] if is_rental_val is True else (["price"] if is_rental_val is False else ["price", "rental_price"])
+    price_keys = (
+        ["rental_price"] if is_rental_val is True
+        else (["price"] if is_rental_val is False else ["price", "rental_price"])
+    )
 
-    # This is the canonical ordered set we will evaluate for missing-ness
+    # Canonical order + determine missing
     entity_priority = base_keys + price_keys
-
-    # Find missing fields (consider empty as missing)
     missing_fields = [k for k in entity_priority if _is_missing(entities.get(k))]
+
+    # Narrow to specific targets if provided
+    if only_fields:
+        wanted = set(only_fields)
+        missing_fields = [k for k in missing_fields if k in wanted]
 
     if not missing_fields:
         return "Thank you. I have all the information I need for your request!"
 
+    # Stable sort order + cap count
     entity_priority = [
-        "is_rental","occasion", "fabric",
-        "size", "color", "category",
-        "quantity","start_date","end_date"
+        "is_rental", "occasion", "fabric", "size", "color", "category",
+        "quantity", "start_date", "end_date", "confirmation", "price", "rental_price"
     ]
     field_display_names = {
         "is_rental": "rental",
@@ -400,39 +408,47 @@ async def FollowUP_Question(
         "color": "color",
         "category": "category",
         "quantity": "quantity",
-        "start_date":"start_date",
-        "end_date":"end_date"
+        "start_date": "start_date",
+        "end_date": "end_date",
+        "confirmation": "confirmation",
+        "price": "price",
+        "rental_price": "rental_price",
     }
-    # Sort and select only top 2 or 3 missing fields
-    missing_sorted = sorted(missing_fields, key=lambda x: entity_priority.index(x) if x in entity_priority else 999)
-    max_fields = 3
-    missing_short = missing_sorted[:max_fields]
+
+    missing_sorted = sorted(
+        missing_fields,
+        key=lambda x: entity_priority.index(x) if x in entity_priority else 999
+    )
+    missing_short = missing_sorted[: max(1, int(max_fields))]  # ensure ≥1
     merged_fields = ", ".join([field_display_names.get(f, f) for f in missing_short])
 
+    # Locale hint
     lang_root = (language or "en-IN").split("-")[0].lower()
     lang_hint = {
         "en": "English (India) — English only, no Hindi/Hinglish",
         "hi": "Hindi in Devanagari script — no English/Hinglish",
         "gu": "Gujarati script — no Hindi/English",
     }.get(lang_root, f"the exact locale {language}")
-    
-    # Recent session for context (optional, helps GPT personalize)
+
+    # Recent session context (optional)
     session_text = ""
     if session_history:
         relevant_history = session_history[-5:]
         conv_lines = [f"{m['role'].capitalize()}: {m['content']}" for m in relevant_history]
         session_text = "Conversation so far:\n" + "\n".join(conv_lines) + "\n"
 
-    # Prompt instructing GPT to only ask about these N fields
+    # ✅ Compute non-empty details for the prompt (fixes the f-string issue)
+    non_empty = {k: v for k, v in (entities or {}).items() if v not in (None, "", [], {})}
+
+    # Prompt—ask ONLY for the narrowed fields
     prompt = Textile_Prompt + (
         f"You are a friendly assistant for a textile and clothing shop.\n"
         f"{session_text}"
-        f"Collected details so far: { {k: v for k, v in entities.items() if v} }\n"
+        f"Collected details so far: {non_empty}\n"
         f"Still missing: {merged_fields}.\n"
-        f"Ask naturally and politely for ONLY these, like 'Would you like to rent or buy? Any preferred price or fabric?'\n"
-        f"Do not mention any other fields. Keep it very brief. "
-        f"Reply in {language.upper()}. Only output the question."
-        f"Write in {lang_hint}. Output only one question."
+        f"Ask naturally and politely for ONLY these field(s). Keep it very brief. "
+        f"Reply in {language.upper()}. Output a single question only.\n"
+        f"Write in {lang_hint}."
     )
 
     client = AsyncOpenAI(api_key=api_key)
@@ -458,14 +474,12 @@ def _lang_hint(language: Optional[str]) -> str:
 
 def normalize_entities(entities):
     new_entities = {}
-    # Keys where we preserve spaces (add more if needed, e.g., 'size', 'occasion')
-    preserve_space_keys = ["category", "size", "occasion"]
-    for k, v in entities.items():
+    # keep spaces for fabric so "jimmy chu" stays "jimmy chu"
+    preserve_space_keys = ["category", "size", "occasion", "fabric", "color"]
+    for k, v in (entities or {}).items():
         if isinstance(v, str):
-            if k in preserve_space_keys:
-                new_entities[k] = v.lower().strip()
-            else:
-                new_entities[k] = v.lower().replace(" ", "").strip()
+            s = v.strip().lower()
+            new_entities[k] = s if k in preserve_space_keys else s.replace(" ", "")
         else:
             new_entities[k] = v
     return new_entities
@@ -579,7 +593,7 @@ async def llm_route_other(
         "allowed_followup_fields": [
             "is_rental","occasion","fabric","size","color","category",
             "product_name","quantity","location","type","price","rental_price",
-            "user_name"
+            "user_name","confirmation"
         ],
         "output_contract": {
             "action": "one of allowed_actions",
@@ -750,25 +764,38 @@ async def analyze_message(
     history = session_memory.get(sk, [])
     acc_entities = session_entities.get(sk, {})   # use {} not None
     last_main_intent = last_main_intent_by_session.get(sk, None)
-
+    prev_entities = dict(acc_entities)  # <--- ADD THIS LINE
     # --- Clean and merge new entities into memory (critical!) ---
     raw_new_entities = new_entities or {}
     clean_new_entities = filter_non_empty_entities(raw_new_entities)
-    acc_entities = merge_entities(acc_entities, clean_new_entities)
-
-    # Helpful debug logs: raw vs clean vs merged
-    logging.info(f"NLU raw entities (this turn): {raw_new_entities}")
-    logging.info(f"NLU clean entities (this turn): {clean_new_entities}")
-    logging.info(f"Collected entities AFTER MERGE: {acc_entities}")
-    
-    # Reset dependent filters if category changed
     new_cat = (new_entities or {}).get("category")
     if new_cat:
         prev_cat = acc_entities.get("category")
         if not prev_cat or _lc(prev_cat) != _lc(new_cat):
-            for dep in ("size", "color", "fabric", "occasion", "price", "rental_price"):
-                acc_entities.pop(dep, None)
+            for dep in list(acc_entities.keys()):
+                if dep != "category":
+                    acc_entities.pop(dep, None)
             acc_entities["category"] = new_cat
+    if intent_type == "availability_check":
+        prev_start = (prev_entities or {}).get("start_date")
+        prev_end = (prev_entities or {}).get("end_date")
+        
+        # If we had a start_date but no end_date, and NER extracted same date for both
+        if (prev_start and not prev_end and 
+            clean_new_entities.get("start_date") == clean_new_entities.get("end_date") and
+            clean_new_entities.get("start_date")):
+            # Remove start_date from new entities to prevent overwriting
+            clean_new_entities.pop("start_date", None)
+            logging.info(f"DEBUG: Prevented start_date overwrite. Keeping: {prev_start}")
+
+    acc_entities = merge_entities(acc_entities, clean_new_entities)
+    # acc_entities = merge_entities(acc_entities, clean_new_entities)
+    
+
+    logging.info(f"Collected entities AFTER MERGE: {acc_entities}")
+    
+    # Reset dependent filters if category changed
+    
             
     def _commit():
         session_memory[sk] = history
@@ -826,6 +853,23 @@ async def analyze_message(
         filtered_entities_norm  = clean_entities_for_pinecone(filtered_entities_norm)
 
         pinecone_data = await pinecone_fetch_records(filtered_entities_norm, tenant_id)
+        _raw_matches = list(pinecone_data or [])
+
+        # try to resolve a single concrete variant id for follow-up intents
+        def _match_attr(m, key):
+            return (str(m.get(key) or "").strip().lower()
+                    == str(turn_filters.get(key) or "").strip().lower()) if turn_filters.get(key) else True
+
+        cands = [m for m in _raw_matches if _match_attr(m, "color") and _match_attr(m, "size") and _match_attr(m, "fabric")]
+
+        resolved_variant_id = None
+        if len(cands) == 1 and cands[0].get("variant_id"):
+            resolved_variant_id = cands[0]["variant_id"]
+        elif len(_raw_matches) == 1 and _raw_matches[0].get("variant_id"):
+            resolved_variant_id = _raw_matches[0]["variant_id"]
+
+        if resolved_variant_id:
+            acc_entities["product_variant_id"] = resolved_variant_id
         pinecone_data = dedupe_products(pinecone_data)
 
         # Collect images (unchanged)
@@ -1022,78 +1066,293 @@ async def analyze_message(
 
     # --- availability
     elif intent_type == "availability_check":
-        start_date = None
-        end_date = None
+        import re
+        from datetime import date as _date  # avoid touching globals
 
-        if acc_entities.get("start_date"):
+        # --- Define helper functions first ---
+        def _p(x):
+            if x in (None, "", [], {}):
+                return None
+            s = str(x).strip()
             try:
-                start_date = dateparser.parse(str(acc_entities["start_date"]), dayfirst=True, fuzzy=True).date()
+                # handle things like "3-sep", "30 august", "02/09"
+                return dateparser.parse(s, dayfirst=True, yearfirst=False, fuzzy=True).date()
             except Exception:
-                start_date = None
-        if acc_entities.get("end_date"):
-            try:
-                end_date = dateparser.parse(str(acc_entities["end_date"]), dayfirst=True, fuzzy=True).date()
-            except Exception:
-                end_date = None
+                return None
 
+        def _has_year(s):
+            return bool(re.search(r"\b(19|20)\d{2}\b", str(s or "")))
+
+        # --- 0) snapshot from BEFORE merge (so we can preserve prior start_date)
+        prev_start_raw = (prev_entities or {}).get("start_date")
+        prev_end_raw   = (prev_entities or {}).get("end_date")
+        prev_start = _p(prev_start_raw)
+        prev_end   = _p(prev_end_raw)
+
+        # --- 1) what THIS turn extracted (raw, before merge)
+        turn_start_raw = (raw_new_entities or {}).get("start_date")
+        turn_end_raw   = (raw_new_entities or {}).get("end_date")
+        turn_start = _p(turn_start_raw)
+        turn_end   = _p(turn_end_raw)
+
+        msg = (text or "")
+        msg_lower = msg.lower()
+        has_range_tokens = (
+            bool(re.search(r"\b(to|till|until|upto|up to|between|from)\b", msg_lower))
+            or (" se " in msg_lower and " tak " in msg_lower)  # Hindi "se ... tak"
+            or ("-" in msg_lower or "–" in msg_lower or "—" in msg_lower)
+        )
+        # Did the USER actually type a year in the message (ignore LLM-normalized years)
+        msg_has_year = bool(re.search(r"\b(19|20)\d{2}\b", msg))
+
+        turn_has_both_distinct = bool(turn_start and turn_end and turn_start != turn_end)
+        turn_is_single = (bool(turn_start) ^ bool(turn_end)) or (turn_start and turn_end and turn_start == turn_end)
+
+        # --- 2) decide start/end for this request (IGNORE merged memory for this step)
+        start_date = prev_start
+        end_date   = prev_end
+
+        # Case A: we already had a start, user sent ONE date now -> treat as END
+        if prev_start and not prev_end and turn_is_single and not has_range_tokens:
+            start_date = prev_start  # Keep previous start date - CRITICAL
+            end_date = (turn_end or turn_start)  # Use new date as end date
+
+            # Align based on whether the USER typed a year (message), not LLM's normalized string
+            if end_date and not msg_has_year:
+                try:
+                    candidate_end = end_date.replace(year=start_date.year)
+                    if candidate_end < start_date:
+                        candidate_end = candidate_end.replace(year=start_date.year + 1)
+                    end_date = candidate_end
+                except Exception:
+                    pass
+
+            # Update memory immediately so fallback can't override
+            acc_entities["start_date"] = start_date.isoformat()
+            acc_entities["end_date"] = end_date.isoformat()
+
+        # Case B: no previous start; user sent a single date -> treat as START only, ask END later
+        elif not prev_start and turn_is_single and turn_start and not has_range_tokens:
+            
+            start_date = turn_start
+            if not msg_has_year:
+                today = _date.today()
+                candidate = start_date.replace(year=today.year)
+                if candidate < today:
+                    candidate = candidate.replace(year=today.year + 1)
+                start_date = candidate
+            end_date = None
+            acc_entities["start_date"] = start_date.isoformat()
+            # critical: wipe any accidental single-day 'end_date' coming from NER/merge
+            acc_entities.pop("end_date", None)
+
+        # Case C: explicit range this turn (or two different dates)
+        elif turn_has_both_distinct or (turn_start and turn_end and has_range_tokens):
+            start_date, end_date = turn_start, turn_end
+            if not msg_has_year:
+                today = _date.today()
+                original_delta = (end_date - start_date)
+                s = start_date.replace(year=today.year)
+                e = s + original_delta
+                if s < today:
+                    s = s.replace(year=today.year + 1)
+                    e = s + original_delta
+                start_date, end_date = s, e
+            acc_entities["start_date"] = start_date.isoformat()
+            acc_entities["end_date"] = end_date.isoformat()
+        logging.info(
+            f"[DATES ALIGNED] msg_has_year={msg_has_year}, has_range_tokens={has_range_tokens}, "
+            f"start_date={start_date}, end_date={end_date}"
+        )
+        logging.info(f"[ENTITIES AFTER ALIGNMENT] {acc_entities}")
+
+        # --- 3) if still missing, *then* fall back to memory
+        if start_date is None and acc_entities.get("start_date"):
+            start_date = _p(acc_entities.get("start_date"))
+        if end_date is None and acc_entities.get("end_date"):
+            end_date = _p(acc_entities.get("end_date"))
+
+        # --- 4) ask for missing piece(s)
         if start_date is None:
-            try:
-                start_date = dateparser.parse(text, dayfirst=True, fuzzy=True).date()
-            except Exception:
-                reply = "❌ I couldn't understand the date. Please say a date like '15 August'."
-                history.append({"role": "assistant", "content": reply})
-                _commit()
-                return {
-                    "input_text": text,
-                    "language": language,
-                    "intent_type": intent_type,
-                    "reply_text": reply,
-                    "history": history,
-                    "collected_entities": acc_entities
-                }
+            ask = await FollowUP_Question(
+                intent_type, acc_entities, language, session_history=history,
+                only_fields=["start_date"], max_fields=1
+            )
+            history.append({"role": "assistant", "content": ask}); _commit()
+            return {
+                "input_text": text, "language": language, "intent_type": intent_type,
+                "history": history, "collected_entities": acc_entities,
+                "reply": ask, "reply_text": ask
+            }
 
         if end_date is None:
-            end_date = start_date
+            ask = await FollowUP_Question(
+                intent_type, acc_entities, language, session_history=history,
+                only_fields=["end_date"], max_fields=1
+            )
+            history.append({"role": "assistant", "content": ask}); _commit()
+            return {
+                "input_text": text, "language": language, "intent_type": intent_type,
+                "history": history, "collected_entities": acc_entities,
+                "reply": ask, "reply_text": ask
+            }
 
+        # --- 5) sanity: end >= start (try message-based alignment first, then ask)
+        if end_date < start_date:
+            # If the user didn't type a year, assume it's day+month and align to start's year (or next)
+            if not msg_has_year:
+                try:
+                    candidate_end = end_date.replace(year=start_date.year)
+                    if candidate_end < start_date:
+                        candidate_end = candidate_end.replace(year=start_date.year + 1)
+                    end_date = candidate_end
+                    acc_entities["end_date"] = end_date.isoformat()
+                except Exception:
+                    pass
+
+            # If still invalid, clear end_date so the follow-up actually asks for it (no "Thank you...")
+            if end_date < start_date:
+                acc_entities.pop("end_date", None)
+                warn = f"End date cannot be before the start date ({start_date.strftime('%d %b %Y')})."
+                ask = await FollowUP_Question(
+                    intent_type, acc_entities, language, session_history=history,
+                    only_fields=["end_date"], max_fields=1
+                )
+                combined = f"{warn} {ask}".strip()
+                history.append({"role": "assistant", "content": combined}); _commit()
+                return {
+                    "input_text": text, "language": language, "intent_type": intent_type,
+                    "history": history, "collected_entities": acc_entities,
+                    "reply": combined, "reply_text": combined
+                }
+
+        # --- 6) Auto-bump year without collapsing the range (only if not handled above)
+        any_year_specified = (
+            _has_year(prev_start_raw) or _has_year(prev_end_raw) or
+            _has_year(turn_start_raw) or _has_year(turn_end_raw)
+        )
+
+        if start_date and not any_year_specified:
+            today = _date.today()
+            print("today=",today)
+            current_year = _date.today().year
+            print("current_year=",current_year)
+            if start_date < today:
+                try:
+                    original_delta = (end_date - start_date) if end_date else None
+
+                    # Bring start into this year; if still past, push to next year
+                    candidate = start_date.replace(year=today.year)
+                    if candidate < today:
+                        candidate = candidate.replace(year=today.year + 1)
+                    start_date = candidate
+
+                    if end_date:
+                        # Only shift end if the user never stated a year for it
+                        if not _has_year(turn_end_raw) and not _has_year(prev_end_raw):
+                            if original_delta is not None:
+                                end_date = start_date + original_delta
+                            else:
+                                # align to start's year if no delta
+                                end_date = end_date.replace(year=start_date.year)
+
+                        # Guard: keep range valid without snapping to same day
+                        if end_date < start_date:
+                            try:
+                                end_date = end_date.replace(year=end_date.year + 1)
+                            except Exception:
+                                # last-resort: preserve at least a 1-day range
+                                end_date = start_date + (original_delta or (end_date - end_date))
+
+                    acc_entities["start_date"] = start_date.isoformat()
+                    if end_date:
+                        acc_entities["end_date"] = end_date.isoformat()
+                except Exception:
+                    pass
+
+        # --- 7) ensure we have a variant
         variant_id = acc_entities.get("product_variant_id")
-
         if not variant_id:
-            reply = "❌ Please select a specific product variant first."
-            history.append({"role": "assistant", "content": reply})
-            _commit()
+            resolve_filters = {
+                k: v for k, v in acc_entities.items()
+                if k in ("category", "color", "fabric", "size", "is_rental", "occasion")
+                and v not in (None, "", [], {})
+            }
+            try:
+                matches = await pinecone_fetch_records(resolve_filters, tenant_id)
+            except Exception:
+                matches = []
+
+            def _match_attr(m, key):
+                return (str(m.get(key) or "").strip().lower()
+                        == str(resolve_filters.get(key) or "").strip().lower()) if resolve_filters.get(key) else True
+
+            strict = [m for m in (matches or []) if _match_attr(m, "color") and _match_attr(m, "size") and _match_attr(m, "fabric")]
+            pick = strict if len(strict) == 1 else (matches if len(matches or []) == 1 else None)
+
+            if pick and pick.get("variant_id"):
+                variant_id = pick["variant_id"]
+                acc_entities["product_variant_id"] = variant_id
+            else:
+                opts = (matches or [])[:5]
+                if not opts:
+                    reply = "Sorry I Don't Get This Product"
+                else:
+                    nums = "\n".join(
+                        f"{i+1}) {o.get('name') or 'Item'} — {o.get('color') or '-'} | {o.get('size') or '-'} | {o.get('fabric') or '-'}"
+                        for i, o in enumerate(opts)
+                    )
+                    reply = f"Please Choose Any One:\n{nums}\n\n1–{len(opts)}"
+                history.append({"role": "assistant", "content": reply}); _commit()
+                return {
+                    "input_text": text, "language": language, "intent_type": intent_type,
+                    "history": history, "collected_entities": acc_entities,
+                    "reply": reply, "reply_text": reply,
+                }
+
+        # --- 8) DB check (both dates present now)
+        try:
+            async with SessionLocal() as db:
+                available = await is_variant_available(db, int(float(variant_id)), start_date, end_date)
+        except Exception:
+            logging.exception("Availability DB check failed")
+            err = "❌ I hit a server error while checking availability. Please try again."
+            history.append({"role": "assistant", "content": err}); _commit()
             return {
-                "input_text": text,
-                "language": language,
-                "intent_type": intent_type,
-                "reply_text": reply,
-                "history": history,
-                "collected_entities": acc_entities
+                "input_text": text, "language": language, "intent_type": intent_type,
+                "history": history, "collected_entities": acc_entities,
+                "reply": err, "reply_text": err,
             }
 
-        async with SessionLocal() as db:
-            available = await is_variant_available(db, int(variant_id), start_date, end_date)
+        # --- 9) reply + confirmation follow-up
+        avail_line = (
+            f"✅ Available {start_date.strftime('%d %b %Y')} to {end_date.strftime('%d %b %Y')}."
+            if available else
+            f"❌ Not available {start_date.strftime('%d %b %Y')} to {end_date.strftime('%d %b %Y')}."
+        )
+        confirm_q = await FollowUP_Question(
+            intent_type, acc_entities, language, session_history=history,
+            only_fields=["confirmation"], max_fields=1
+        )
+        final_reply = f"{avail_line} {confirm_q}".strip()
 
-        reply = f"✅ Available on {start_date.strftime('%d %b %Y')}." if available else f"❌ Not available on {start_date.strftime('%d %b %Y')}."
-        history.append({"role": "assistant", "content": reply})
-        _commit()
+        history.append({"role": "assistant", "content": final_reply}); _commit()
+        payload = {
+            "input_text": text,
+            "language": language,
+            "intent_type": intent_type,
+            "history": history,
+            "collected_entities": acc_entities,
+            "reply": final_reply,
+            "reply_text": final_reply,
+            "followup_reply": confirm_q
+        }
         if mode == "call":
-            return {
-                "input_text": text,
-                "language": language,
-                "intent_type": intent_type,
-                "answer": reply,
-                "history": history,
-                "collected_entities": acc_entities
-            }
-        else:
-            return {
-                "input_text": text,
-                "language": language,
-                "intent_type": intent_type,
-                "reply_text": reply,
-                "history": history,
-                "collected_entities": acc_entities
-            } 
+            payload["answer"] = final_reply
+        return payload
+
+
+
     elif intent_type == "website_inquiry":
         print("="*20)
         print(f"Detected Entites in analyze_message: {new_entities}")
@@ -1176,6 +1435,36 @@ async def analyze_message(
        
     # --- other / fallback
     elif intent_type == "other" or intent_type is None:
+        def _is_missing(v): 
+            return v in (None, "", [], {})
+
+        # We consider the rental flow "in progress" if:
+        #  - user is renting (is_rental=True) OR we already have a chosen variant
+        #  - and either start_date or end_date is missing
+        in_rental_flow = (acc_entities.get("is_rental") is True) or bool(acc_entities.get("product_variant_id"))
+        missing_dates  = _is_missing(acc_entities.get("start_date")) or _is_missing(acc_entities.get("end_date"))
+
+        if in_rental_flow and missing_dates:
+            need_fields = [f for f in ("start_date", "end_date") if _is_missing(acc_entities.get(f))]
+            # Ask ONLY for the missing piece(s), short and contextual
+            ask = await FollowUP_Question(
+                "availability_check",
+                acc_entities,
+                language,
+                session_history=history,
+                only_fields=need_fields,
+                max_fields=1
+            )
+            history.append({"role": "assistant", "content": ask}); _commit()
+            return {
+                "input_text": text,
+                "language": language,
+                "intent_type": "availability_check",
+                "history": history,
+                "collected_entities": acc_entities,
+                "reply": ask,
+                "reply_text": ask
+            }
         routed = await llm_route_other(text, language, tenant_id, acc_entities, history)
         if not routed.get("reply"):
             if (language or "").lower().startswith("hi"):

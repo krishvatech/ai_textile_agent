@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from pinecone import Pinecone
 import open_clip
 import torch
+import unicodedata
 
 # ---------- Setup ----------
 load_dotenv()
@@ -46,7 +47,11 @@ model = model.to(device)
 
 # Reuse index + query parameters
 PC_INDEX = pinecone.Index(TEXT_INDEX_NAME)
-TEXT_TOP_K = 10  # lower = faster; raise only if needed
+logger.info("Pinecone index: %s | namespace: %s", TEXT_INDEX_NAME, NAMESPACE or "(empty)")
+TEXT_TOP_K = 100  # lower = faster; raise only if needed
+
+
+# ---------------- helpers ----------------
 
 def smart_capitalize(text: str) -> str:
     """Dynamic title casing:
@@ -77,9 +82,41 @@ def smart_capitalize(text: str) -> str:
 
     return " ".join(cap_token(t) for t in s.split(" "))
 
+
 def normalize_category(cat: str) -> str:
     # For now, category uses the same dynamic logic
     return smart_capitalize(cat)
+
+
+def _title_keep_spaces(s: str) -> str:
+    if not s:
+        return s
+    s = re.sub(r"\s+", " ", str(s)).strip().lower()
+    return " ".join(tok.capitalize() for tok in s.split(" "))
+
+
+def build_filters_from_entities(tenant_id: int, ents: dict) -> dict:
+    """Server-side Pinecone metadata filter, preserving spaces for fabric/category/occasion."""
+    f = {"tenant_id": {"$eq": tenant_id}}
+
+    if ents.get("size"):
+        f["size"] = {"$eq": _title_keep_spaces(ents["size"])}
+
+    if ents.get("fabric"):
+        # IMPORTANT: preserve spaces so "jimmy chu" -> "Jimmy Chu"
+        f["fabric"] = {"$eq": _title_keep_spaces(ents["fabric"])}
+
+    if ents.get("category"):
+        f["category"] = {"$eq": _title_keep_spaces(ents["category"])}
+
+    if ents.get("occasion"):
+        f["occasion"] = {"$eq": _title_keep_spaces(ents["occasion"])}
+
+    if ents.get("is_rental") is not None:
+        f["is_rental"] = {"$eq": bool(ents["is_rental"])}
+
+    return f
+
 
 def get_multi(entities, field, actual_key=None):
     """
@@ -92,14 +129,23 @@ def get_multi(entities, field, actual_key=None):
         val = entities.get(field.capitalize())
     if val is None and actual_key is not None:
         val = entities.get(actual_key)
-    if isinstance(val, list):  # NEW: Handle list directly
+    if isinstance(val, list):  # Handle list directly
         return [str(v).strip().capitalize() for v in val if str(v).strip()]
-    elif isinstance(val, str):  # Existing: Split string on comma
+    elif isinstance(val, str):  # Split string on comma
         return [v.strip().capitalize() for v in val.split(",") if v.strip()]
     return []  # Fallback for other types
 
+
+def _clean_str(x):
+    # lower, NFKD, strip accents, remove all non-alphanumerics
+    s = unicodedata.normalize("NFKD", str(x)).encode("ascii", "ignore").decode("ascii")
+    s = s.lower().strip()
+    return re.sub(r"[^a-z0-9]+", "", s)  # "Jimmy Chu" -> "jimmychu"
+
+
 def flexible_compare(a, b) -> bool:
-    """Robust equality for mixed types (bool/str/num)."""
+    """Robust equality for mixed types with space/punct-insensitive string compare."""
+    # Booleans
     if isinstance(a, bool) or isinstance(b, bool):
         def to_bool(val):
             if isinstance(val, bool):
@@ -108,57 +154,45 @@ def flexible_compare(a, b) -> bool:
                 return val.strip().lower() in {"true", "yes", "1"}
             return bool(val)
         return to_bool(a) == to_bool(b)
-    return str(a) == str(b)
+
+    # Strings / everything else -> compare normalized forms
+    a_clean = _clean_str(a)
+    b_clean = _clean_str(b)
+
+    # exact after cleaning
+    if a_clean == b_clean:
+        return True
+
+    # substring tolerance (helps partials like "silk" vs "soft silk")
+    if len(b_clean) <= 5 or b_clean in a_clean or a_clean in b_clean:
+        return True
+
+    return False
 
 
 def build_metadata_filter(tenant_id: int, entities_cap: dict) -> dict:
     """
-    Build a Pinecone metadata filter. Only include fields you index as exact-match metadata.
+    (Optional) Generic Pinecone metadata filter.
+    Not used in the main flow, but kept for compatibility.
     """
     f = {"tenant_id": {"$eq": tenant_id}}
-    for key in ("category", "size", "color", "is_rental", "type"):
+    for key in ("category", "size", "color", "fabric", "occasion", "is_rental", "type"):
         val = entities_cap.get(key)
         if val not in [None, "", [], {}]:
             if isinstance(val, list):
-                normalized_list = [smart_capitalize(v) for v in val]  # NEW: Capitalize list items
+                normalized_list = [smart_capitalize(v) for v in val]
                 f[key] = {"$in": normalized_list}
             elif isinstance(val, str):
-                split_val = [smart_capitalize(v.strip()) for v in val.split(",") if v.strip()]  # NEW: Split and capitalize
+                split_val = [smart_capitalize(v.strip()) for v in val.split(",") if v.strip()]
                 if len(split_val) > 1:
                     f[key] = {"$in": split_val}
                 else:
-                    f[key] = {"$eq": val}
+                    f[key] = {"$eq": smart_capitalize(val)}
             elif isinstance(val, bool):
                 f[key] = {"$eq": bool(val)}
             else:
                 f[key] = {"$eq": val}
     return f
-
-
-def flexible_compare(a, b) -> bool:
-    """Robust equality for mixed types (bool/str/num). Add fuzzy matching for strings."""
-    if isinstance(a, bool) or isinstance(b, bool):
-        def to_bool(val):
-            if isinstance(val, bool):
-                return val
-            if isinstance(val, str):
-                return val.strip().lower() in {"true", "yes", "1"}
-            return bool(val)
-        return to_bool(a) == to_bool(b)
-    
-    a_str = str(a).lower().strip()
-    b_str = str(b).lower().strip()
-    
-    # Strict equality for most fields
-    if a_str == b_str:
-        return True
-    
-    # Fuzzy for specific fields (e.g., fabric can be partial)
-    # Allow substring matches if the query is shorter
-    if len(b_str) <= 5 or b_str in a_str or a_str in b_str:  # e.g., 'silk' in 'soft silk'
-        return True
-    
-    return False
 
 
 @lru_cache(maxsize=512)
@@ -175,14 +209,15 @@ def embed_text_cached(query_text: str) -> List[float]:
     return feats[0].cpu().numpy().astype("float32").tolist()
 
 
+# ---------------- main query ----------------
+
 async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[str, Any]]:
     """
     Fast product fetch:
       - Normalizes string entities (capitalize) to match your stored metadata style
       - Cached CLIP text embedding
-      - Single Pinecone query with include_metadata=True (no extra fetch)
-      - Server-side metadata filtering
-      - Optional local flexible filter (cheap on <=5 items)
+      - Multi-pass Pinecone query (strict -> loose -> tenant-only)
+      - Local flexible filter (space-insensitive)
     """
     # Normalize (capitalize strings if your metadata is capitalized)
     def normalize_entities(e: dict) -> dict:
@@ -191,21 +226,20 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
         for key in ("category", "color", "fabric", "occasion", "type", "size"):
             if key in out:
                 val = out[key]
-                if isinstance(val, list):  # NEW: Handle lists by capitalizing each item
+                if isinstance(val, list):
                     out[key] = [smart_capitalize(item) for item in val if item]
                 elif isinstance(val, str):
                     out[key] = smart_capitalize(val)
-                # Else, leave as is
         # Optional: coerce is_rental to real bool if it came as string
         if "is_rental" in out and isinstance(out["is_rental"], str):
             out["is_rental"] = out["is_rental"].strip().lower() in {"true", "1", "yes", "y"}
         # Remove empties
         return {k: v for k, v in out.items() if v not in (None, "", [], {})}
 
-    
     entities_cap = normalize_entities(entities)
     logger.info("normalized entities: %s", entities_cap)
     print(entities_cap)
+
     # Build compact text query from non-empty strings
     texts = [str(v) for v in entities_cap.values() if isinstance(v, str) and v.strip()]
     if not texts:
@@ -213,24 +247,20 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
         return []
 
     query_text = " ".join(texts)
-    text_input = tokenizer([query_text]).to(device)
-    with torch.no_grad():
-        text_features = model.encode_text(text_input)
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-        
-    COLOR_KEY   = "color"   # For color field—adjust if your index uses 'Color'
-    SIZE_KEY    = "size"    # == 'size' (small-case, as per your confirmation!)
-    FABRIC_KEY  = "fabric"  # For fabric field—adjust if needed
 
-    color_list  = get_multi(entities, "color", COLOR_KEY)
-    size_list   = get_multi(entities, "size", SIZE_KEY)       # Now using 'size'
+    # Optional debugging prints for per-field combos (not used for querying)
+    COLOR_KEY = "color"
+    SIZE_KEY = "size"
+    FABRIC_KEY = "fabric"
+
+    color_list = get_multi(entities, "color", COLOR_KEY)
+    size_list = get_multi(entities, "size", SIZE_KEY)
     fabric_list = get_multi(entities, "fabric", FABRIC_KEY)
 
-    color_list  = color_list  if color_list  else [None]
-    size_list   = size_list   if size_list   else [None]
+    color_list = color_list if color_list else [None]
+    size_list = size_list if size_list else [None]
     fabric_list = fabric_list if fabric_list else [None]
 
-    
     combos = list(product(color_list, size_list, fabric_list))
     if all(combo == (None, None, None) for combo in combos):
         combos = [(None, None, None)]
@@ -240,29 +270,44 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
         if color:
             filter_dict[COLOR_KEY] = {"$eq": color}
         if size:
-            filter_dict[SIZE_KEY] = {"$eq": size}          # small-case 'size'
+            filter_dict[SIZE_KEY] = {"$eq": size}
         if fabric:
             filter_dict[FABRIC_KEY] = {"$eq": fabric}
         print(f"Sub-query filter: {filter_dict}")
-        
+
     # Get (cached) embedding as list[float]
     query_vector = embed_text_cached(query_text)
-    # Server-side metadata filter
-    md_filter = build_metadata_filter(tenant_id, entities_cap)
 
-    # Run the query in a worker thread (Pinecone client is sync)
-    def _do_query():
+    # 1) strict filter (may include fabric)
+    md_filter = build_filters_from_entities(tenant_id, entities_cap)
+    logger.info("Pinecone strict filter: %s", md_filter)
+
+    def _do_query(filt: dict, top_k: int):
         return PC_INDEX.query(
-            vector=query_vector,          # list[float]
-            top_k=TEXT_TOP_K,
+            vector=query_vector,
+            top_k=top_k,
             namespace=NAMESPACE,
-            filter=md_filter,
+            filter=filt,
             include_metadata=True,
             include_values=False,
         )
 
-    response = await anyio.to_thread.run_sync(_do_query)
-    # print(response)
+    # First try: strict
+    response = await anyio.to_thread.run_sync(lambda: _do_query(md_filter, TEXT_TOP_K))
+
+    # If nothing came back, retry without fabric (let local fuzzy check handle it)
+    if not getattr(response, "matches", None):
+        md_filter_loose = dict(md_filter)
+        md_filter_loose.pop("fabric", None)
+        logger.info("Pinecone loose filter (no fabric): %s", md_filter_loose)
+        response = await anyio.to_thread.run_sync(lambda: _do_query(md_filter_loose, max(TEXT_TOP_K, 50)))
+
+    # If still nothing, try tenant-only (diagnostic safety net)
+    if not getattr(response, "matches", None):
+        tenant_only = {"tenant_id": {"$eq": tenant_id}}
+        logger.warning("Pinecone tenant-only fallback filter: %s", tenant_only)
+        response = await anyio.to_thread.run_sync(lambda: _do_query(tenant_only, max(TEXT_TOP_K, 100)))
+
     # Build matches directly from returned metadata (single round-trip)
     matches: List[Dict[str, Any]] = []
     for m in getattr(response, "matches", []) or []:
@@ -289,8 +334,16 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
             if key in md:
                 item[key] = md.get(key)
         matches.append(item)
-    SCORE_THRESHOLD = 0.35
+
+    # Quick preview logging
+    num = len(matches)
+    logger.info("Pinecone returned matches: %s (index=%s, ns=%s)", num, TEXT_INDEX_NAME, NAMESPACE or "(empty)")
+    if num:
+        preview = [{"name": m.get("name"), "category": m.get("category"), "fabric": m.get("fabric")} for m in matches[:3]]
+        logger.info("Preview (first 3): %s", preview)
+
     # Optional local flexible checks (cheap on <=5 results)
+    SCORE_THRESHOLD = 0.35
     filtered_matches = [
         item for item in matches
         if (item.get("score") is not None and item["score"] >= SCORE_THRESHOLD) and
@@ -301,6 +354,7 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
         )
     ]
     filtered_matches.sort(key=lambda x: (x["score"] is not None, x["score"]), reverse=True)
+    print("Filter_Mathces=", filtered_matches)
     return filtered_matches
 
 
@@ -322,10 +376,15 @@ async def fetch_records_by_ids(ids: List[str], index_name: str = TEXT_INDEX_NAME
             out.append(md | {"id": id_})
     return out
 
+
+# ---------------- demo ----------------
+
 async def demo():
     tenant_id = 4  # <-- change if needed
     entities = {
         "category": "saree",
+        "size": "freesize",
+        "fabric": "jimmychu",
     }
 
     results = await pinecone_fetch_records(entities=entities, tenant_id=tenant_id)
@@ -338,7 +397,7 @@ async def demo():
         print(f"\n#{i}")
         print(" id:", it.get("id"))
         print(" score:", it.get("score"))
-        print(" product_name:", it.get("product_name"))
+        print(" product_name:", it.get("name"))
         print(" is_rental:", it.get("is_rental"))
         print(" category:", it.get("category"))
         print(" occasion:", it.get("occasion"))
@@ -347,6 +406,7 @@ async def demo():
         print(" size:", it.get("size"))
         print(" variant_id:", it.get("variant_id"))
         print(" product_id:", it.get("product_id"))
+
 
 if __name__ == "__main__":
     asyncio.run(demo())
