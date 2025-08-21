@@ -55,7 +55,9 @@ async def simulate_incoming_whatsapp_message(url, from_number, message_body):
 async def main():
     url = "http://localhost:8001/whatsapp/"  # Adjust port if needed
     from_number = "911122334455"  # Replace with your test sender number
-    
+    # for Gujarati language == 914578457845
+    # for Hinndi language == 911122334455
+    # for English language == 
     print("Interactive WhatsApp Message Simulator. Type 'exit' to stop.")
     while True:
         message_body = input("Enter message to simulate (or 'exit' to quit): ")

@@ -483,29 +483,38 @@ async def fetch_attribute_values(
     return out
 
 
-def format_inquiry_reply(values_by_attr: Dict[str, List[str]], ctx: Dict[str, Any] | None = None) -> str:
+def format_inquiry_reply(
+    values_by_attr: Dict[str, List[str]],
+    ctx: Dict[str, Any] | None = None,
+    language: str = "en-IN",
+) -> str:
     """
-    Render a natural-sentence reply.
+    Render a natural-sentence reply in the detected language.
 
     values_by_attr: result from fetch_attribute_values, e.g. {"price": ["0 – 1699"]}
     ctx: optional accumulated entities (e.g., {"category": "Saree"}) to enrich phrasing
-         when values_by_attr doesn't include category.
+    language: BCP-47 like 'gu-IN', 'hi-IN', 'en-IN'
     """
+    import re
     ctx = ctx or {}
 
-    # ---- helpers ----
+    # ---- language helpers ----
+    lr = (language or "en-IN").split("-")[0].lower()
+
     def _human_join(items: List[str]) -> str:
         items = [str(i).strip() for i in items if str(i).strip()]
         if not items:
             return ""
         if len(items) == 1:
             return items[0]
-        return ", ".join(items[:-1]) + " and " + items[-1]
+        # localized “and”
+        conj = {"hi": "और", "gu": "અને"}.get(lr, "and")
+        return f"{', '.join(items[:-1])} {conj} {items[-1]}"
 
     def _parse_min_max(s: str):
         if not isinstance(s, str):
             return None
-        parts = re.split(r"\s*[–-]\s*", s.strip())  # supports en dash or hyphen
+        parts = re.split(r"\s*[–-]\s*", s.strip())
         if len(parts) == 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
             return parts[0].strip(), parts[1].strip()
         return None
@@ -517,9 +526,62 @@ def format_inquiry_reply(values_by_attr: Dict[str, List[str]], ctx: Dict[str, An
             return str(n)
         return f"₹{n}"
 
+    # ---- text templates ----
+    T = {
+        "en": {
+            "have":       "We currently carry {x}.",
+            "fabrics":    "Available fabrics include {x}.",
+            "colors":     "Available colors include {x}.",
+            "sizes":      "Available sizes include {x}.",
+            "occasions":  "We carry outfits for {x} occasions.",
+            "rentbuy":    "Both rental and purchase options are available.",
+            "rent_only":  "Rental options are available.",
+            "buy_only":   "Purchase options are available.",
+            "price_mm":   "Price range is {mn}–{mx}.",
+            "price_min":  "Starting price is {mn}.",
+            "qty":        "Typical stock availability: {x}.",
+            "none":       "I didn’t find details yet.",
+        },
+        "hi": {
+            "have":       "हमारे पास {x} उपलब्ध हैं.",
+            "fabrics":    "उपलब्ध फ़ैब्रिक: {x}.",
+            "colors":     "उपलब्ध रंग: {x}.",
+            "sizes":      "उपलब्ध साइज़: {x}.",
+            "occasions":  "हम {x} अवसरों के लिए आउटफ़िट रखते हैं.",
+            "rentbuy":    "भाड़े और खरीद — दोनों विकल्प उपलब्ध हैं.",
+            "rent_only":  "सिर्फ़ भाड़े के विकल्प उपलब्ध हैं.",
+            "buy_only":   "सिर्फ़ ख़रीद के विकल्प उपलब्ध हैं.",
+            "price_mm":   "कीमत {mn}–{mx} के बीच है.",
+            "price_min":  "शुरुआती कीमत {mn} है.",
+            "qty":        "सामान्य स्टॉक उपलब्धता: {x}.",
+            "none":       "अभी विवरण नहीं मिला.",
+        },
+        "gu": {
+            "have":       "અમારી પાસે {x} ઉપલબ્ધ છે.",
+            "fabrics":    "ઉપલબ્ધ ફેબ્રિક: {x}.",
+            "colors":     "ઉપલબ્ધ કલર્સ: {x}.",
+            "sizes":      "ઉપલબ્ધ સાઇઝ: {x}.",
+            "occasions":  "અમે {x} પ્રસંગો માટે આઉટફિટ રાખીએ છીએ.",
+            "rentbuy":    "ભાડે અને ખરીદી — બંને વિકલ્પ ઉપલબ્ધ છે.",
+            "rent_only":  "માત્ર ભાડે વિકલ્પ ઉપલબ્ધ છે.",
+            "buy_only":   "માત્ર ખરીદી વિકલ્પ ઉપલબ્ધ છે.",
+            "price_mm":   "કિંમત {mn}–{mx} છે.",
+            "price_min":  "શરૂઆતની કિંમત {mn} છે.",
+            "qty":        "સામાન્ય સ્ટોક ઉપલબ્ધતા: {x}.",
+            "none":       "હજુ વિગતો મળ્યાં નથી.",
+        },
+    }.get(lr, None)
+
+    if T is None:
+        # default to English if unsupported locale
+        T = T or {
+            "have": "We currently carry {x}.",
+            "none": "I didn’t find details yet.",
+        }
+
     out: List[str] = []
 
-    # Categories: prefer DB values; else use context
+    # Categories: prefer DB values; else use context (same as before)
     cats = values_by_attr.get("category") or []
     if not cats:
         c = ctx.get("category")
@@ -527,79 +589,53 @@ def format_inquiry_reply(values_by_attr: Dict[str, List[str]], ctx: Dict[str, An
             cats = [str(x) for x in c if str(x).strip()]
         elif isinstance(c, str) and c.strip():
             cats = [c.strip()]
-
     if cats:
-        out.append(f"We currently carry {_human_join(cats)}.")
+        out.append(T["have"].format(x=_human_join(cats)))
 
     # Fabrics / Colors / Sizes / Occasions
     fabrics = values_by_attr.get("fabric") or []
     colors  = values_by_attr.get("color") or []
     sizes   = values_by_attr.get("size") or []
     occs    = values_by_attr.get("occasion") or []
+    if fabrics: out.append(T["fabrics"].format(x=_human_join(fabrics)))
+    if colors:  out.append(T["colors"].format(x=_human_join(colors)))
+    if sizes:   out.append(T["sizes"].format(x=_human_join(sizes)))
+    if occs:    out.append(T["occasions"].format(x=_human_join(occs)))
 
-    if fabrics:
-        out.append(f"Available fabrics include {_human_join(fabrics)}.")
-    if colors:
-        out.append(f"Available colors include {_human_join(colors)}.")
-    if sizes:
-        out.append(f"Available sizes include {_human_join(sizes)}.")
-    if occs:
-        out.append(f"We carry outfits for {_human_join(occs)} occasions.")
+    # Rent vs buy options (if your resolver fills "rental")
+    rentbuy = values_by_attr.get("rental") or []
+    if rentbuy:
+        rb = {str(x).strip().lower() for x in rentbuy}
+        if "rent" in rb and "purchase" in rb:
+            out.append(T["rentbuy"])
+        elif "rent" in rb:
+            out.append(T["rent_only"])
+        elif "purchase" in rb:
+            out.append(T["buy_only"])
 
-    # Purchase price (from purchase-only resolver)
-    pr_list = values_by_attr.get("price") or []
-    if pr_list:
-        cat_for_price = cats[0] if len(cats) == 1 else None
-        rng = _parse_min_max(pr_list[0])
-        if rng:
-            mn, mx = rng
-            if mn == mx:
-                out.append(
-                    f"The starting price{' for ' + cat_for_price if cat_for_price else ''} is {_rupee(mn)}."
-                )
-            else:
-                out.append(
-                    f"The price range{' for ' + cat_for_price if cat_for_price else ''} is {_rupee(mn)} to {_rupee(mx)}."
-                )
+    # Price bands (purchase)
+    price_bands = values_by_attr.get("price") or []
+    if price_bands:
+        mm = _parse_min_max(price_bands[0])
+        if mm:
+            mn, mx = _rupee(mm[0]), _rupee(mm[1])
+            out.append(T["price_mm"].format(mn=mn, mx=mx))
         else:
-            out.append(
-                f"Prices{' for ' + cat_for_price if cat_for_price else ''} start at {_rupee(pr_list[0])}."
-            )
+            out.append(T["price_min"].format(mn=_rupee(price_bands[0])))
 
-    # Rental price (shown only if explicitly asked for rental_price)
-    rpr_list = values_by_attr.get("rental_price") or []
-    if rpr_list:
-        cat_for_rent = cats[0] if len(cats) == 1 else None
-        rng = _parse_min_max(rpr_list[0])
-        if rng:
-            mn, mx = rng
-            if mn == mx:
-                out.append(
-                    f"The rental price{' for ' + cat_for_rent if cat_for_rent else ''} starts at {_rupee(mn)}."
-                )
-            else:
-                out.append(
-                    f"The rental price range{' for ' + cat_for_rent if cat_for_rent else ''} is {_rupee(mn)} to {_rupee(mx)}."
-                )
+    # Rental price bands
+    rent_bands = values_by_attr.get("rental_price") or []
+    if rent_bands:
+        mm = _parse_min_max(rent_bands[0])
+        if mm:
+            mn, mx = _rupee(mm[0]), _rupee(mm[1])
+            out.append(T["price_mm"].format(mn=mn, mx=mx))
         else:
-            out.append(
-                f"Rental prices{' for ' + cat_for_rent if cat_for_rent else ''} start at {_rupee(rpr_list[0])}."
-            )
+            out.append(T["price_min"].format(mn=_rupee(rent_bands[0])))
 
-    # Rent/Purchase options
-    rentopts = values_by_attr.get("rental") or []
-    if rentopts:
-        opts = {str(x).strip().lower() for x in rentopts}
-        if opts == {"rent", "purchase"}:
-            out.append("Items are available for both rent and purchase.")
-        elif "rent" in opts:
-            out.append("Items are available for rent.")
-        elif "purchase" in opts:
-            out.append("Items are available for purchase.")
-
-    # Quantity buckets
+    # Quantity buckets (stock)
     qty = values_by_attr.get("quantity") or []
     if qty:
-        out.append(f"Typical stock availability buckets are {_human_join(qty)} pieces.")
+        out.append(T["qty"].format(x=_human_join(qty)))
 
-    return " ".join(out) if out else "Nothing found for that query."
+    return " ".join(out) if out else T["none"]

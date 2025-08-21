@@ -168,20 +168,54 @@ async def get_tenant_category_by_phone(phone_number: str, db):
         FROM products p, t
         WHERE p.tenant_id = t.id
           AND p.category IS NOT NULL
-          AND TRIM(p.category) <> ''
-        UNION
-        -- also accept 'type' as a category source (some catalogs use it)
-        SELECT DISTINCT LOWER(TRIM(p.type)) AS cat
-        FROM products p, t
-        WHERE p.tenant_id = t.id
-          AND p.type IS NOT NULL
-          AND TRIM(p.type) <> '';
+          AND TRIM(p.category) <> '';
     """)
     result = await db.execute(query, {"phone": phone_number})
     rows = result.fetchall() or []
     # return a simple Python list of strings
     return [r[0] for r in rows]
 
+
+# occasion by tenant_id
+# occasion bby tenant_id
+async def get_tenant_occasion_by_phone(phone_number: str, db):
+    """
+    Return a lowercase, de-duplicated list of occasion names available for the tenant
+    mapped to this WhatsApp number.
+
+    Uses:
+      tenants.whatsapp_number -> tenants.id
+      products.tenant_id -> products.id
+      product_variants.product_id -> product_variants.id
+      product_variant_occasions.variant_id -> occasions.id
+    Filters out empty names and (by default) inactive variants.
+    """
+    query = text("""
+        WITH t AS (
+          SELECT id
+          FROM tenants
+          WHERE whatsapp_number = :phone
+            AND is_active = TRUE
+          ORDER BY id
+          LIMIT 1
+        )
+        SELECT DISTINCT LOWER(TRIM(o.name)) AS occ
+        FROM t
+        JOIN products p
+          ON p.tenant_id = t.id
+        JOIN product_variants pv
+          ON pv.product_id = p.id
+        JOIN product_variant_occasions pvo
+          ON pvo.variant_id = pv.id
+        JOIN occasions o
+          ON o.id = pvo.occasion_id
+        WHERE COALESCE(pv.is_active, TRUE) = TRUE
+          AND o.name IS NOT NULL
+          AND TRIM(o.name) <> '';
+    """)
+    result = await db.execute(query, {"phone": phone_number})
+    rows = result.fetchall() or []
+    return [r[0] for r in rows]
 
 async def send_whatsapp_reply(to: str, body: str):
     """
@@ -233,29 +267,6 @@ async def get_tenant_products_by_phone(phone_number: str, db):
     """)
     rows = (await db.execute(q, {"phone": phone_number})).fetchall() or []
     return [(r[0], r[1]) for r in rows]
-
-
-# async def try_resolve_direct_pick(db, phone_number: str, message: str, threshold: int = 90):
-#     """
-#     If the user message looks like a direct selection of a product title,
-#     resolve it to product_id using fuzzy match against tenant's product names.
-#     Returns:
-#       dict | None, e.g. {"intent_type": "direct_product_pick",
-#                           "entities": {"product_id": 123, "product_name": "Exact Name"}}
-#     """
-#     prods = await get_tenant_products_by_phone(phone_number, db)
-#     if not prods:
-#         return None
-
-#     names = [n for _, n in prods if n]
-#     # Use full message for fuzzy match — downstream flow will confirm missing details
-#     best = process.extractOne(message, names, scorer=fuzz.WRatio)
-#     if best and best[1] >= threshold:
-#         title = best[0]
-#         pid = next(i for (i, n) in prods if n == title)
-#         return {"intent_type": "direct_product_pick", "entities": {"product_id": pid, "product_name": title}}
-#     return None
-# -----------------------------------------------------
 
 
 @router.post("/")
@@ -348,19 +359,12 @@ async def receive_whatsapp_message(request: Request):
             logging.info(f"Using language: {current_language}")
 
             tenant_name = await get_tenant_name_by_phone(EXOPHONE, db) or "Your Shop"
-
-            # 🔥 NEW: Try direct product pick BEFORE intent LLM call
-            # direct_pick = await try_resolve_direct_pick(db, EXOPHONE, text_msg)
-            # if direct_pick:
-            #     intent_type = "direct_product_pick"
-            #     entities = direct_pick["entities"]
-            #     confidence = 0.99
-            # else:
             tenant_categories = await get_tenant_category_by_phone(EXOPHONE, db)
             tenant_fabric = await get_tenant_fabric_by_phone(EXOPHONE,db)
             tenant_color = await get_tenant_color_by_phone(EXOPHONE,db)
+            tenant_occasion = await get_tenant_occasion_by_phone(EXOPHONE, db)
             intent_type, entities, confidence = await detect_textile_intent_openai(
-                    text_msg, current_language, allowed_categories=tenant_categories,allowed_fabric=tenant_fabric,allowed_color=tenant_color
+                    text_msg, current_language, allowed_categories=tenant_categories,allowed_fabric=tenant_fabric,allowed_color=tenant_color,allowed_occasion=tenant_occasion
                 )
 
             try:

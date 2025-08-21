@@ -680,6 +680,7 @@ async def handle_asking_inquiry_variants(
     db: AsyncSession,
     tenant_id: int,
     detect_requested_attributes_async,
+    language: str,
 ) -> str:
     try:
         asked_now = await detect_requested_attributes_async(text or "", acc_entities or {})
@@ -689,7 +690,7 @@ async def handle_asking_inquiry_variants(
         
     if not asked_now:
         asked_now = ["category"]
-
+    
     needs_category = any(k in asked_now for k in ("price", "rental_price")) and not (acc_entities or {}).get("category")
     if needs_category:
         try:
@@ -698,11 +699,22 @@ async def handle_asking_inquiry_variants(
             cats = []
         if cats:
             bullets = "\n".join(f"• {c}" for c in cats[:12])
-            return f"Please choose a category for the price range:\n{bullets}"
+            lr = (language or "en-IN").split("-")[0].lower()
+            if lr == "hi":
+                return f"कृपया दाम बताने के लिए एक कैटेगरी चुनें:\n{bullets}"
+            elif lr == "gu":
+                return f"કિંમત જણાવવા માટે કૃપા કરીને એક કેટેગરી પસંદ કરો:\n{bullets}"
+            else:
+                return f"Please choose a category for the price range:\n{bullets}"
+        lr = (language or "en-IN").split("-")[0].lower()
+        if lr == "hi":
+            return "कृपया दाम बताने के लिए कैटेगरी बताइए."
+        elif lr == "gu":
+            return "કિંમત જણાવવા માટે કૃપા કરીને કેટેગરી જણાવો."
         return "Please tell me the category for the price range."
 
     values = await fetch_attribute_values(db, tenant_id, asked_now, acc_entities or {})
-    return format_inquiry_reply(values,acc_entities)
+    return format_inquiry_reply(values, acc_entities, language=language)  # <— pass language
 
 def merge_entities(acc_entities: Optional[Dict[str, Any]], new_entities: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """
@@ -1414,6 +1426,7 @@ async def analyze_message(
                 db=session,
                 tenant_id=tenant_id,
                 detect_requested_attributes_async=detect_requested_attributes_async,
+                language=language,
             )
             print("reply_text=",reply_text)
         history.append({"role": "assistant", "content": reply_text})

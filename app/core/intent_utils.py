@@ -52,7 +52,7 @@ def process_all_entities(entities: dict) -> dict:
     
     # return all_entities
 
-async def detect_textile_intent_openai(text: str, detected_language: str,allowed_categories: Optional[List[str]] = None,allowed_fabric: Optional[List[str]] = None,allowed_color: Optional[List[str]] = None) -> Tuple[str, dict, float]:
+async def detect_textile_intent_openai(text: str, detected_language: str,allowed_categories: Optional[List[str]] = None,allowed_fabric: Optional[List[str]] = None,allowed_color: Optional[List[str]] = None,allowed_occasion: Optional[List[str]] = None) -> Tuple[str, dict, float]:
     """
     Detect customer intent for textile business using OpenAI
     """
@@ -119,10 +119,10 @@ Entity extraction guidelines (normalize; be conservative; use null when unknown)
 - rental_price: Rent price/rate per piece (number). If a numeric price is given and rental intent is explicit, set here; else null.
 - size: Recognize full names, abbreviations, numbers, or measurements; normalize to one of "S","M","L","XL","XXL","Child", or preserve numeric (e.g., "42").
   Saree rule: if the category/name is "saree" (any spelling/script), always set size = "Freesize" and ignore other size mentions.
-- occasion: Normalize to one of "wedding","party","festival","casual" when detectable; else null.
+- occasion: The product occasion **Must be normalized to one of {allowed_occasion}**. Normalize to standard English occasion names regardless of language/script; if uncertain, choose the closest standard occasion
 - quantity: Number of pieces desired (number). Convert digits or number-words into an integer. Handle English / Hinglish / Hindi / Gujarati in native or roman scripts. Output quantity as a JSON number (not a string). If absent or ambiguous, set null.
 - location: Delivery location if stated; else null.
-- is_rental: Only set true if rental intent is explicit; set false only if buy/purchase intent is explicit; otherwise null. Do not infer false for neutral queries.
+- is_rental: Only set true if rental intent is explicit in that detected language; set false only if buy/purchase intent is explicit; otherwise null. Do not infer false for neutral queries.
 - start_date: If message mentions a booking/need date (absolute or relative like "aaj/today", "kal/tomorrow"), normalize to YYYY-MM-DD; else null.
 - end_date: If a range/return date is mentioned, normalize to YYYY-MM-DD; else null. If only a single date is given, set end_date = start_date.
 - type: Sub-type or variant of the category (e.g., "lehenga" for a choli variant, "banarasi" for saree). Normalize to standard terms from allowed_categories if possible; else null. Be conservative—only set if explicitly implied.
