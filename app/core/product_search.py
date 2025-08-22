@@ -96,26 +96,34 @@ def _title_keep_spaces(s: str) -> str:
 
 
 def build_filters_from_entities(tenant_id: int, ents: dict) -> dict:
-    """Server-side Pinecone metadata filter, preserving spaces for fabric/category/occasion."""
+    """Server-side Pinecone metadata filter with category priority"""
     f = {"tenant_id": {"$eq": tenant_id}}
-
-    if ents.get("size"):
-        f["size"] = {"$eq": _title_keep_spaces(ents["size"])}
-
-    if ents.get("fabric"):
-        # IMPORTANT: preserve spaces so "jimmy chu" -> "Jimmy Chu"
-        f["fabric"] = {"$eq": _title_keep_spaces(ents["fabric"])}
-
+    
+    # ALWAYS enforce category - this is non-negotiable
     if ents.get("category"):
         f["category"] = {"$eq": _title_keep_spaces(ents["category"])}
-
-    if ents.get("occasion"):
-        f["occasion"] = {"$eq": _title_keep_spaces(ents["occasion"])}
-
+    
+    # Rental preference
     if ents.get("is_rental") is not None:
         f["is_rental"] = {"$eq": bool(ents["is_rental"])}
-
+    
+    # Size (usually important for fit)
+    if ents.get("size"):
+        f["size"] = {"$eq": _title_keep_spaces(ents["size"])}
+    
+    # Color and fabric (more flexible)
+    if ents.get("color"):
+        f["color"] = {"$eq": _title_keep_spaces(ents["color"])}
+    if ents.get("fabric"):
+        f["fabric"] = {"$eq": _title_keep_spaces(ents["fabric"])}
+    
+    # Occasion is LEAST priority - only add if we have other strong matches
+    # This prevents showing different categories just because occasion matches
+    if ents.get("occasion") and len(f) > 2:  # Only if we have category + other filters
+        f["occasion"] = {"$eq": _title_keep_spaces(ents["occasion"])}
+    
     return f
+
 
 
 def get_multi(entities, field, actual_key=None):
@@ -208,6 +216,17 @@ def embed_text_cached(query_text: str) -> List[float]:
     # ensure float32 and convert to Python list
     return feats[0].cpu().numpy().astype("float32").tolist()
 
+def strict_color_compare(item_color: str, requested_color: str) -> bool:
+    """Strict exact matching for colors - no partial matches allowed"""
+    if not item_color or not requested_color:
+        return True  # Skip if either is empty
+    
+    # Normalize both colors for exact comparison
+    item_clean = _clean_str(item_color)
+    requested_clean = _clean_str(requested_color)
+    
+    # Only exact match allowed for colors
+    return item_clean == requested_clean
 
 # ---------------- main query ----------------
 
@@ -293,14 +312,26 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
         )
 
     # First try: strict
-    response = await anyio.to_thread.run_sync(lambda: _do_query(md_filter, TEXT_TOP_K))
-
+    
+    critical_attributes = ['color', 'size','occasion','fabric']  # Add other critical attributes
+    has_critical_attrs = any(entities_cap.get(attr) for attr in critical_attributes)
     # If nothing came back, retry without fabric (let local fuzzy check handle it)
-    if not getattr(response, "matches", None):
-        md_filter_loose = dict(md_filter)
-        md_filter_loose.pop("fabric", None)
-        logger.info("Pinecone loose filter (no fabric): %s", md_filter_loose)
-        response = await anyio.to_thread.run_sync(lambda: _do_query(md_filter_loose, max(TEXT_TOP_K, 50)))
+    response = await anyio.to_thread.run_sync(lambda: _do_query(md_filter, TEXT_TOP_K))
+    if not getattr(response, "matches", None) and has_critical_attrs:
+        logger.info("No matches found for critical attributes (color/size/fabric/occasion), returning empty")
+        return []
+    if not getattr(response, "matches", None) and not has_critical_attrs :
+        fallback_filter = {"tenant_id": {"$eq": tenant_id}}
+        
+        # Keep category and is_rental as they're most important
+        if entities_cap.get("category"):
+            fallback_filter["category"] = {"$eq": entities_cap["category"]}
+        if entities_cap.get("is_rental") is not None:
+            fallback_filter["is_rental"] = {"$eq": entities_cap["is_rental"]}
+        if entities_cap.get("size"):
+            fallback_filter["size"] = {"$eq": entities_cap["size"]}
+        logger.info("Pinecone category-priority fallback: %s", fallback_filter)
+        response = await anyio.to_thread.run_sync(lambda: _do_query(fallback_filter, max(TEXT_TOP_K, 50)))
 
     # If still nothing, try tenant-only (diagnostic safety net)
     if not getattr(response, "matches", None):
@@ -343,16 +374,56 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
         logger.info("Preview (first 3): %s", preview)
 
     # Optional local flexible checks (cheap on <=5 results)
-    SCORE_THRESHOLD = 0.35
-    filtered_matches = [
-        item for item in matches
-        if (item.get("score") is not None and item["score"] >= SCORE_THRESHOLD) and
-        all(
-            (key in item and flexible_compare(item.get(key), value))
-            for key, value in entities_cap.items()
-            if value not in [None, "", [], {}]
-        )
-    ]
+    def strict_category_match(item, requested_category):
+        if not requested_category:
+            return True
+        item_category = str(item.get("category") or "").strip().lower()
+        req_category = str(requested_category or "").strip().lower()
+        return item_category == req_category
+
+    # Filter matches with category priority
+    SCORE_THRESHOLD = 0.30
+    filtered_matches = []
+
+    for item in matches:
+        # Must pass score threshold
+        if not (item.get("score") is not None and item["score"] >= SCORE_THRESHOLD):
+            continue
+        
+        # STRICT: Must match category if specified
+        if entities_cap.get("category") and not strict_category_match(item, entities_cap.get("category")):
+            continue
+        
+        # STRICT COLOR MATCHING - this is the key fix
+        if entities_cap.get("color"):
+            if not strict_color_compare(item.get("color"), entities_cap.get("color")):
+                logger.info("Color mismatch: item=%s vs requested=%s", item.get("color"), entities_cap.get("color"))
+                continue
+        
+        # Flexible matching for other attributes
+        match = True
+        for key, value in entities_cap.items():
+            if key in ["category", "color"]:  # Already handled above
+                continue
+            if key == "occasion" and not item.get("occasion"):
+                continue  # Skip occasion check if item has no occasion
+            if value not in [None, "", [], {}] and key in item:
+                if not flexible_compare(item.get(key), value):
+                    match = False
+                    break
+        
+        if match:
+            filtered_matches.append(item)
+
+    # filtered_matches = [
+    #     item for item in matches
+    #     if (item.get("score") is not None and item["score"] >= SCORE_THRESHOLD) and
+    #     all(
+    #         (key in item and flexible_compare(item.get(key), value))
+    #         for key, value in entities_cap.items()
+    #         if value not in [None, "", [], {}]
+    #     )
+    # ]
     filtered_matches.sort(key=lambda x: (x["score"] is not None, x["score"]), reverse=True)
     print("Filter_Mathces=", filtered_matches)
     return filtered_matches

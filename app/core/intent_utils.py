@@ -91,27 +91,33 @@ Decision rules (apply in order; pick exactly one):
 
 
 0) PRODUCT-SEARCH LOCK (highest after -1):
-   If the message contains ANY product attribute — name, category, fabric, color, size, or occasion —
-   OR explicit buy intent (e.g., “buy, purchase, kharidna, kharidvu, muje chahiye”)
-   OR explicit rental intent (e.g., “on rent / rent pe / kiraye par / bhade” or is_rental=true/false),
-   then → intent = "product_search".
-   This OVERRIDES rules 1, 2, 4, 6 and 7 (unless -1 fired).
-   Additionally: when buy is expressed, set is_rental=false; when rent is expressed, set is_rental=true.
+    If the message contains ANY product attribute — name, category, fabric, color, size, or occasion —
+    OR explicit buy intent (e.g., “buy, purchase, kharidna, kharidvu, muje chahiye”)
+    OR explicit rental intent (e.g., “on rent / rent pe / kiraye par / bhade” or is_rental=true/false),
+    then → intent = "product_search".
+    This OVERRIDES rules 1, 2, 4, 6 and 7 (unless -1 or 0a fired).
+    Additionally: when buy is expressed, set is_rental=false; when rent is expressed, set is_rental=true.
 
+0a) OPTIONS-ONLY QUESTION EXCEPTION (overrides 0 for list-style questions):
+    If the message is a WH / option-list question about available attributes WITHOUT choosing one,
+    e.g., “which fabrics do you have in kurta?”, “what colors are available in saree?”,
+    “kaun-se sizes milenge kurta me?”, “कुर्ता में कौन-कौन से कलर हैं?”, “કુર્તામાં કયા કલર્સ છે?”,
+    and it does NOT explicitly give a concrete value (like “cotton”, “red”, “XL”) and does NOT express buy/rent,
+    then → intent = "asking_inquiry".
+    Populate entities.category if a garment type is named; keep is_rental = null.
 
-1) If a product category is explicitly present → product_search.
+1) If a product category is explicitly present → product_search, UNLESS rule (-1) or 0a already fired.
 
 2) If the message contains an http(s) URL that points to our store (including any Shopify product/collection URL like https://*.myshopify.com/products/... or .../collections/...) → website_inquiry,
    UNLESS rule (-1) or 0 already fired.
 
-3) If this message is ONLY a refinement (e.g., “on rent / rent pe / kiraye par / i want rent / i want on rent / muje kiraye pe chahiye”, buy/purchase, color, fabric, size, occasion, budget)
-   AND the Context above already contains a non-null category, then → product_search (continue browsing with updated filters). Do NOT switch to asking_inquiry in this case.
-   For rental refinements, set is_rental=true in entities.
-   Example: If context has "category": "saree" and message is "muje kiraye pe chahiye" → product_search, with category carried over.
+3) If this message is ONLY a refinement (e.g., “on rent / rent pe / kiraye par / i want rent / i want on rent / muje kiraye pe chahiye”, buy/purchase, a specific color/fabric/size value, occasion, budget)
+    AND the Context above already contains a non-null category, then → product_search (continue browsing with updated filters).
+    (Exception: if the refinement is an option-list WH question that doesn’t select a concrete value, use asking_inquiry as per 0a.)
 
-3a) If the message matches a refinement (as in rule 3) but there is NO non-null category in context,
-    infer a default category from allowed_categories (use the first one if available, e.g., "saree") and set intent to product_search.
-    Only do this if allowed_categories is non-empty; else fall to rule 6.
+ 3a) If the message matches a refinement (as in rule 3) but there is NO non-null category in context,
+    infer a default category from allowed_categories (use the first one) and set intent to product_search,
+    UNLESS rule 0a applies (then asking_inquiry with that inferred category).
 
 4) If the message includes a calendar date or booking phrasing (e.g., '24 Aug', 'aaj/today', 'kal/tomorrow', 'ke liye'), return availability_check and populate start_date/end_date,
    UNLESS rule (-1) or 0 already fired. If no specific product is selected, still return availability_check (the app will ask the user to pick a product).
