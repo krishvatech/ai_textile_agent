@@ -479,6 +479,7 @@ def _valid_signature(app_secret: str, raw: bytes, header: str) -> bool:
 
 @router.post("/webhook")
 async def receive_cloud_webhook(request: Request):
+    print('Meta webhook..................')
     """Handle inbound messages from Meta Cloud API (value.messages)."""
     raw = await request.body()
     if not _valid_signature(META_APP_SECRET, raw, request.headers.get("X-Hub-Signature-256", "")):
