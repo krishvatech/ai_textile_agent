@@ -461,6 +461,7 @@ async def verify_cloud_webhook(request: Request):
     mode = params.get("hub.mode")
     token = params.get("hub.verify_token")
     challenge = params.get("hub.challenge", "")
+    logging.info("-------In Get Method Webhook-----")
     if mode == "subscribe" and token == WHATSAPP_VERIFY_TOKEN:
         try:
             return int(challenge)
