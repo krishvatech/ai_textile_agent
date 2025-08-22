@@ -1053,10 +1053,11 @@ async def analyze_message(
 
         msg = (text or "")
         msg_lower = msg.lower()
+        dash_is_range = re.search(r"\s[-–—]\s", msg) is not None  # only hyphen with spaces around
         has_range_tokens = (
-            bool(re.search(r"\b(to|till|until|upto|up to|between|from)\b", msg_lower))
+            re.search(r"\b(to|till|until|upto|up to|between|from)\b", msg_lower) is not None
             or (" se " in msg_lower and " tak " in msg_lower)  # Hindi "se ... tak"
-            or ("-" in msg_lower or "–" in msg_lower or "—" in msg_lower)
+            or dash_is_range
         )
         # Did the USER actually type a year in the message (ignore LLM-normalized years)
         msg_has_year = bool(re.search(r"\b(19|20)\d{2}\b", msg))
@@ -1103,7 +1104,7 @@ async def analyze_message(
             acc_entities.pop("end_date", None)
 
         # Case C: explicit range this turn (or two different dates)
-        elif turn_has_both_distinct or (turn_start and turn_end and has_range_tokens):
+        elif turn_has_both_distinct:
             start_date, end_date = turn_start, turn_end
             if not msg_has_year:
                 today = _date.today()

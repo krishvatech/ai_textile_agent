@@ -128,6 +128,32 @@ Decision rules (apply in order; pick exactly one):
 
 7) Else → other.
 
+- (-0.5) PRICE-ONLY OVERRIDE:
+   If the message is primarily a price question (e.g., “starting price of …”, “price range for …”, “what’s the price of …”, “kitna shuru hota hai …”, “rent ka rate kya hai …”)
+   AND it mentions a category
+   AND it does NOT add any other attribute (no color/fabric/size/occasion) and does NOT explicitly confirm buy/rent,
+   then → intent = asking_inquiry.
+   Populate entities.category from the message, set entities.is_rental only if explicitly stated, leave price/rental_price null.
+   This rule OVERRIDES Rule 0.
+
+- (-0.4) ATTRIBUTE-LIST OVERRIDE:
+  If the user is asking for available options of a single attribute — e.g.
+  “which fabrics do you have”, “what colors are available”, “what sizes do you carry”,
+  “categories you have”, “kaun-kaun se fabric hai?”, “konsa kapda milta hai?” —
+  then → intent = asking_inquiry.
+  Behavior:
+    • Keep all existing context fields unchanged (category/is_rental/occasion/etc.).
+    • Set asked_now to exactly that attribute (e.g., ["fabric"]).
+    • Do NOT ask for rental dates here, even if is_rental = true.
+    • The answer should list unique values filtered by tenant + current context.
+  This rule OVERRIDES Rule 0.
+
+
+- When asked_now ∈ {"fabric","color","size","category"}:
+  • Provide a concise, comma-separated list of available options filtered by current context.
+  • Ask the user to pick ONE.
+  • Do NOT ask for start/end rental dates in this turn (dates come only after the user picks attributes or asks about availability).
+
 Never return "other" when rule (-1), 0, 1, 2, 3, 3a, or 4 matches.
 
 Entity extraction guidelines (normalize; be conservative; use null when unknown):
