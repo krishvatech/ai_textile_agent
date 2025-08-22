@@ -68,93 +68,114 @@ async def detect_textile_intent_openai(text: str, detected_language: str,allowed
     prompt = f"""
 You are an AI assistant for a textile business in India specializing in wholesale and retail.
 Goal: Analyze the customer message and return a single intent plus normalized entities.
-
 Intents (lowercase values):
 - greeting — short salutations/pleasantries only.
 - product_search — message explicitly names a product category (garment/product type), optionally with attributes (fabric, color, size, price, quantity, location, occasion, rental).
 - availability_check — user asks about date availability / booking / reserve for a specific product that is already selected in Context (e.g., product_variant_id present or exactly one selected item).
-- asking_inquiry — ONLY when the user asks about availability/options/prices/etc. AND none of rules (-1, 0, 1, 2, 3, 3a, or 4) match. 
+- asking_inquiry — ONLY when the user asks about availability/options/prices/etc. AND none of rules (-1, 0, 1, 2, 3, 3a, or 4) match.
 If any product attribute (including occasion) is present, do NOT return asking_inquiry — return product_search instead.
 - website_inquiry — message contains a URL to one of our store domains and refers to a specific website/product/page. Treat ANY Shopify product/collection URL (https://*.myshopify.com/products/... or /collections/...) as our store.
 - confirmation — user explicitly confirms proceeding to BUY or RENT the currently selected product (e.g., “confirm this”, “book it”, “I’ll take it”, “order now”, “reserve kar do”, “haan confirm”). This is a final go-ahead, not just a preference update.
+- stock_check — user replies with ONLY a quantity (e.g., "1", "2", "25", "2 pcs"), meaning “check if this many of the currently selected item/category is available right now.”
 - other — order status, tracking, delivery, payment, returns, complaints, small talk, or unrelated topics.
 
 Decision rules (apply in order; pick exactly one):
-- (-1) CONFIRMATION LOCK (highest priority):
+
+0) CONFIRMATION LOCK (highest priority):
    If the message is an explicit confirmation to proceed with BUY or RENT of the product that is already selected/in focus (e.g., context has product_variant_id, or there is exactly one selected item, or the user is replying “yes/confirm/book it” to the bot’s confirmation prompt), then:
    → intent = confirmation
    → set "confirmation": "yes" at the top level
    → set entities.is_rental = true if rental terms are explicitly mentioned (e.g., “on rent / kiraye par / rent pe / book for rent / haa”); set entities.is_rental = false if buy/purchase is explicit; otherwise leave null.
    → carry forward category (and other known filters) from Context when obvious; only fill what the user said now if new.
    → if dates/quantity are mentioned, populate start_date/end_date/quantity accordingly.
-   This rule OVERRIDES all other rules, including the product-search lock below.
+   This rule OVERRIDES all other rules.
 
+1) PRODUCT-SEARCH LOCK (highest after 0):
+   If the message contains ANY product attribute — name, category, fabric, color, size, or occasion —
+   OR explicit buy intent (e.g., “buy, purchase, kharidna, kharidvu, muje chahiye”)
+   OR explicit rental intent (e.g., “on rent / rent pe / kiraye par / bhade” or is_rental=true/false),
+   then → intent = "product_search".
+   This OVERRIDES rules 2, 3, 5, 7 and 8 (unless 0 or 1a fired).
+   Additionally: when buy is expressed, set is_rental=false; when rent is expressed, set is_rental=true.
 
-0) PRODUCT-SEARCH LOCK (highest after -1):
-    If the message contains ANY product attribute — name, category, fabric, color, size, or occasion —
-    OR explicit buy intent (e.g., “buy, purchase, kharidna, kharidvu, muje chahiye”)
-    OR explicit rental intent (e.g., “on rent / rent pe / kiraye par / bhade” or is_rental=true/false),
-    then → intent = "product_search".
-    This OVERRIDES rules 1, 2, 4, 6 and 7 (unless -1 or 0a fired).
-    Additionally: when buy is expressed, set is_rental=false; when rent is expressed, set is_rental=true.
+1a) OPTIONS-ONLY QUESTION EXCEPTION (overrides 1 for list-style questions):
+   If the message is a WH / option-list question about available attributes WITHOUT choosing one,
+   e.g., “which fabrics do you have in kurta?”, “what colors are available in saree?”,
+   “kaun-se sizes milenge kurta me?”, “कुर्ता में कौन-कौन से कलर हैं?”, “કુર્તામાં કયા કલર્સ છે?”,
+   and it does NOT explicitly give a concrete value (like “cotton”, “red”, “XL”) and does NOT express buy/rent,
+   then → intent = "asking_inquiry".
+   Populate entities.category if a garment type is named; keep is_rental = null.
 
-0a) OPTIONS-ONLY QUESTION EXCEPTION (overrides 0 for list-style questions):
-    If the message is a WH / option-list question about available attributes WITHOUT choosing one,
-    e.g., “which fabrics do you have in kurta?”, “what colors are available in saree?”,
-    “kaun-se sizes milenge kurta me?”, “कुर्ता में कौन-कौन से कलर हैं?”, “કુર્તામાં કયા કલર્સ છે?”,
-    and it does NOT explicitly give a concrete value (like “cotton”, “red”, “XL”) and does NOT express buy/rent,
-    then → intent = "asking_inquiry".
-    Populate entities.category if a garment type is named; keep is_rental = null.
-
-1) If a product category is explicitly present → product_search, UNLESS rule (-1) or 0a already fired.
-
-2) If the message contains an http(s) URL that points to our store (including any Shopify product/collection URL like https://*.myshopify.com/products/... or .../collections/...) → website_inquiry,
-   UNLESS rule (-1) or 0 already fired.
-
-3) If this message is ONLY a refinement (e.g., “on rent / rent pe / kiraye par / i want rent / i want on rent / muje kiraye pe chahiye”, buy/purchase, a specific color/fabric/size value, occasion, budget)
-    AND the Context above already contains a non-null category, then → product_search (continue browsing with updated filters).
-    (Exception: if the refinement is an option-list WH question that doesn’t select a concrete value, use asking_inquiry as per 0a.)
-
- 3a) If the message matches a refinement (as in rule 3) but there is NO non-null category in context,
-    infer a default category from allowed_categories (use the first one) and set intent to product_search,
-    UNLESS rule 0a applies (then asking_inquiry with that inferred category).
-
-4) If the message includes a calendar date or booking phrasing (e.g., '24 Aug', 'aaj/today', 'kal/tomorrow', 'ke liye'), return availability_check and populate start_date/end_date,
-   UNLESS rule (-1) or 0 already fired. If no specific product is selected, still return availability_check (the app will ask the user to pick a product).
-
-5) Else if it is only a salutation → greeting.
-
-6) Else if the message is primarily about availability/options/prices/rental without a clear category → asking_inquiry.
-
-7) Else → other.
-
-- (-0.5) PRICE-ONLY OVERRIDE:
+1b) PRICE-ONLY OVERRIDE:
    If the message is primarily a price question (e.g., “starting price of …”, “price range for …”, “what’s the price of …”, “kitna shuru hota hai …”, “rent ka rate kya hai …”)
    AND it mentions a category
    AND it does NOT add any other attribute (no color/fabric/size/occasion) and does NOT explicitly confirm buy/rent,
    then → intent = asking_inquiry.
    Populate entities.category from the message, set entities.is_rental only if explicitly stated, leave price/rental_price null.
-   This rule OVERRIDES Rule 0.
+   This rule OVERRIDES Rule 1.
 
-- (-0.4) ATTRIBUTE-LIST OVERRIDE:
-  If the user is asking for available options of a single attribute — e.g.
-  “which fabrics do you have”, “what colors are available”, “what sizes do you carry”,
-  “categories you have”, “kaun-kaun se fabric hai?”, “konsa kapda milta hai?” —
-  then → intent = asking_inquiry.
-  Behavior:
-    • Keep all existing context fields unchanged (category/is_rental/occasion/etc.).
-    • Set asked_now to exactly that attribute (e.g., ["fabric"]).
-    • Do NOT ask for rental dates here, even if is_rental = true.
-    • The answer should list unique values filtered by tenant + current context.
-  This rule OVERRIDES Rule 0.
+1c) ATTRIBUTE-LIST OVERRIDE:
+   If the user is asking for available options of a single attribute — e.g.
+   “which fabrics do you have”, “what colors are available”, “what sizes do you carry”,
+   “categories you have”, “kaun-kaun se fabric hai?”, “konsa kapda milta hai?” —
+   then → intent = asking_inquiry.
+   Behavior:
+     • Keep all existing context fields unchanged (category/is_rental/occasion/etc.).
+     • Set asked_now to exactly that attribute (e.g., ["fabric"]).
+     • Do NOT ask for rental dates here, even if is_rental = true.
+     • The answer should list unique values filtered by tenant + current context.
+   This rule OVERRIDES Rule 1.
 
+1d) QUANTITY-ONLY OVERRIDE (→ stock_check):
+   If the message contains ONLY a quantity (digits or number-words) with optional light fillers/units
+   like "pcs", "piece(s)", "qty", "please/pls", and NO other attribute (no color/fabric/size/occasion/price,
+   no buy/rent words, no URL), AND there is a product in focus (context has product_variant_id OR a non-null category),
+   then → intent = stock_check.
+   Behavior:
+     • Set entities.quantity to the parsed number (as a JSON number).
+     • Carry forward category (and other known filters) from context; do not change them here.
+     • Leave price/rental_price null.
+   This rule OVERRIDES Rule 1.
+
+1e) PROCEED-TO-STOCK OVERRIDE (→ stock_check):
+   If the user expresses a clear decision to take/buy/rent the item currently in focus — e.g., “I want this”, “yeh chahiye”, “isko le lo”, “I want buy this saree”, “isse hi de do”, or equivalent in any language — then treat it as an immediate stock check.
+   Conditions:
+     • There is a product in focus (context has product_variant_id OR exactly one selected item OR a non-null category).
+   Behavior:
+     • intent = stock_check
+     • entities.is_rental: set false if buy wording is explicit; true if rent wording is explicit; else leave as-is/null.
+     • entities.quantity: if a number is present, set it; otherwise default to 1.
+   This rule OVERRIDES Rules 1, 4 and 4a, and takes precedence over Rule 0 only when the message is NOT an explicit confirmation (“confirm/book/pay”).
+
+2) If a product category is explicitly present → product_search, UNLESS Rule 0 or 1a/1b/1c/1d/1e already fired.
+
+3) If the message contains an http(s) URL that points to our store (including any Shopify product/collection URL like https://*.myshopify.com/products/... or .../collections/...) → website_inquiry,
+   UNLESS Rule 0 or 1 already fired.
+
+4) If this message is ONLY a refinement (e.g., “on rent / rent pe / kiraye par / i want rent / i want on rent / muje kiraye pe chahiye”, buy/purchase, a specific color/fabric/size value, occasion, budget)
+   AND the Context above already contains a non-null category, then → product_search (continue browsing with updated filters).
+   (Exception: if the refinement is an option-list WH question that doesn’t select a concrete value, use asking_inquiry as per 1a/1c.)
+
+4a) If the message matches a refinement (as in Rule 4) but there is NO non-null category in context,
+    infer a default category from allowed_categories (use the first one) and set intent to product_search,
+    UNLESS Rule 1a applies (then asking_inquiry with that inferred category).
+
+5) If the message includes a calendar date or booking phrasing (e.g., '24 Aug', 'aaj/today', 'kal/tomorrow', 'ke liye'), return availability_check and populate start_date/end_date,
+   UNLESS Rule 0 or 1 already fired. If no specific product is selected, still return availability_check (the app will ask the user to pick a product).
+
+6) Else if it is only a salutation → greeting.
+
+7) Else if the message is primarily about availability/options/prices/rental without a clear category → asking_inquiry.
+
+8) Else → other.
 
 - When asked_now ∈ {"fabric","color","size","category"}:
   • Provide a concise, comma-separated list of available options filtered by current context.
   • Ask the user to pick ONE.
   • Do NOT ask for start/end rental dates in this turn (dates come only after the user picks attributes or asks about availability).
 
-Never return "other" when rule (-1), 0, 1, 2, 3, 3a, or 4 matches.
+Never return "other" when Rule 0, 1, 2, 3, 4, 4a, or 5 matches.
+
 
 Entity extraction guidelines (normalize; be conservative; use null when unknown):
 - product: Natural product name mentioned (freeform). If identified, also mirror its garment type to "category".
@@ -174,10 +195,8 @@ Entity extraction guidelines (normalize; be conservative; use null when unknown)
 - start_date: If message mentions a booking/need date (absolute or relative like "aaj/today", "kal/tomorrow"), normalize to YYYY-MM-DD; else null.
 - end_date: If a range/return date is mentioned, normalize to YYYY-MM-DD; else null. If only a single date is given, set end_date = start_date.
 - type: Sub-type or variant of the category (e.g., "lehenga" for a choli variant, "banarasi" for saree). Normalize to standard terms from allowed_categories if possible; else null. Be conservative—only set if explicitly implied.
-
 Question detection:
 - is_question = true if the user asks/requests info (including imperative forms like “find/show/get” and availability/booking queries); otherwise false.
-
 Output requirements:
 - Strict JSON only (no extra text).
 - Use lowercase for "intent" values.
@@ -185,10 +204,8 @@ Output requirements:
 - Use numbers for price/rental_price/quantity; use booleans for is_rental; use null for unknown fields.
 - Add a TOP-LEVEL field "confirmation": set to "yes" ONLY when the message is an explicit confirmation to proceed with buy/rent as per the Confirmation Lock; otherwise null.
 - Provide both "intent" and "intent_type" (set to the same value).
-
 Customer Message: "{text}"
 Detected Language: "{detected_language}"
-
 Return exactly this JSON shape:
 {{
     "intent": "",
