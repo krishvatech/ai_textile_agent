@@ -53,7 +53,7 @@ async def simulate_incoming_whatsapp_message(url, from_number, message_body):
             print("Simulation failed due to an error.")
 
 async def main():
-    url = "http://localhost:8001/whatsapp/"  # Adjust port if needed
+    url = "http://localhost:8001/whatsapp/webhook"  # Adjust port if needed
 
     # Language -> test sender number mapping
     LANG_NUMBERS = {
