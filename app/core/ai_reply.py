@@ -894,6 +894,47 @@ async def analyze_message(
             acc_entities["product_variant_id"] = resolved_variant_id
         pinecone_data = dedupe_products(pinecone_data)
 
+        # If no products found, polite reply
+        if not pinecone_data:
+            # No products found
+            lr = (language or "en-IN").split("-")[0].lower()
+            if lr.startswith("hi"):
+                reply_text = "क्षमा करें, आपकी खोज के लिए अभी तक कोई उत्पाद नहीं मिला। कृपया अन्य विवरण आज़माएँ।"
+            elif lr.startswith("gu"):
+                reply_text = "માફ કરશો, તમારી શોધ માટે હજી સુધી કોઈ ઉત્પાદન મળ્યું નથી. કૃપા કરીને અન્ય વિગતો અજમાવો."
+            else:
+                reply_text = "Sorry, no products match your search so far. Please try other details."
+
+            # 👉 fetch tenant-scoped categories and append a short, localized suggestion
+            try:
+                async with SessionLocal() as db:
+                    cats = await resolve_categories(db, tenant_id, {})
+            except Exception:
+                cats = []
+
+            if cats:
+                bullets = "\n".join(f"• {c}" for c in cats[:12])
+                if lr.startswith("hi"):
+                    extra = f"\n\nशायद आप इन कैटेगरी को देखना चाहेंगे:\n{bullets}"
+                elif lr.startswith("gu"):
+                    extra = f"\n\nતમે આ કેટેગરી પસંદ શકો છો:\n{bullets}"
+                else:
+                    extra = f"\n\nYou can try these categories:\n{bullets}"
+                reply_text += extra
+
+            history.append({"role": "assistant", "content": reply_text})
+            _commit()
+            return {
+                "pinecone_data": [],
+                "intent_type": intent_type,
+                "language": language,
+                "tenant_id": tenant_id,
+                "history": history,
+                "collected_entities": acc_entities,
+                "reply_text": reply_text,
+                "media": []
+            }
+
         # Collect images (unchanged)
         seen, image_urls = set(), []
         for p in (pinecone_data or []):

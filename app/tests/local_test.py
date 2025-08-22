@@ -54,16 +54,48 @@ async def simulate_incoming_whatsapp_message(url, from_number, message_body):
 
 async def main():
     url = "http://localhost:8001/whatsapp/"  # Adjust port if needed
-    from_number = "911122334455"  # Replace with your test sender number
-    # for Gujarati language == 914578457845 
-    # for Hinndi language == 911122334455
-    # for English language == 
-    print("Interactive WhatsApp Message Simulator. Type 'exit' to stop.")
+
+    # Language -> test sender number mapping
+    LANG_NUMBERS = {
+        "gu": "914578457845",  # Gujarati
+        "hi": "911122334455",  # Hindi
+        "en": "917410852078",  # English
+    }
+
+    NAME_ALIASES = {
+        "1": "gu", "gujarati": "gu", "gu": "gu",
+        "2": "hi", "hindi": "hi", "hi": "hi",
+        "3": "en", "english": "en", "en": "en",
+    }
+
+    print("Interactive WhatsApp Message Simulator.")
+    print("Choose language for the test sender number:")
+    print("  1) Gujarati (gu)  -> 914578457845")
+    print("  2) Hindi (hi)     -> 911122334455")
+    print("  3) English (en)   -> 917410852078")
+
+    # ask until valid
+    lang_choice = None
+    while lang_choice not in ("gu", "hi", "en"):
+        raw = input("Enter 1/2/3 or gu/hi/en (default: en): ").strip().lower()
+        if not raw:
+            lang_choice = "en"
+        else:
+            lang_choice = NAME_ALIASES.get(raw)
+
+        if lang_choice not in ("gu", "hi", "en"):
+            print("⚠️  Invalid choice. Please try again.")
+
+    from_number = LANG_NUMBERS[lang_choice]
+    print(f"\n✅ Using language: {lang_choice.upper()} | From number: {from_number}")
+    print("Type 'exit' to stop.\n")
+
     while True:
-        message_body = input("Enter message to simulate (or 'exit' to quit): ")
-        if message_body.lower() == 'exit':
+        message_body = input("Enter message to simulate (or 'exit' to quit): ").strip()
+        if message_body.lower() == "exit":
             break
         await simulate_incoming_whatsapp_message(url, from_number, message_body)
 
 # Run the simulation loop
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
