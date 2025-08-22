@@ -8,7 +8,6 @@ from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
 from dateutil import parser as dateparser
 from app.core.central_system_prompt import Textile_Prompt 
-from datetime import date  # local import to avoid touching globals
 from sqlalchemy import text as sql_text  # Import if not already present
 from sqlalchemy import select  # ✅
 from app.db.session import SessionLocal
@@ -17,6 +16,8 @@ from app.core.product_search import pinecone_fetch_records
 from app.core.phase_ask_inquiry import format_inquiry_reply,fetch_attribute_values,resolve_categories
 from app.core.asked_now_detector import detect_requested_attributes_async
 import json
+import re
+from datetime import date as _date  # avoid touching globals
 
 
 load_dotenv()
@@ -374,10 +375,19 @@ async def FollowUP_Question(
         return (val is None) or (val == "") or (isinstance(val, (list, dict)) and not val)
 
     is_rental_val = entities.get("is_rental", None)
+    # base_keys = [
+    #     "is_rental", "occasion", "fabric", "size", "color", "category",
+    #     "quantity", "start_date", "end_date", "confirmation"
+    # ]
+    # price_keys = (
+    #     ["rental_price"] if is_rental_val is True
+    #     else (["price"] if is_rental_val is False else ["price", "rental_price"])
+    # )
     base_keys = [
         "is_rental", "occasion", "fabric", "size", "color", "category",
-        "quantity", "start_date", "end_date", "confirmation"
-    ]
+        "quantity",
+    ] + (["start_date", "end_date"] if is_rental_val is True else []) + ["confirmation"]
+
     price_keys = (
         ["rental_price"] if is_rental_val is True
         else (["price"] if is_rental_val is False else ["price", "rental_price"])
@@ -952,134 +962,27 @@ async def analyze_message(
                 "media": image_urls
             }
 
-    # --- ✅ DIRECT PRODUCT PICK with ACK (name + link) + separate follow-ups
-    # elif intent_type == "direct_product_pick":
-    #     async with SessionLocal() as session_db:
-    #         acc_entities = acc_entities or {}
-
-    #         # Prefer product_id from webhook
-    #         pid = (new_entities or {}).get("product_id") or acc_entities.get("product_id")
-
-    #         # Fallback: resolve by name if provided
-    #         if not pid:
-    #             name = (new_entities or {}).get("product_name")
-    #             if name:
-    #                 row = (await session_db.execute(
-    #                     select(Product.id).where(Product.name.ilike(name))
-    #                 )).first()
-    #                 pid = row[0] if row else None
-
-    #         if not pid:
-    #             reply = "Item exact match nahi mila. Kya similar options dikhaun?"
-    #             history.append({"role": "assistant", "content": reply}); _commit()
-    #             return {
-    #                 "input_text": text, "language": language, "intent_type": intent_type,
-    #                 "reply_text": reply, "history": history, "collected_entities": acc_entities
-    #             }
-
-    #         prod = (await session_db.execute(select(Product).where(Product.id == pid))).scalar_one_or_none()
-    #         if not prod:
-    #             reply = "Product not found. Similar options dikha du?"
-    #             history.append({"role": "assistant", "content": reply}); _commit()
-    #             return {
-    #                 "input_text": text, "language": language, "intent_type": intent_type,
-    #                 "reply_text": reply, "history": history, "collected_entities": acc_entities
-    #             }
-
-    #         variants = (await session_db.execute(
-    #             select(ProductVariant).where(ProductVariant.product_id == pid)
-    #         )).scalars().all()
-
-    #         acc_entities["product_id"] = pid
-    #         if getattr(prod, "type", None) and not acc_entities.get("category"):
-    #             acc_entities["category"] = prod.type
-
-    #         # ACK line with product name + link
-    #         ack = _ack_line(prod)
-
-    #         # Sets for choices
-    #         mode_set   = {("rent" if getattr(v, "is_rental", False) else "buy") for v in variants}
-    #         color_set  = {getattr(v, "color", None) for v in variants if getattr(v, "color", None)}
-    #         size_set   = {getattr(v, "size", None) for v in variants if getattr(v, "size", None)}
-
-    #         # User choices so far
-    #         is_rental  = acc_entities.get("is_rental")    # True/False/None
-    #         color      = acc_entities.get("color")
-    #         size       = acc_entities.get("size")
-
-    #         # Saree rule → Freesize
-    #         cat = (acc_entities.get("category") or "").lower()
-    #         if cat in ("saree", "sari"):
-    #             acc_entities["size"] = "Freesize"
-    #             size = "Freesize"
-
-    #         # Helper: return primary + optional follow-up (for 2nd message)
-    #         def _two_step(prim: str, follow: Optional[str] = None):
-    #             history.append({"role": "assistant", "content": prim})
-    #             _commit()
-    #             payload = {
-    #                 "input_text": text, "language": language, "intent_type": intent_type,
-    #                 "reply_text": prim, "history": history, "collected_entities": acc_entities
-    #             }
-    #             if follow:
-    #                 payload["followup_reply"] = follow
-    #             if mode == "call":
-    #                 payload["answer"] = prim if not follow else f"{prim} {follow}"
-    #             return payload
-
-    #         # 1) Ask BUY vs RENT (if both exist and not chosen)
-    #         if is_rental is None and (mode_set != {"buy"}):
-    #             return _two_step(ack, "Aap **Buy** karna chahenge ya **Rent**?")
-
-    #         # 2) Ask color (if multiple colors)
-    #         if not color and len(color_set) > 1:
-    #             options = ", ".join(sorted(list(color_set))[:6])
-    #             return _two_step(ack, f"Kaunsa color chahiye: {options}")
-
-    #         # 3) Ask size (if needed and multiple)
-    #         if not size and len(size_set) > 1 and cat not in ("saree","sari"):
-    #             options = ", ".join(sorted(list(size_set))[:6])
-    #             return _two_step(ack, f"Size batayiye: {options}")
-
-    #         # Filter variants by chosen facets
-    #         def ok(v):
-    #             c1 = (is_rental is None) or (getattr(v, "is_rental", False) == bool(is_rental))
-    #             c2 = (not color) or (str(getattr(v, "color", "")).lower() == str(color).lower())
-    #             c3 = (not acc_entities.get("size")) or (str(getattr(v, "size", "")).lower() == str(acc_entities["size"]).lower())
-    #             return c1 and c2 and c3
-
-    #         cands = [v for v in variants if ok(v)]
-
-    #         # 4) If exactly one variant → show price and ask qty (as follow-up)
-    #         if len(cands) == 1:
-    #             v = cands[0]
-    #             price_txt = (
-    #                 f"Rent ₹{int(v.rental_price)}/day" if getattr(v, "is_rental", False)
-    #                 else f"Price ₹{int(v.price) if v.price is not None else 0}"
-    #             )
-    #             acc_entities["product_variant_id"] = v.id
-    #             prim = f"{ack}\n{getattr(v,'color','')} | {getattr(v,'size','')} | {getattr(v,'fabric','')} — {price_txt}."
-    #             return _two_step(prim, "Qty batayiye?")
-
-    #         # 5) Else show 2–3 options and ask which one
-    #         sample = cands[:3] if len(cands) > 3 else cands
-    #         lines = []
-    #         for v in sample:
-    #             price_txt = (
-    #                 f"Rent ₹{int(v.rental_price)}/day" if getattr(v, "is_rental", False)
-    #                 else f"Price ₹{int(v.price) if v.price is not None else 0}"
-    #             )
-    #             color_txt = getattr(v, "color", "") or "-"
-    #             size_txt  = getattr(v, "size", "") or "-"
-    #             fabric_txt= getattr(v, "fabric", "") or "-"
-    #             lines.append(f"- {color_txt} | {size_txt} | {fabric_txt} — {price_txt}")
-    #         prim = f"{ack}\nYeh options available hain:\n" + "\n".join(lines)
-    #         return _two_step(prim, "Konsa chahiye?")
-
     # --- availability
     elif intent_type == "availability_check":
-        import re
-        from datetime import date as _date  # avoid touching globals
+        if acc_entities.get("is_rental") is False:
+            ask = await FollowUP_Question(
+                intent_type,
+                acc_entities,
+                language,
+                session_history=history,
+                only_fields=["confirmation", "quantity", "price"],  # purchase-relevant asks
+                max_fields=1
+            )
+            history.append({"role": "assistant", "content": ask}); _commit()
+            return {
+                "input_text": text,
+                "language": language,
+                "intent_type": intent_type,
+                "history": history,
+                "collected_entities": acc_entities,
+                "reply": ask,
+                "reply_text": ask
+            }
 
         # --- Define helper functions first ---
         def _p(x):
@@ -1451,11 +1354,17 @@ async def analyze_message(
         def _is_missing(v): 
             return v in (None, "", [], {})
 
-        # We consider the rental flow "in progress" if:
-        #  - user is renting (is_rental=True) OR we already have a chosen variant
-        #  - and either start_date or end_date is missing
-        in_rental_flow = (acc_entities.get("is_rental") is True) or bool(acc_entities.get("product_variant_id"))
-        missing_dates  = _is_missing(acc_entities.get("start_date")) or _is_missing(acc_entities.get("end_date"))
+        is_rental_flag = acc_entities.get("is_rental")
+
+        # If explicitly buying, never ask rental dates.
+        if is_rental_flag is False:
+            in_rental_flow = False
+        else:
+            # If renting (or we already picked a variant and rental is not explicitly False),
+            # we can still drive the rental-date flow.
+            in_rental_flow = (is_rental_flag is True) or bool(acc_entities.get("product_variant_id"))
+
+        missing_dates = _is_missing(acc_entities.get("start_date")) or _is_missing(acc_entities.get("end_date"))
 
         if in_rental_flow and missing_dates:
             need_fields = [f for f in ("start_date", "end_date") if _is_missing(acc_entities.get(f))]
