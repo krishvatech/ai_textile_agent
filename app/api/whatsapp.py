@@ -297,6 +297,7 @@ async def get_tenant_products_by_phone(phone_number: str, db):
 
 @router.post("/")
 async def receive_whatsapp_message(request: Request):
+    print('Exotel post......')
     """
     Handle incoming WhatsApp messages and DLR/webhook events from Exotel.
     Only process 'incoming_message' events and reply only ONCE per message SID.
