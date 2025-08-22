@@ -73,7 +73,8 @@ Intents (lowercase values):
 - greeting — short salutations/pleasantries only.
 - product_search — message explicitly names a product category (garment/product type), optionally with attributes (fabric, color, size, price, quantity, location, occasion, rental).
 - availability_check — user asks about date availability / booking / reserve for a specific product that is already selected in Context (e.g., product_variant_id present or exactly one selected item).
-- asking_inquiry — message asks about availability/options/prices/price range/starting price/rental price, with or without a category, and is NOT a request to show items.
+- asking_inquiry — ONLY when the user asks about availability/options/prices/etc. AND none of rules (-1, 0, 1, 2, 3, 3a, or 4) match. 
+If any product attribute (including occasion) is present, do NOT return asking_inquiry — return product_search instead.
 - website_inquiry — message contains a URL to one of our store domains and refers to a specific website/product/page. Treat ANY Shopify product/collection URL (https://*.myshopify.com/products/... or /collections/...) as our store.
 - confirmation — user explicitly confirms proceeding to BUY or RENT the currently selected product (e.g., “confirm this”, “book it”, “I’ll take it”, “order now”, “reserve kar do”, “haan confirm”). This is a final go-ahead, not just a preference update.
 - other — order status, tracking, delivery, payment, returns, complaints, small talk, or unrelated topics.
@@ -89,10 +90,13 @@ Decision rules (apply in order; pick exactly one):
    This rule OVERRIDES all other rules, including the product-search lock below.
 
 
-0) PRODUCT-SEARCH LOCK (your requirement):
-   If the message contains ANY of these entities (explicitly or via clear phrases) — name, category, fabric, color, size, occasion — OR explicit buy/purchase intent (e.g., “ownership, Buy, muje chahiye, mare kharidavu che, muje kharidna hai) — OR explicit rental intent (e.g., “on rent / rent pe / kiraye par / bhade”, or is_rental=true/false) — OR an explicit is_rental=true/false indication — then set intent = "product_search".
-   This rule OVERRIDES all others (including website_inquiry and availability_check), UNLESS the Confirmation Lock (-1) already fired.
-   Additionally: when buy/purchase is expressed, set entities.is_rental = false; when rent is expressed, set entities.is_rental = true.
+0) PRODUCT-SEARCH LOCK (highest after -1):
+   If the message contains ANY product attribute — name, category, fabric, color, size, or occasion —
+   OR explicit buy intent (e.g., “buy, purchase, kharidna, kharidvu, muje chahiye”)
+   OR explicit rental intent (e.g., “on rent / rent pe / kiraye par / bhade” or is_rental=true/false),
+   then → intent = "product_search".
+   This OVERRIDES rules 1, 2, 4, 6 and 7 (unless -1 fired).
+   Additionally: when buy is expressed, set is_rental=false; when rent is expressed, set is_rental=true.
 
 
 1) If a product category is explicitly present → product_search.
@@ -200,6 +204,7 @@ Return exactly this JSON shape:
         logging.error(f"Intent detection failed: {e}")
         empty_entities = process_all_entities({})
         return "other", empty_entities, 0.1
+
 
 
 def clean_price_fields(entities: dict) -> dict:
