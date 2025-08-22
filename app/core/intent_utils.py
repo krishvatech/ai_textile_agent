@@ -18,9 +18,9 @@ client = AsyncOpenAI(api_key=api_key)
 
 def process_all_entities(entities: dict) -> dict:
     """
-    Process all entities and return complete entity structure with both values and None
+    Process all entities and return complete entity structure with both values and None.
+    Preserve booleans (False) and numeric zeros.
     """
-    # Define all possible entities based on your product schema
     all_entities = {
         "name": None,
         "category": None,
@@ -33,24 +33,33 @@ def process_all_entities(entities: dict) -> dict:
         "location": None,
         "occasion": None,
         "is_rental": None,
-        "start_date": None,   
-        "end_date": None      
-
-        # "type": None    # <-- NEW FIELD
+        "start_date": None,
+        "end_date": None,
+        # "type": None  # keep if you’re using it
     }
-    
-    # Update with extracted entities, cleaning empty values
-    for key, value in entities.items():
-        if key in all_entities:
-            if value and value not in [None, "", "null", "None", "N/A", "n/a"]:
-                if isinstance(value, str) and value.strip():
-                    all_entities[key] = value.strip()
-                elif not isinstance(value, str):
-                    all_entities[key] = value
-           
+
+    for key, value in (entities or {}).items():
+        if key not in all_entities:
+            continue
+
+        # Keep booleans/numbers as-is (False/0 are valid)
+        if isinstance(value, (bool, int, float)):
+            all_entities[key] = value
+            continue
+
+        # Normalize strings; drop blanks and null-y text values
+        if isinstance(value, str):
+            v = value.strip()
+            if v and v.lower() not in {"null", "none", "n/a"}:
+                all_entities[key] = v
+            continue
+
+        # Fallback: keep other non-None types (e.g., lists/dicts) if truthy or explicitly non-empty
+        if value is not None:
+            all_entities[key] = value
+
     return all_entities
-    
-    # return all_entities
+
 
 async def detect_textile_intent_openai(text: str, detected_language: str,allowed_categories: Optional[List[str]] = None,allowed_fabric: Optional[List[str]] = None,allowed_color: Optional[List[str]] = None,allowed_occasion: Optional[List[str]] = None) -> Tuple[str, dict, float]:
     """
@@ -79,9 +88,12 @@ Decision rules (apply in order; pick exactly one):
    → if dates/quantity are mentioned, populate start_date/end_date/quantity accordingly.
    This rule OVERRIDES all other rules, including the product-search lock below.
 
+
 0) PRODUCT-SEARCH LOCK (your requirement):
-   If the message contains ANY of these entities (explicitly or via clear phrases) — name, category, fabric, color, size, occasion, or explicit rental intent (e.g., “on rent / rent pe / kiraye par”, or is_rental=true/false) — then set intent = product_search.
+   If the message contains ANY of these entities (explicitly or via clear phrases) — name, category, fabric, color, size, occasion — OR explicit buy/purchase intent (e.g., “ownership, Buy, muje chahiye, mare kharidavu che, muje kharidna hai) — OR explicit rental intent (e.g., “on rent / rent pe / kiraye par / bhade”, or is_rental=true/false) — OR an explicit is_rental=true/false indication — then set intent = "product_search".
    This rule OVERRIDES all others (including website_inquiry and availability_check), UNLESS the Confirmation Lock (-1) already fired.
+   Additionally: when buy/purchase is expressed, set entities.is_rental = false; when rent is expressed, set entities.is_rental = true.
+
 
 1) If a product category is explicitly present → product_search.
 
