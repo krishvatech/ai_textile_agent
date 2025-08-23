@@ -485,6 +485,14 @@ def _valid_signature(app_secret: str, raw: bytes, header: str) -> bool:
     
 #     return {"status": "ok"}
 
+def _primary_image_for_product(prod: dict) -> str | None:
+    # prefer product.image_urls[0], then product.image_url
+    for u in (prod.get("image_urls") or []):
+        if u:
+            return _normalize_url(u)
+    return _normalize_url(prod.get("image_url"))
+
+
 @router.post("/webhook")
 async def receive_cloud_webhook(request: Request):
     print('Meta webhook..................')
@@ -621,20 +629,27 @@ async def receive_cloud_webhook(request: Request):
                 media_urls    = raw_obj.get("media") or []
                 products      = raw_obj.get("pinecone_data") or []
 
-                # --- NEW BEHAVIOR ---
-                # 1) First product's image with caption
-                if media_urls and products:
-                    first_img = media_urls[0]
-                    caption   = _product_caption(products[0])
-                    await send_whatsapp_image_cloud(to_waid=from_waid, image_url=first_img, caption=caption)
+                # --- NEW BEHAVIOR (all products individually, then ONE follow-up) ---
+                products = (raw_obj.get("pinecone_data") or [])[:5]  # max 5 already enforced upstream
 
-                # 2) Then the existing text reply (list) as a second message
-                await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
+                sent_any = False
+                for prod in products:
+                    img = _primary_image_for_product(prod)
+                    if img:
+                        await send_whatsapp_image_cloud(
+                            to_waid=from_waid,
+                            image_url=img,
+                            caption=_product_caption(prod)
+                        )
+                        sent_any = True
 
-                # 3) Optional follow-up
+                # Send exactly ONE follow-up message after images
                 if followup_text:
-                    print("---- followup---")
                     await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
+                elif not sent_any:
+                    # Fallback: if no images at all, at least send the text list
+                    await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
+
 
                 # Persist outbound
                 await append_transcript_message(
