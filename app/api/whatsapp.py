@@ -640,20 +640,33 @@ async def receive_cloud_webhook(request: Request):
                     ok = await send_whatsapp_image_cloud(
                         to_waid=from_waid,
                         image_url=img,
-                        caption=_product_caption(prod)
+                        caption=_product_caption(prod),
                     )
                     if ok:
                         sent_count += 1
-                
-                # after all product messages are SENT, send exactly ONE follow-up
+                        # tiny pause avoids batching/ordering glitches on WA
+                        # await asyncio.sleep(0.4)
+
+                # ✅ If we sent any product cards, send exactly ONE follow-up and EXIT
                 if sent_count > 0:
                     if followup_text:
                         await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
-                else:
-                    # no images? fall back to the text list + (optional) follow-up
-                    await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
+                    return {"status": "ok", "sent_images": sent_count, "sent_followup": bool(followup_text)}
+
+                # (Optional) If you NEVER want the text list, keep only the follow-up (or nothing) and EXIT
+                # Set this True to completely suppress list fallback when no images could be sent
+                SUPPRESS_TEXT_LIST_FALLBACK = True
+                if SUPPRESS_TEXT_LIST_FALLBACK:
                     if followup_text:
                         await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
+                    return {"status": "ok", "sent_images": 0, "fallback": "suppressed"}
+
+                # Legacy fallback (only if you still want it when no images were sent)
+                await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
+                if followup_text:
+                    await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
+                return {"status": "ok", "sent_images": 0, "fallback": "text_list"}
+
 
 
                 # Persist outbound
