@@ -454,8 +454,8 @@ async def demo():
     tenant_id = 4  # <-- change if needed
     entities = {
         "category": "saree",
-        "size": "freesize",
-        "fabric": "jimmychu",
+        "size": "Freesize",
+        "fabric": "Jimmy chu",
     }
 
     results = await pinecone_fetch_records(entities=entities, tenant_id=tenant_id)

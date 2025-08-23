@@ -270,11 +270,52 @@ def _normalize_url(u: str | None) -> str | None:
     if u.startswith("//"): return "https:" + u
     return u
 
+# def _product_caption(prod: dict) -> str:
+#     name = prod.get("name") or prod.get("product_name") or "Product"
+#     tag  = "Rent" if prod.get("is_rental") else "sale"
+#     url  = _normalize_url(prod.get("product_url") or prod.get("image_url"))
+#     cap  = f"{name} - {tag}" + (f" — {url}" if url else "")
+#     return cap[:1024]
+
 def _product_caption(prod: dict) -> str:
     name = prod.get("name") or prod.get("product_name") or "Product"
-    tag  = "Rent" if prod.get("is_rental") else "sale"
     url  = _normalize_url(prod.get("product_url") or prod.get("image_url"))
-    cap  = f"{name} - {tag}" + (f" — {url}" if url else "")
+
+    # helpers
+    def _to_bool(v):
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() in {"true", "1", "yes", "y"}
+
+    def _currency_symbol():
+        cur = str(prod.get("currency") or "INR").upper()
+        return {"INR": "₹", "USD": "$", "EUR": "€", "GBP": "£"}.get(cur, "")
+
+    def _fmt_money(val):
+        if val in (None, "", "-"):
+            return "—"
+        try:
+            n = float(str(val).replace(",", ""))
+            s = f"{n:,.2f}".rstrip("0").rstrip(".")
+            return f"{_currency_symbol()}{s}"
+        except Exception:
+            # if it's already a formatted string (e.g., "₹999"), just return as-is
+            return str(val)
+
+    is_rental = _to_bool(prod.get("is_rental"))
+
+    if is_rental:
+        label = "Rent"
+        amount = _fmt_money(prod.get("rental_price"))
+    else:
+        label = "Price"
+        price = (prod.get("price") or prod.get("sale_price") or prod.get("selling_price")
+                 or prod.get("variant_price") or prod.get("current_price"))
+        amount = _fmt_money(price)
+
+    cap = f"{name} — {label}: {amount}"
+    if url:
+        cap += f" — {url}"
     return cap[:1024]
 
 
