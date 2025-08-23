@@ -494,8 +494,54 @@ def normalize_entities(entities):
             new_entities[k] = v
     return new_entities
 
+# # --- helper: collapse variants so every product appears once ---
+# def dedupe_products(pinecone_data):
+#     grouped = {}
+#     for p in (pinecone_data or []):
+#         key = (
+#             p.get("product_id")
+#             or p.get("id")
+#             or ((p.get("name") or p.get("product_name") or "").strip().lower(),
+#                 p.get("tenant_id"),
+#                 p.get("is_rental"))
+#         )
+#         if not key:
+#             continue
+
+#         g = grouped.setdefault(key, {
+#             "base": p.copy(),
+#             "colors": set(),
+#             "sizes": set(),
+#             "images": set(),
+#             "min_price": None,
+#             "min_rent": None,
+#         })
+
+#         if p.get("color"): g["colors"].add(str(p["color"]).strip())
+#         if p.get("size"):  g["sizes"].add(str(p["size"]).strip())
+#         if p.get("image_url"): g["images"].add(p["image_url"])
+
+#         price = p.get("price")
+#         if isinstance(price, (int, float)):
+#             g["min_price"] = price if g["min_price"] is None else min(g["min_price"], price)
+
+#         rprice = p.get("rental_price")
+#         if isinstance(rprice, (int, float)):
+#             g["min_rent"] = rprice if g["min_rent"] is None else min(g["min_rent"], rprice)
+
+#     out = []
+#     for g in grouped.values():
+#         base = g["base"]
+#         base["available_colors"] = sorted(c for c in g["colors"] if c)
+#         base["available_sizes"]  = sorted(s for s in g["sizes"] if s)
+#         base["image_urls"] = list(g["images"])
+#         if g["min_price"] is not None: base["price"] = g["min_price"]
+#         if g["min_rent"]  is not None: base["rental_price"] = g["min_rent"]
+#         out.append(base)
+#     return out
+
 # --- helper: collapse variants so every product appears once ---
-def dedupe_products(pinecone_data):
+def dedupe_products(pinecone_data, max_items: int = 5):
     grouped = {}
     for p in (pinecone_data or []):
         key = (
@@ -530,7 +576,7 @@ def dedupe_products(pinecone_data):
             g["min_rent"] = rprice if g["min_rent"] is None else min(g["min_rent"], rprice)
 
     out = []
-    for g in grouped.values():
+    for g in grouped.values():  # preserves first-seen order
         base = g["base"]
         base["available_colors"] = sorted(c for c in g["colors"] if c)
         base["available_sizes"]  = sorted(s for s in g["sizes"] if s)
@@ -538,7 +584,9 @@ def dedupe_products(pinecone_data):
         if g["min_price"] is not None: base["price"] = g["min_price"]
         if g["min_rent"]  is not None: base["rental_price"] = g["min_rent"]
         out.append(base)
-    return out
+
+    # ✅ hard-cap to 5 (default)
+    return out[: max_items]
 
 
 def clean_entities_for_pinecone(entities):
