@@ -631,24 +631,29 @@ async def receive_cloud_webhook(request: Request):
 
                 # --- NEW BEHAVIOR (all products individually, then ONE follow-up) ---
                 products = (raw_obj.get("pinecone_data") or [])[:5]  # max 5 already enforced upstream
+                sent_count = 0
 
-                sent_any = False
                 for prod in products:
                     img = _primary_image_for_product(prod)
-                    if img:
-                        await send_whatsapp_image_cloud(
-                            to_waid=from_waid,
-                            image_url=img,
-                            caption=_product_caption(prod)
-                        )
-                        sent_any = True
-
-                # Send exactly ONE follow-up message after images
-                if followup_text:
-                    await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
-                elif not sent_any:
-                    # Fallback: if no images at all, at least send the text list
+                    if not img:
+                        continue
+                    ok = await send_whatsapp_image_cloud(
+                        to_waid=from_waid,
+                        image_url=img,
+                        caption=_product_caption(prod)
+                    )
+                    if ok:
+                        sent_count += 1
+                
+                # after all product messages are SENT, send exactly ONE follow-up
+                if sent_count > 0:
+                    if followup_text:
+                        await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
+                else:
+                    # no images? fall back to the text list + (optional) follow-up
                     await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
+                    if followup_text:
+                        await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
 
 
                 # Persist outbound
