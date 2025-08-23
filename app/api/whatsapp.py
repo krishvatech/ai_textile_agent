@@ -308,14 +308,14 @@ def _product_caption(prod: dict) -> str:
         label = "Rent"
         amount = _fmt_money(prod.get("rental_price"))
     else:
-        label = "Price"
+        label = "Sale"
         price = (prod.get("price") or prod.get("sale_price") or prod.get("selling_price")
                  or prod.get("variant_price") or prod.get("current_price"))
         amount = _fmt_money(price)
 
-    cap = f"{name} — {label}: {amount}"
+    cap = f"{name}\n{label}: {amount}\n"
     if url:
-        cap += f" — {url}"
+        cap += f"Webiste: {url}"
     return cap[:1024]
 
 
