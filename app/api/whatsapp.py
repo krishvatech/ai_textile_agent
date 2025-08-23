@@ -504,18 +504,17 @@ async def receive_cloud_webhook(request: Request):
 
                 print("reply=", reply_text)
 
-                # --- Safely extract followup + media/products
+                                # --- Safely extract followup + media/products
                 raw_obj = raw_reply if isinstance(raw_reply, dict) else {}
-                followup_text = raw_obj.get("followup_reply")
-                media_urls    = raw_obj.get("media") or []
-                products      = raw_obj.get("pinecone_data") or []
+                followup_text = (raw_obj.get("followup_reply") or "").strip() or None
+                products      = (raw_obj.get("pinecone_data") or [])[:5]  # max 5
+                # media_urls  = raw_obj.get("media") or []  # (unused here)
 
-                if not products:
+                sent_count = 0
+                out_msgs: list[tuple[str, str]] = []  # (kind, text) pairs for transcript
 
-                    # --- NEW BEHAVIOR (all products individually, then ONE follow-up) ---
-                    products = (raw_obj.get("pinecone_data") or [])[:5]  # max 5 already enforced upstream
-                    sent_count = 0
-
+                # If we have products: send each image with caption, then one follow-up
+                if products:
                     for prod in products:
                         img = _primary_image_for_product(prod)
                         if not img:
@@ -527,39 +526,40 @@ async def receive_cloud_webhook(request: Request):
                         )
                         if ok:
                             sent_count += 1
-                            # tiny pause avoids batching/ordering glitches on WA
-                            # await asyncio.sleep(0.4)
+                            out_msgs.append(("image", _product_caption(prod)))
 
-                    # ✅ If we sent any product cards, wait 1s, send ONE follow-up, and EXIT
-                    if sent_count > 0:
-                        if followup_text:
-                            await asyncio.sleep(1.0)  # delay follow-up by 1 second
-                            await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
-                        return {"status": "ok", "sent_images": sent_count, "sent_followup": bool(followup_text)}
+                    if followup_text:
+                        # tiny delay helps WA order messages correctly
+                        await asyncio.sleep(1.0)
+                        await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
+                        out_msgs.append(("text", followup_text))
+
                 else:
-                    # Legacy fallback (only if you still want it when no images were sent)
-                    await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
+                    # No products -> send the normal reply (and optional follow-up)
+                    if reply_text:
+                        await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
+                        out_msgs.append(("text", reply_text))
                     if followup_text:
                         await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
-                    return {"status": "ok", "sent_images": 0, "fallback": "text_list"}
+                        out_msgs.append(("text", followup_text))
 
-
-                # (Optional) If you NEVER want the text list, keep only the follow-up (or nothing) and EXIT
-                # Set this True to completely suppress list fallback when no images could be sent
-                SUPPRESS_TEXT_LIST_FALLBACK = True
-                if SUPPRESS_TEXT_LIST_FALLBACK:
-                    if followup_text:
-                        await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
-                    return {"status": "ok", "sent_images": 0, "fallback": "suppressed"}
-
-
-                # Persist outbound
-                await append_transcript_message(
-                    db, chat_session, role="assistant", text=reply_text,
-                    direction="out", meta={"reply_to": msg_id, "channel": "cloud_api"}
-                )
-
+                # --- Persist all outbound messages BEFORE returning
+                for kind, txt in out_msgs:
+                    await append_transcript_message(
+                        db, chat_session,
+                        role="assistant", text=txt,
+                        direction="out",
+                        meta={"kind": kind, "reply_to": msg_id, "channel": "cloud_api"}
+                    )
                 await db.commit()
+
+                return {
+                    "status": "ok",
+                    "sent_images": sent_count,
+                    "sent_followup": any(k == "text" and t == followup_text for k, t in out_msgs),
+                    "fallback": "none" if products else "text"
+                }
+
             except Exception:
                 logging.exception("[CLOUD] Webhook DB flow failed; rolling back")
                 await db.rollback()
