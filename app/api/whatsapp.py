@@ -6,7 +6,7 @@ import os
 import logging
 import httpx
 from sqlalchemy import text
-
+import asyncio
 from app.db.session import get_db
 from app.core.lang_utils import detect_language
 from app.core.intent_utils import detect_textile_intent_openai
@@ -325,166 +325,6 @@ def _valid_signature(app_secret: str, raw: bytes, header: str) -> bool:
     expected = "sha256=" + hmac.new(app_secret.encode(), raw, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, header)
 
-# @router.post("/webhook")
-# async def receive_cloud_webhook(request: Request):
-#     print('Meta webhook..................')
-#     """Handle inbound messages from Meta Cloud API (value.messages)."""
-#     raw = await request.body()
-    
-#     # Parse data first to check payload type
-#     try:
-#         data = await request.json()
-#     except:
-#         return {"status": "invalid_json"}
-    
-#     logging.info(f"[CLOUD] Incoming payload: {data}")
-    
-#     # Check if it's a custom payload format
-#     is_custom_payload = "whatsapp" in data and "messages" in data.get("whatsapp", {})
-    
-#     # Only validate signature for official Meta webhooks
-#     if not is_custom_payload:
-#         if not _valid_signature(META_APP_SECRET, raw, request.headers.get("X-Hub-Signature-256", "")):
-#             logging.warning("[CLOUD] Invalid webhook signature")
-#             return {"status": "forbidden"}
-#     else:
-#         logging.info("[CLOUD] Custom payload detected - skipping signature validation")
-    
-#     msgs_to_process = []
-#     business_number = ""
-    
-#     # Handle standard Meta Cloud API format
-#     for entry in data.get("entry", []):
-#         for change in entry.get("changes", []):
-#             value = change.get("value", {})
-#             meta = value.get("metadata", {})  # display_phone_number, phone_number_id
-#             msgs = value.get("messages", [])
-#             if msgs:
-#                 business_number = (CLOUD_SENDER_NUMBER or meta.get("display_phone_number", "")).replace("+", "").replace(" ", "")
-#                 msgs_to_process.extend(msgs)
-    
-#     # Handle custom payload format (your current structure)
-#     if not msgs_to_process:
-#         whatsapp_data = data.get("whatsapp", {})
-#         custom_msgs = whatsapp_data.get("messages", [])
-        
-#         if custom_msgs:
-#             # Use environment variable or hardcoded business number for custom format
-#             business_number = (CLOUD_SENDER_NUMBER or "919876543210").replace("+", "").replace(" ", "")  # Replace with your actual number
-#             logging.info(f"[CLOUD] Using business_number: '{business_number}' for custom payload")
-            
-#             # Transform custom messages to standard format
-#             for custom_msg in custom_msgs:
-#                 content = custom_msg.get("content", {})
-#                 standard_msg = {
-#                     "id": custom_msg.get("sid"),  # Use 'sid' as message ID
-#                     "from": custom_msg.get("from", ""),
-#                     "type": content.get("type", "unknown")
-#                 }
-                
-#                 # Handle text messages
-#                 if standard_msg["type"] == "text":
-#                     standard_msg["text"] = content.get("text", {})
-                
-#                 msgs_to_process.append(standard_msg)
-    
-#     if not msgs_to_process:
-#         return {"status": "no_messages"}
-
-#     # Process all messages with unified structure
-#     for msg in msgs_to_process:
-#         msg_id = msg.get("id") or msg.get("wamid")
-#         if msg_id in processed_meta_msg_ids:
-#             continue
-#         processed_meta_msg_ids.add(msg_id)
-#         if len(processed_meta_msg_ids) > 5000:
-#             processed_meta_msg_ids.clear()
-
-#         from_waid = (msg.get("from") or "").strip()
-#         mtype = msg.get("type")
-#         text_msg = msg.get("text", {}).get("body", "").strip() if mtype == "text" else f"[{mtype} message]"
-
-#         async for db in get_db():
-#             try:
-#                 tenant_id = await get_tenant_id_by_phone(business_number, db)
-#                 tenant_name = await get_tenant_name_by_phone(business_number, db) or "Your Shop"
-#                 if not tenant_id:
-#                     logging.error(f"[CLOUD] No tenant found for business number: '{business_number}'")
-#                     return {"status": "no_tenant"}
-
-#                 # Persist inbound
-#                 customer = await get_or_create_customer(db, tenant_id=tenant_id, phone=from_waid)
-#                 chat_session = await get_or_open_active_session(db, customer_id=customer.id)
-#                 await append_transcript_message(
-#                     db, chat_session, role="user", text=text_msg,
-#                     msg_id=msg_id, direction="in", meta={"raw": data, "channel": "cloud_api"}
-#                 )
-
-#                 # Detect language (reuse your flow)
-#                 SUPPORTED_LANGUAGES = ["gu-IN", "hi-IN", "en-IN", "en-US"]
-#                 current_language = customer.preferred_language or "en-IN"
-#                 if current_language not in SUPPORTED_LANGUAGES:
-#                     detected = await detect_language(text_msg, "en-IN")
-#                     current_language = detected[0] if isinstance(detected, tuple) else detected
-#                     await update_customer_language(db, customer.id, current_language)
-
-#                 # Optional: reuse your textile intent helpers (same as Exotel path)
-#                 tenant_categories = await get_tenant_category_by_phone(business_number, db)
-#                 tenant_fabric    = await get_tenant_fabric_by_phone(business_number, db)
-#                 tenant_color     = await get_tenant_color_by_phone(business_number, db)
-#                 tenant_occasion  = await get_tenant_occasion_by_phone(business_number, db)
-
-#                 try:
-#                     intent_type, entities, confidence = await detect_textile_intent_openai(
-#                         text_msg, current_language,
-#                         allowed_categories=tenant_categories,
-#                         allowed_fabric=tenant_fabric,
-#                         allowed_color=tenant_color,
-#                         allowed_occasion=tenant_occasion,
-#                     )
-#                     raw_reply = await analyze_message(
-#                         text=text_msg,
-#                         tenant_id=tenant_id,
-#                         tenant_name=tenant_name,
-#                         language=current_language,
-#                         intent=intent_type,
-#                         new_entities=entities,
-#                         intent_confidence=confidence,
-#                         mode="chat",
-#                         session_key=f"{tenant_id}:whatsapp:wa:{from_waid}",
-#                     )
-#                     reply_text = (
-#                         raw_reply.get("reply_text") if isinstance(raw_reply, dict)
-#                         else str(raw_reply)
-#                     )
-#                 except Exception:
-#                     logging.exception("[CLOUD] AI pipeline failed")
-#                     reply_text = "Sorry, I'm having trouble. I'll get back to you shortly."
-#                 print("reply=",reply_text)
-#                 followup_text = raw_reply.get("followup_reply")
-#                 print("Followup Text= ",followup_text)
-#                 # Send reply via Cloud API
-#                 await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
-#                 if followup_text:
-#                     print("---- followup---")
-#                     await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
-
-#                 # Persist outbound
-#                 await append_transcript_message(
-#                     db, chat_session, role="assistant", text=reply_text,
-#                     direction="out", meta={"reply_to": msg_id, "channel": "cloud_api"}
-#                 )
-
-#                 await db.commit()
-#             except Exception:
-#                 logging.exception("[CLOUD] Webhook DB flow failed; rolling back")
-#                 await db.rollback()
-#                 return {"status": "error"}
-#             finally:
-#                 break
-    
-#     return {"status": "ok"}
-
 def _primary_image_for_product(prod: dict) -> str | None:
     # prefer product.image_urls[0], then product.image_url
     for u in (prod.get("image_urls") or []):
@@ -647,11 +487,13 @@ async def receive_cloud_webhook(request: Request):
                         # tiny pause avoids batching/ordering glitches on WA
                         # await asyncio.sleep(0.4)
 
-                # ✅ If we sent any product cards, send exactly ONE follow-up and EXIT
+                # ✅ If we sent any product cards, wait 1s, send ONE follow-up, and EXIT
                 if sent_count > 0:
                     if followup_text:
+                        await asyncio.sleep(1.0)  # delay follow-up by 1 second
                         await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
                     return {"status": "ok", "sent_images": sent_count, "sent_followup": bool(followup_text)}
+
 
                 # (Optional) If you NEVER want the text list, keep only the follow-up (or nothing) and EXIT
                 # Set this True to completely suppress list fallback when no images could be sent
