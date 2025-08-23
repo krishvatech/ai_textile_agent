@@ -13,7 +13,8 @@ from sqlalchemy import select  # ✅
 from app.db.session import SessionLocal
 from app.core.rental_utils import is_variant_available
 from app.core.product_search import pinecone_fetch_records
-from app.core.phase_ask_inquiry import format_inquiry_reply,fetch_attribute_values,resolve_categories
+from app.core.phase_ask_inquiry import format_inquiry_reply,fetch_attribute_values,resolve_categories,fetch_attribute_values,format_inquiry_reply
+from app.core.asked_now_detector import detect_requested_attributes_async
 from app.core.asked_now_detector import detect_requested_attributes_async
 import json
 import re
@@ -843,87 +844,149 @@ async def analyze_message(
             "collected_entities": acc_entities
         }
 
-    # --- search results
     elif intent_type == "product_search":
+        # -------------------------------
+        # Build filters from this turn + memory
+        # -------------------------------
         turn_filters = {
             k: v for k, v in (locals().get("clean_new_entities") or {}).items()
             if v not in (None, "", [], {}) and k in ("category","color","fabric","size","is_rental","occasion")
         }
-
         # Fallback from memory for common facets if missing this turn
         for k in ("category", "is_rental", "color", "fabric", "size", "occasion"):
-            if k not in turn_filters and acc_entities.get(k) not in (None, "", [], {}):
+            if k not in turn_filters and (acc_entities.get(k) not in (None, "", [], {})):
                 turn_filters[k] = acc_entities[k]
-
         # Always work with a dict
         if not isinstance(turn_filters, dict):
             turn_filters = {}
-
         # ---- Defensive lowercase for size/category (never crash) ----
         _size_val = turn_filters.get("size")
         _cat_val  = turn_filters.get("category")
-
         # Normalize to strings safely
         sz  = str(_size_val or "").strip().lower()
         cat = str(_cat_val  or "").strip().lower()
-
         # Saree rule: Free size is meaningless for non-saree categories
         if sz == "freesize" and cat not in ("saree", "sari"):
             turn_filters.pop("size", None)
-
-        # Now proceed with your existing normalization/search
+        # Normalize → Pinecone search
         filtered_entities       = filter_non_empty_entities(turn_filters)
         filtered_entities_norm  = normalize_entities(filtered_entities)
         filtered_entities_norm  = clean_entities_for_pinecone(filtered_entities_norm)
-
         pinecone_data = await pinecone_fetch_records(filtered_entities_norm, tenant_id)
         _raw_matches = list(pinecone_data or [])
-
-        # try to resolve a single concrete variant id for follow-up intents
+        # ---------------------------------------
+        # Resolve a single concrete variant (if any)
+        # ---------------------------------------
         def _match_attr(m, key):
             return (str(m.get(key) or "").strip().lower()
                     == str(turn_filters.get(key) or "").strip().lower()) if turn_filters.get(key) else True
-
         cands = [m for m in _raw_matches if _match_attr(m, "color") and _match_attr(m, "size") and _match_attr(m, "fabric")]
-
         resolved_variant_id = None
         if len(cands) == 1 and cands[0].get("variant_id"):
             resolved_variant_id = cands[0]["variant_id"]
         elif len(_raw_matches) == 1 and _raw_matches[0].get("variant_id"):
             resolved_variant_id = _raw_matches[0]["variant_id"]
-
         if resolved_variant_id:
             acc_entities["product_variant_id"] = resolved_variant_id
         pinecone_data = dedupe_products(pinecone_data)
-
-        # If no products found, polite reply
+        # =========================
+        # ZERO-RESULTS SMART FALLBACK (color + fabric + size + occasion)
+        # =========================
         if not pinecone_data:
-            # No products found
             lr = (language or "en-IN").split("-")[0].lower()
+            # Polite base message
             if lr.startswith("hi"):
-                reply_text = "क्षमा करें, आपकी खोज के लिए अभी तक कोई उत्पाद नहीं मिला। कृपया अन्य विवरण आज़माएँ।"
+                reply_text = "क्षमा करें, इस खोज के लिए अभी कोई विकल्प नहीं मिला।"
             elif lr.startswith("gu"):
-                reply_text = "માફ કરશો, તમારી શોધ માટે હજી સુધી કોઈ ઉત્પાદન મળ્યું નથી. કૃપા કરીને અન્ય વિગતો અજમાવો."
+                reply_text = "માફ કરશો, આ શોધ માટે હાલમાં કોઈ વિકલ્પ મળ્યો નથી."
             else:
-                reply_text = "Sorry, no products match your search so far. Please try other details."
-
-            # 👉 fetch tenant-scoped categories and append a short, localized suggestion
+                reply_text = "Sorry, I couldn’t find options for that combination."
+            suggested_parts = []
+            ask_focus = None   # which attribute we'll ask about (only one follow-up)
+            req_cat = (acc_entities or {}).get("category")
+            # Priority for which follow-up to ask (color first as requested)
+            ATTR_PRIORITY = ["color", "fabric", "size", "occasion"]
+            # Add a short "not available" clarifier for the chosen attribute
+            def _append_not_available(attr: str, asked_val: str):
+                nonlocal reply_text
+                if not (req_cat and asked_val):
+                    return
+                if lr.startswith("hi"):
+                    reply_text += f" {req_cat} में '{asked_val}' नहीं दिख रहा."
+                elif lr.startswith("gu"):
+                    reply_text += f" {req_cat} માં '{asked_val}' ઉપલબ્ધ નથી."
+                else:
+                    reply_text += f" '{asked_val}' isn’t available for {req_cat}."
             try:
                 async with SessionLocal() as db:
-                    cats = await resolve_categories(db, tenant_id, {})
+                    for attr in ATTR_PRIORITY:
+                        # Only suggest alternatives if user explicitly constrained this attribute
+                        asked_val = (acc_entities or {}).get(attr)
+                        if asked_val in (None, "", [], {}):
+                            continue
+                        # Remove this attribute from filters to discover what DOES exist for it
+                        ents_no_attr = dict(acc_entities or {})
+                        ents_no_attr.pop(attr, None)
+                        values = await fetch_attribute_values(db, tenant_id, [attr], ents_no_attr)
+                        options = (values or {}).get(attr) or []
+                        # Drop the asked value itself and blanks; cap to keep message short
+                        asked_low = str(asked_val).strip().lower()
+                        options = [o for o in options if str(o).strip() and str(o).strip().lower() != asked_low][:8]
+                        if options:
+                            # Localized line like:
+                            #  - "Available colors include …"
+                            #  - "Available fabrics include …"
+                            #  - "Available sizes include …"
+                            #  - "Available occasions include …"
+                            part = format_inquiry_reply({attr: options}, ctx=acc_entities, language=language)
+                            suggested_parts.append(part)
+                            # Choose the first attribute (by priority) as the one to ask about
+                            if ask_focus is None:
+                                ask_focus = attr
+                                _append_not_available(attr, asked_val)
             except Exception:
-                cats = []
-
-            if cats:
-                bullets = "\n".join(f"• {c}" for c in cats[:12])
+                suggested_parts = []
+                ask_focus = None
+            if suggested_parts:
+                # Localized single follow-up based on ask_focus
                 if lr.startswith("hi"):
-                    extra = f"\n\nशायद आप इन कैटेगरी को देखना चाहेंगे:\n{bullets}"
+                    ASK_LINES = {
+                        "color":    "कौन-सा रंग दिखाऊँ?",
+                        "fabric":   "कौन-सा फ़ैब्रिक दिखाऊँ?",
+                        "size":     "कौन-सा साइज दिखाऊँ?",
+                        "occasion": "किस अवसर के लिए दिखाऊँ?",
+                    }
                 elif lr.startswith("gu"):
-                    extra = f"\n\nતમે આ કેટેગરી પસંદ શકો છો:\n{bullets}"
+                    ASK_LINES = {
+                        "color":    "કયો રંગ બતાવું?",
+                        "fabric":   "કયું ફેબ્રિક બતાવું?",
+                        "size":     "કયો સાઇઝ બતાવું?",
+                        "occasion": "કયા અવસર માટે બતાવું?",
+                    }
                 else:
-                    extra = f"\n\nYou can try these categories:\n{bullets}"
-                reply_text += extra
-
+                    ASK_LINES = {
+                        "color":    "Which color should I show?",
+                        "fabric":   "Which fabric should I show?",
+                        "size":     "Which size should I show?",
+                        "occasion": "Which occasion should I show?",
+                    }
+                ask_line = ASK_LINES.get(ask_focus or "color", ASK_LINES["color"])
+                reply_text = f"{reply_text}\n\n" + "\n".join(suggested_parts) + f"\n{ask_line}"
+            else:
+                # Fallback to tenant categories if no attribute suggestions could be generated
+                try:
+                    async with SessionLocal() as db:
+                        cats = await resolve_categories(db, tenant_id, {})
+                except Exception:
+                    cats = []
+                if cats:
+                    bullets = "\n".join(f"• {c}" for c in cats[:12])
+                    if lr.startswith("hi"):
+                        reply_text += f"\n\nशायद आप इन कैटेगरी को देखना चाहेंगे:\n{bullets}"
+                    elif lr.startswith("gu"):
+                        reply_text += f"\n\nતમે આ કેટેગરી પસંદ કરો:\n{bullets}"
+                    else:
+                        reply_text += f"\n\nYou can try these categories:\n{bullets}"
             history.append({"role": "assistant", "content": reply_text})
             _commit()
             return {
@@ -936,8 +999,10 @@ async def analyze_message(
                 "reply_text": reply_text,
                 "media": []
             }
-
-        # Collect images (unchanged)
+        # =========================
+        # SUCCESS CASE (HAVE PRODUCTS)
+        # =========================
+        # Collect images (max 4)
         seen, image_urls = set(), []
         for p in (pinecone_data or []):
             for u in (p.get("image_urls") or []):
@@ -945,33 +1010,31 @@ async def analyze_message(
                     seen.add(u)
                     image_urls.append(u)
         image_urls = image_urls[:4]
-
-        # Build text heading from what we actually showed
+        # Heading: "Here are rental saree for wedding:"
+        cat_disp = str((acc_entities.get("category") or filtered_entities.get("category") or "product")).strip().lower()
+        occ_disp = str((acc_entities.get("occasion") or filtered_entities.get("occasion") or "")).strip().lower()
+        is_rental = bool((acc_entities.get("is_rental")
+                        if acc_entities.get("is_rental") is not None
+                        else filtered_entities.get("is_rental")))
+        rental_word = "rental " if is_rental else ""
+        heading = f"Here are {rental_word}{cat_disp} for {occ_disp}:".strip().replace("  ", " ")
+        # Build the list in your desired format
         collected_for_text = {
             k: v for k, v in (filtered_entities or {}).items()
             if k in ("category", "color", "fabric", "size", "is_rental", "occasion") and v not in (None, "", [], {})
         }
-        heading = _build_dynamic_heading(collected_for_text)
-
         product_lines = []
         for product in (pinecone_data or []):
             name = product.get("name") or product.get("product_name") or "Unnamed Product"
-            tags = _build_item_tags(product, collected_for_text)
+            tags = _build_item_tags(product, collected_for_text)  # expected to render " - rent - freesize" etc.
             url = product.get("product_url")
             if isinstance(url, str):
                 url = _normalize_url(url)
             product_lines.append(f"- {name} {tags}" + (f" — {url}" if url else ""))
-
-        products_text = (
-            f"{heading}\n" + "\n".join(product_lines)
-            if product_lines else
-            "Sorry, no products match your search so far."
-        )
-
-        # Use the merged memory (acc_entities) for follow-up planner
+        products_text = f"{heading}\n" + "\n".join(product_lines)
+        # Fixed follow-up text per your earlier requirement
         followup = await FollowUP_Question(intent_type, acc_entities, language, session_history=history)
-        reply_text = f"{products_text}"
-
+        reply_text = products_text
         if mode == "call":
             spoken_pitch = await generate_product_pitch_prompt(language, acc_entities, pinecone_data)
             voice_response = f"{spoken_pitch} {followup}"
@@ -990,9 +1053,9 @@ async def analyze_message(
                 "media": image_urls
             }
         elif mode == "chat":
+            # Text reply followed by a single follow-up message from your WhatsApp sender
             history.append({"role": "assistant", "content": reply_text})
             _commit()
-            print("="*20); print(reply_text); print("="*20)
             return {
                 "pinecone_data": pinecone_data,
                 "intent_type": intent_type,
@@ -1004,7 +1067,7 @@ async def analyze_message(
                 "reply_text": reply_text,
                 "media": image_urls
             }
-
+            
     # --- availability
     elif intent_type == "availability_check":
         if acc_entities.get("is_rental") is False:
