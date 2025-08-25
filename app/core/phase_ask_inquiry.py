@@ -1,6 +1,6 @@
 from typing import Dict, List, Callable, Awaitable, Any, Optional, Iterable
 import logging
-from sqlalchemy import select, func, and_, or_, literal
+from sqlalchemy import select, func, and_, or_, literal, exists
 from sqlalchemy.ext.asyncio import AsyncSession
 import re
 
@@ -228,6 +228,32 @@ def _filters_from_entities(entities: Dict[str, Any]) -> List[Any]:
     elif entities.get("rental") in ("Rent", "Purchase"):
         conds.append(ProductVariant.is_rental.is_(entities["rental"] == "Rent"))
 
+    occ_val = str((entities or {}).get("occasion") or "").strip()
+    if occ_val:
+        occs = [str(o).strip().lower() for o in _as_list(entities["occasion"]) if str(o).strip()]
+        if occs:
+            if HAS_OCCASION and Occasion is not None and product_variant_occasions is not None:
+                # EXISTS subquery matches ProductVariant.id to any chosen Occasion
+                subq = (
+                    select(literal(1))
+                    .select_from(
+                        product_variant_occasions.join(
+                            Occasion,
+                            product_variant_occasions.c.occasion_id == Occasion.id
+                        )
+                    )
+                    .where(
+                        product_variant_occasions.c.variant_id == ProductVariant.id,
+                        func.lower(func.trim(Occasion.name)).in_(occs),
+                    )
+                    .limit(1)
+                )
+                conds.append(exists(subq))
+            # Fallback if you have a plain column on variants (optional)
+            elif hasattr(ProductVariant, "occasion"):
+                conds.append(func.lower(ProductVariant.occasion).in_(occs))
+
+
     return conds
 
 
@@ -379,15 +405,27 @@ async def resolve_rental_price_range(db: AsyncSession, tenant_id: int, entities:
 
 async def resolve_rental_options(db: AsyncSession, tenant_id: int, entities: Dict[str, Any]) -> List[str]:
     # If any variant is rental under current filters -> include Rent; always include Purchase
-    conds: List[Any] = [Product.id == ProductVariant.product_id, Product.tenant_id == tenant_id, ProductVariant.is_rental.is_(True)]
+    conds: List[Any] = [
+        Product.id == ProductVariant.product_id,
+        Product.tenant_id == tenant_id,
+        ProductVariant.is_rental.is_(True),
+    ]
     _add_active_trueish(Product, conds)
     _add_active_trueish(ProductVariant, conds)
     conds.extend(_filters_from_entities(entities))
 
-    stmt = select(func.count()).join(Product, Product.id == ProductVariant.product_id).where(and_(*conds))
+    # ✅ Give SQLAlchemy an explicit left side + count a concrete column
+    stmt = (
+        select(func.count(ProductVariant.id))
+        .select_from(ProductVariant)
+        .join(Product, Product.id == ProductVariant.product_id)
+        .where(and_(*conds))
+    )
+
     res = await db.execute(stmt)
     has_rent = (res.scalar() or 0) > 0
     return ["Rent", "Purchase"] if has_rent else ["Purchase"]
+
 
 
 async def resolve_quantity_buckets(db: AsyncSession, tenant_id: int, entities: Dict[str, Any]) -> List[str]:
@@ -510,6 +548,24 @@ def format_inquiry_reply(
         # localized “and”
         conj = {"hi": "और", "gu": "અને"}.get(lr, "and")
         return f"{', '.join(items[:-1])} {conj} {items[-1]}"
+    
+    def _canon_list(items: List[str]) -> List[str]:
+        """
+        Trim, case-fold for uniqueness, and title-case for display.
+        e.g., ['silk', 'Silk', ' SILK '] -> ['Silk']
+        """
+        seen = set()
+        out: List[str] = []
+        for raw in items or []:
+            s = str(raw).strip()
+            if not s:
+                continue
+            k = s.lower()
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(s.title())
+        return out
 
     def _parse_min_max(s: str):
         if not isinstance(s, str):
@@ -593,10 +649,10 @@ def format_inquiry_reply(
         out.append(T["have"].format(x=_human_join(cats)))
 
     # Fabrics / Colors / Sizes / Occasions
-    fabrics = values_by_attr.get("fabric") or []
-    colors  = values_by_attr.get("color") or []
-    sizes   = values_by_attr.get("size") or []
-    occs    = values_by_attr.get("occasion") or []
+    fabrics = _canon_list(values_by_attr.get("fabric") or [])
+    colors  = _canon_list(values_by_attr.get("color") or [])
+    sizes   = _canon_list(values_by_attr.get("size") or [])
+    occs    = _canon_list(values_by_attr.get("occasion") or [])
     if fabrics: out.append(T["fabrics"].format(x=_human_join(fabrics)))
     if colors:  out.append(T["colors"].format(x=_human_join(colors)))
     if sizes:   out.append(T["sizes"].format(x=_human_join(sizes)))

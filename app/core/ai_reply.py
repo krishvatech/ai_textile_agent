@@ -695,21 +695,69 @@ async def handle_asking_inquiry_variants(
     detect_requested_attributes_async,
     language: str,
 ) -> str:
+    
+    # Text-based type detection if NER missed it
+    text_lower = (text or "").lower()
+    detected_type = None
+    if any(word in text_lower for word in ["for women", "women's", "female", "ladies"]):
+        detected_type = "women"
+    elif any(word in text_lower for word in ["for men", "men's", "male"]):
+        detected_type = "men"
+    elif any(word in text_lower for word in ["for kids", "children", "child"]):
+        detected_type = "kids"
+    elif any(word in text_lower for word in ["for boys", "boy's"]):
+        detected_type = "boys"
+    elif any(word in text_lower for word in ["for girls", "girl's"]):
+        detected_type = "girls"
+    
+    # Check if this is a type-based category request
+    requested_type = detected_type or acc_entities.get("type")
+    asking_categories = requested_type and not any(acc_entities.get(k) for k in ["category", "color", "fabric", "size"])
+    
+    if requested_type and asking_categories:
+        try:
+            categories = await get_categories_by_type(db, tenant_id, requested_type)
+            
+            if categories:
+                bullets = "\n".join(f"• {c}" for c in categories[:12])
+                lr = (language or "en-IN").split("-")[0].lower()
+                
+                if lr == "hi":
+                    return f"{requested_type.title()} के लिए उपलब्ध कैटेगरी:\n{bullets}\nकिस कैटेगरी में देखना चाहेंगे?"
+                elif lr == "gu":
+                    return f"{requested_type.title()} માટે ઉપલબ્ધ કેટેગરી:\n{bullets}\nકઈ કેટેગરીમાં જોવું છે?"
+                else:
+                    return f"Available categories for {requested_type}:\n{bullets}\nWhich category would you like to explore?"
+            else:
+                lr = (language or "en-IN").split("-")[0].lower()
+                if lr == "hi":
+                    return f"खराब, {requested_type} के लिए फिलहाल कोई प्रोडक्ट उपलब्ध नहीं है."
+                elif lr == "gu":
+                    return f"માફ કરશો, {requested_type} માટે હાલમાં કોઈ પ્રોડક્ટ ઉપલબ્ધ નથી."
+                else:
+                    return f"Sorry, no products available for {requested_type} currently."
+                    
+        except Exception as e:
+            logging.error(f"Error in type-based categories: {e}")
+    
+    # Continue with existing logic for regular inquiries...
     try:
         asked_now = await detect_requested_attributes_async(text or "", acc_entities or {})
         print("asked_now=",asked_now)
     except Exception:
         asked_now = []
-        
+    
     if not asked_now:
         asked_now = ["category"]
-    
+
     needs_category = any(k in asked_now for k in ("price", "rental_price")) and not (acc_entities or {}).get("category")
+
     if needs_category:
         try:
             cats = await resolve_categories(db, tenant_id, {})
         except Exception:
             cats = []
+
         if cats:
             bullets = "\n".join(f"• {c}" for c in cats[:12])
             lr = (language or "en-IN").split("-")[0].lower()
@@ -719,6 +767,7 @@ async def handle_asking_inquiry_variants(
                 return f"કિંમત જણાવવા માટે કૃપા કરીને એક કેટેગરી પસંદ કરો:\n{bullets}"
             else:
                 return f"Please choose a category for the price range:\n{bullets}"
+
         lr = (language or "en-IN").split("-")[0].lower()
         if lr == "hi":
             return "कृपया दाम बताने के लिए कैटेगरी बताइए."
@@ -727,7 +776,8 @@ async def handle_asking_inquiry_variants(
         return "Please tell me the category for the price range."
 
     values = await fetch_attribute_values(db, tenant_id, asked_now, acc_entities or {})
-    return format_inquiry_reply(values, acc_entities, language=language)  # <— pass language
+    return format_inquiry_reply(values, acc_entities, language=language)
+
 
 def merge_entities(acc_entities: Optional[Dict[str, Any]], new_entities: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """
@@ -751,6 +801,57 @@ def filter_non_empty_entities(entities: dict) -> dict:
     if not entities:
         return {}
     return {k: v for k, v in entities.items() if v not in (None, "", [], {})}
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
+
+DEPT_SET = {"women","men","girls","boys","kids"}
+
+async def db_type_for_category(db: AsyncSession, tenant_id: int, category: str) -> str | None:
+    """Return dominant department (type) for a category from products table."""
+    if not category:
+        return None
+    result = await db.execute(
+        text("""
+            SELECT type
+            FROM products
+            WHERE tenant_id = :t
+              AND lower(category) = lower(:c)
+              AND type IS NOT NULL
+            GROUP BY type
+            ORDER BY COUNT(*) DESC
+            LIMIT 1
+        """),
+        {"t": tenant_id, "c": category}
+    )
+    row = result.fetchone()
+    if not row:
+        return None
+    t = (row[0] or "").strip().lower()
+    return t if t in DEPT_SET else None
+
+async def get_categories_by_type(db: AsyncSession, tenant_id: int, type_filter: str) -> List[str]:
+    """Get distinct categories for a specific type (men/women/kids/etc.)"""
+    try:
+        result = await db.execute(
+            text("""
+                SELECT DISTINCT category 
+                FROM products 
+                WHERE tenant_id = :tid 
+                  AND LOWER(type) = LOWER(:type_filter)
+                  AND category IS NOT NULL 
+                  AND category != ''
+                ORDER BY category
+            """),
+            {"tid": tenant_id, "type_filter": type_filter}
+        )
+        
+        categories = [row[0] for row in result.fetchall() if row[0]]
+        return categories
+        
+    except Exception as e:
+        logging.error(f"Error in get_categories_by_type: {e}")
+        return []
 
 
 # ======================
@@ -793,12 +894,19 @@ async def analyze_message(
     # --- Clean and merge new entities into memory (critical!) ---
     raw_new_entities = new_entities or {}
     clean_new_entities = filter_non_empty_entities(raw_new_entities)
+    cat_now = (clean_new_entities.get("category") or acc_entities.get("category"))
+    if cat_now and not clean_new_entities.get("type"):
+        async with SessionLocal() as db:
+            t = await db_type_for_category(db, tenant_id, cat_now)
+        if t:
+            clean_new_entities["type"] = t
     new_cat = (new_entities or {}).get("category")
     if new_cat:
         prev_cat = acc_entities.get("category")
         if not prev_cat or _lc(prev_cat) != _lc(new_cat):
+            KEEP_ON_CATEGORY_CHANGE = {"category", "type", "is_rental"}
             for dep in list(acc_entities.keys()):
-                if dep != "category":
+                if dep not in KEEP_ON_CATEGORY_CHANGE:
                     acc_entities.pop(dep, None)
             acc_entities["category"] = new_cat
     if intent_type == "availability_check":
@@ -850,10 +958,10 @@ async def analyze_message(
         # -------------------------------
         turn_filters = {
             k: v for k, v in (locals().get("clean_new_entities") or {}).items()
-            if v not in (None, "", [], {}) and k in ("category","color","fabric","size","is_rental","occasion")
+            if v not in (None, "", [], {}) and k in ("category","color","fabric","size","is_rental","occasion","type")
         }
         # Fallback from memory for common facets if missing this turn
-        for k in ("category", "is_rental", "color", "fabric", "size", "occasion"):
+        for k in ("category", "is_rental", "color", "fabric", "size", "occasion","type"):
             if k not in turn_filters and (acc_entities.get(k) not in (None, "", [], {})):
                 turn_filters[k] = acc_entities[k]
         # Always work with a dict
@@ -889,6 +997,62 @@ async def analyze_message(
         if resolved_variant_id:
             acc_entities["product_variant_id"] = resolved_variant_id
         pinecone_data = dedupe_products(pinecone_data)
+        requested_type = (clean_new_entities.get("type") or acc_entities.get("type"))
+        asking_categories = not any(turn_filters.get(k) for k in ["category", "color", "fabric", "size"]) and requested_type
+
+        if requested_type and asking_categories:
+            # User is asking "what products do you have for men?" - show categories for that type
+            try:
+                async with SessionLocal() as db:
+                    categories = await get_categories_by_type(db, tenant_id, requested_type)
+                
+                if categories:
+                    lr = (language or "en-IN").split("-")[0].lower()
+                    bullets = "\n".join(f"• {c}" for c in categories[:12])
+                    
+                    if lr == "hi":
+                        reply_text = f"{requested_type.title()} के लिए उपलब्ध कैटेगरी:\n{bullets}\nकिस कैटेगरी में देखना चाहेंगे?"
+                    elif lr == "gu":
+                        reply_text = f"{requested_type.title()} માટે ઉપલબ્ધ કેટેગરી:\n{bullets}\nકઈ કેટેગરીમાં જોવું છે?"
+                    else:
+                        reply_text = f"Available categories for {requested_type}:\n{bullets}\nWhich category would you like to explore?"
+                    
+                    history.append({"role": "assistant", "content": reply_text})
+                    _commit()
+                    
+                    return {
+                        "intent_type": intent_type,
+                        "language": language,
+                        "tenant_id": tenant_id,
+                        "history": history,
+                        "collected_entities": acc_entities,
+                        "reply_text": reply_text,
+                        "categories": categories
+                    }
+                else:
+                    lr = (language or "en-IN").split("-")[0].lower()
+                    if lr == "hi":
+                        reply_text = f"खुशी, {requested_type} के लिए फिलहाल कोई प्रोडक्ट उपलब्ध नहीं है."
+                    elif lr == "gu":
+                        reply_text = f"માફ કરશો, {requested_type} માટે હાલમાં કોઈ પ્રોડક્ટ ઉપલબ્ધ નથી."
+                    else:
+                        reply_text = f"Sorry, no products available for {requested_type} currently."
+                    
+                    history.append({"role": "assistant", "content": reply_text})
+                    _commit()
+                    
+                    return {
+                        "intent_type": intent_type,
+                        "language": language,
+                        "tenant_id": tenant_id,
+                        "history": history,
+                        "collected_entities": acc_entities,
+                        "reply_text": reply_text
+                    }
+                    
+            except Exception as e:
+                logging.error(f"Error fetching categories by type: {e}")
+        
         # =========================
         # ZERO-RESULTS SMART FALLBACK (color + fabric + size + occasion)
         # =========================
@@ -976,7 +1140,11 @@ async def analyze_message(
                 # Fallback to tenant categories if no attribute suggestions could be generated
                 try:
                     async with SessionLocal() as db:
-                        cats = await resolve_categories(db, tenant_id, {})
+                        # If we have a type filter, get categories for that type
+                        if requested_type:
+                            cats = await get_categories_by_type(db, tenant_id, requested_type)
+                        else:
+                            cats = await resolve_categories(db, tenant_id, {})
                 except Exception:
                     cats = []
                 if cats:
@@ -1430,31 +1598,76 @@ async def analyze_message(
     # --- attribute inquiry
     elif intent_type == "asking_inquiry":
         async with SessionLocal() as session:
-            reply_text = await handle_asking_inquiry_variants(
-                text=text,
-                acc_entities=acc_entities or {},
-                db=session,
-                tenant_id=tenant_id,
-                detect_requested_attributes_async=detect_requested_attributes_async,
-                language=language,
-            )
-            print("reply_text=",reply_text)
+            # Check if this is a type-based category request (e.g., "products for men")
+            requested_type = acc_entities.get("type")
+            asking_categories = requested_type and not any(acc_entities.get(k) for k in ["category", "color", "fabric", "size"])
+            
+            if requested_type and asking_categories:
+                # Handle type-based category request
+                try:
+                    categories = await get_categories_by_type(session, tenant_id, requested_type)
+                    
+                    if categories:
+                        lr = (language or "en-IN").split("-")[0].lower()
+                        bullets = "\n".join(f"• {c}" for c in categories[:12])
+                        
+                        if lr == "hi":
+                            reply_text = f"{requested_type.title()} के लिए उपलब्ध कैटेगरी:\n{bullets}\nकिस कैटेगरी में देखना चाहेंगे?"
+                        elif lr == "gu":
+                            reply_text = f"{requested_type.title()} માટે ઉપલબ્ધ કેટેગરી:\n{bullets}\nકઈ કેટેગરીમાં જોવું છે?"
+                        else:
+                            reply_text = f"Available categories for {requested_type}:\n{bullets}\nWhich category would you like to explore?"
+                    else:
+                        lr = (language or "en-IN").split("-")[0].lower()
+                        if lr == "hi":
+                            reply_text = f"खुशी, {requested_type} के लिए फिलहाल कोई प्रोडक्ट उपलब्ध नहीं है."
+                        elif lr == "gu":
+                            reply_text = f"માફ કરશો, {requested_type} માટે હાલમાં કોઈ પ્રોડક્ટ ઉપલબ્ધ નથી."
+                        else:
+                            reply_text = f"Sorry, no products available for {requested_type} currently."
+                            
+                except Exception as e:
+                    logging.error(f"Error in asking_inquiry type-based categories: {e}")
+                    # Fallback to regular inquiry handling
+                    reply_text = await handle_asking_inquiry_variants(
+                        text=text,
+                        acc_entities=acc_entities or {},
+                        db=session,
+                        tenant_id=tenant_id,
+                        detect_requested_attributes_async=detect_requested_attributes_async,
+                        language=language,
+                    )
+            else:
+                # Regular inquiry handling
+                reply_text = await handle_asking_inquiry_variants(
+                    text=text,
+                    acc_entities=acc_entities or {},
+                    db=session,
+                    tenant_id=tenant_id,
+                    detect_requested_attributes_async=detect_requested_attributes_async,
+                    language=language,
+                )
+
+        # ADD THESE LINES - MISSING RETURN STATEMENTS
+        print("reply_text=", reply_text)
         history.append({"role": "assistant", "content": reply_text})
         _commit()
 
         payload = {
             "input_text": text,
             "language": language,
-            "intent_type": "asking_inquiry",
+            "intent_type": "asking_inquiry", 
             "history": history,
             "collected_entities": acc_entities,
         }
+
         if mode == "call":
             payload["answer"] = reply_text
         else:
             payload["reply_text"] = reply_text
-
+            
         return payload
+
        
     # --- other / fallback
     elif intent_type == "other" or intent_type is None:

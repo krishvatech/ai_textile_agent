@@ -149,6 +149,47 @@ async def get_tenant_color_by_phone(phone_number: str, db):
     rows = result.fetchall() or []
     return [r[0] for r in rows]
 
+#size by tenant_id
+async def get_tenant_size_by_phone(phone_number: str, db):
+    # 1) Find tenant id for this WhatsApp number
+    tid = (await db.execute(
+        text("""SELECT id FROM tenants
+                WHERE whatsapp_number = :phone AND is_active = true
+                LIMIT 1"""),
+        {"phone": phone_number}
+    )).scalar()
+    if not tid:
+        return []
+    # 2) Helper: does table.column exist?
+    async def col_exists(table: str, col: str) -> bool:
+        q = text("""
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_name = :table
+              AND column_name = :col
+              AND table_schema = ANY (current_schemas(false))
+            LIMIT 1
+        """)
+        return (await db.execute(q, {"table": table, "col": col})).first() is not None
+    sources = []
+    # product_variants.fabric (if present)
+    if await col_exists("product_variants", "color"):
+        sources.append("""
+            SELECT LOWER(TRIM(pv.size)) AS fab
+            FROM product_variants pv
+            JOIN products p ON p.id = pv.product_id
+            WHERE p.tenant_id = :tid
+              AND pv.size IS NOT NULL
+              AND TRIM(pv.size) <> ''
+        """)
+    if not sources:
+        return []
+    union_sql = " UNION ALL ".join(sources)
+    final_sql = f"SELECT DISTINCT fab FROM ({union_sql}) s"
+    result = await db.execute(text(final_sql), {"tid": tid})
+    rows = result.fetchall() or []
+    return [r[0] for r in rows]
+
 #category by tenant_id
 async def get_tenant_category_by_phone(phone_number: str, db):
     """
@@ -168,6 +209,31 @@ async def get_tenant_category_by_phone(phone_number: str, db):
         WHERE p.tenant_id = t.id
           AND p.category IS NOT NULL
           AND TRIM(p.category) <> '';
+    """)
+    result = await db.execute(query, {"phone": phone_number})
+    rows = result.fetchall() or []
+    # return a simple Python list of strings
+    return [r[0] for r in rows]
+
+#type by tenant_id
+async def get_tenant_type_by_phone(phone_number: str, db):
+    """
+    Return a lowercase, de-duplicated list of category names available for the tenant
+    mapped to this WhatsApp number. Pulls from products.category and products.type.
+    """
+    query = text("""
+        WITH t AS (
+          SELECT id
+          FROM tenants
+          WHERE whatsapp_number = :phone AND is_active = true
+          LIMIT 1
+        )
+        -- pull from products.type
+        SELECT DISTINCT LOWER(TRIM(p.type)) AS cat
+        FROM products p, t
+        WHERE p.tenant_id = t.id
+          AND p.type IS NOT NULL
+          AND TRIM(p.type) <> '';
     """)
     result = await db.execute(query, {"phone": phone_number})
     rows = result.fetchall() or []
@@ -475,6 +541,8 @@ async def receive_cloud_webhook(request: Request):
                 tenant_fabric    = await get_tenant_fabric_by_phone(business_number, db)
                 tenant_color     = await get_tenant_color_by_phone(business_number, db)
                 tenant_occasion  = await get_tenant_occasion_by_phone(business_number, db)
+                tenant_size  = await get_tenant_size_by_phone(business_number, db)
+                tenant_type  = await get_tenant_type_by_phone(business_number, db)
 
                 # --- AI pipeline
                 raw_reply = None
@@ -485,6 +553,8 @@ async def receive_cloud_webhook(request: Request):
                         allowed_fabric=tenant_fabric,
                         allowed_color=tenant_color,
                         allowed_occasion=tenant_occasion,
+                        allowed_size=tenant_size,
+                        allowed_type=tenant_type,
                     )
                     raw_reply = await analyze_message(
                         text=text_msg,
@@ -507,6 +577,7 @@ async def receive_cloud_webhook(request: Request):
                                 # --- Safely extract followup + media/products
                 raw_obj = raw_reply if isinstance(raw_reply, dict) else {}
                 followup_text = (raw_obj.get("followup_reply") or "").strip() or None
+                print("Followup_Question = ",followup_text)
                 products      = (raw_obj.get("pinecone_data") or [])[:5]  # max 5
                 # media_urls  = raw_obj.get("media") or []  # (unused here)
 

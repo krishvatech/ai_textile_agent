@@ -102,27 +102,37 @@ def build_filters_from_entities(tenant_id: int, ents: dict) -> dict:
     # ALWAYS enforce category - this is non-negotiable
     if ents.get("category"):
         f["category"] = {"$eq": _title_keep_spaces(ents["category"])}
-    
+
     # Rental preference
     if ents.get("is_rental") is not None:
-        f["is_rental"] = {"$eq": bool(ents["is_rental"])}
-    
-    # Size (usually important for fit)
+        f["is_rental"] = {"$eq": bool(ents.get("is_rental"))}
+
+    # Size (critical): coerce numeric-like to number; keep letters with proper casing
     if ents.get("size"):
-        f["size"] = {"$eq": _title_keep_spaces(ents["size"])}
-    
+        sval = ents["size"]
+        if isinstance(sval, (int, float)):
+            f["size"] = {"$eq": float(sval)}
+        elif isinstance(sval, str) and sval.strip().isdigit():
+            try:
+                f["size"] = {"$eq": float(sval.strip())}
+            except Exception:
+                f["size"] = {"$eq": smart_capitalize(sval)}
+        else:
+            # letter sizes like S/M/L/XL/XXL/... -> use smart_capitalize to keep XL, 3XL, etc.
+            f["size"] = {"$eq": smart_capitalize(str(sval))}
+
     # Color and fabric (more flexible)
     if ents.get("color"):
         f["color"] = {"$eq": _title_keep_spaces(ents["color"])}
     if ents.get("fabric"):
         f["fabric"] = {"$eq": _title_keep_spaces(ents["fabric"])}
-    
-    # Occasion is LEAST priority - only add if we have other strong matches
-    # This prevents showing different categories just because occasion matches
-    if ents.get("occasion") and len(f) > 2:  # Only if we have category + other filters
+
+    # Occasion rule unchanged
+    if ents.get("occasion") and any(k in f for k in ("color","size","fabric")):
         f["occasion"] = {"$eq": _title_keep_spaces(ents["occasion"])}
-    
+
     return f
+
 
 
 
@@ -313,7 +323,7 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
 
     # First try: strict
     
-    critical_attributes = ['color', 'size','occasion','fabric']  # Add other critical attributes
+    critical_attributes = ['color', 'size']  # Add other critical attributes
     has_critical_attrs = any(entities_cap.get(attr) for attr in critical_attributes)
     # If nothing came back, retry without fabric (let local fuzzy check handle it)
     response = await anyio.to_thread.run_sync(lambda: _do_query(md_filter, TEXT_TOP_K))
@@ -330,6 +340,7 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
             fallback_filter["is_rental"] = {"$eq": entities_cap["is_rental"]}
         if entities_cap.get("size"):
             fallback_filter["size"] = {"$eq": entities_cap["size"]}
+        
         logger.info("Pinecone category-priority fallback: %s", fallback_filter)
         response = await anyio.to_thread.run_sync(lambda: _do_query(fallback_filter, max(TEXT_TOP_K, 50)))
 
@@ -359,6 +370,7 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
             "product_id": md.get("product_id"),
             "image_url": md.get("image_url"),
             "product_url": md.get("product_url"),
+            "type": md.get("type"),
         }
         # copy only requested keys that exist in metadata
         for key in entities_cap:
@@ -382,7 +394,7 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
         return item_category == req_category
 
     # Filter matches with category priority
-    SCORE_THRESHOLD = 0.30
+    SCORE_THRESHOLD = 0.10
     filtered_matches = []
 
     for item in matches:
