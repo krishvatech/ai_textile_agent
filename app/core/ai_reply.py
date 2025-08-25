@@ -701,7 +701,7 @@ async def handle_asking_inquiry_variants(
     detected_type = None
     if any(word in text_lower for word in ["for women", "women's", "female", "ladies"]):
         detected_type = "women"
-    elif any(word in text_lower for word in ["for men", "men's", "male"]):
+    elif any(word in text_lower for word in ["for men", "men's", "male","men"]):
         detected_type = "men"
     elif any(word in text_lower for word in ["for kids", "children", "child"]):
         detected_type = "kids"

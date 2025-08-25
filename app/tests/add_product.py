@@ -84,6 +84,7 @@ def upsert_variant_to_pinecone(variant_data):
         "rental_price": to_float(variant_data.get("rental_price")),
         "available_stock": int(variant_data.get("available_stock") or 0),
         "image_url": variant_data.get("image_url") or "",
+        "product_url": variant_data.get("product_url") or "",
         "is_rental": bool(variant_data.get("is_rental", False)),
         "is_active": bool(variant_data.get("is_active", True)),
         "description": variant_data.get("description", ""),
@@ -160,8 +161,14 @@ def auto_batch_insert_from_file(file_path):
                 continue
 
             is_active = not variant.get('extra', {}).get('is_demo', False)
-            is_rental = variant.get('is_rental', False)
+            is_rental_raw = variant.get('is_rental', False)
+            if isinstance(is_rental_raw, str):
+                is_rental = is_rental_raw.lower() in ('true', '1', 'yes')
+            else:
+                is_rental = bool(is_rental_raw)
+
             image_url = variant.get('image_url')
+            product_url = variant.get('product_url')
 
             # Occasion field fix: always treat as list
             occasions_raw = variant.get('occasion', [])
@@ -186,14 +193,14 @@ def auto_batch_insert_from_file(file_path):
             insert_variant_query = '''
             INSERT INTO product_variants (
                 product_id, color, size, fabric, price, available_stock, 
-                is_rental, rental_price, image_url, created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
+                is_rental, rental_price, image_url, created_at, updated_at, product_url
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
             '''
             cursor.execute(insert_variant_query, (
                 new_pid, variant.get('color'), variant.get('size'), variant.get('fabric'),
                 price_float, stock_int,
                 is_rental, rental_price_float, image_url,
-                timestamp, timestamp
+                timestamp, timestamp, product_url
             ))
             variant_id = cursor.fetchone()[0]
             print(f"Inserted variant '{variant.get('product_name')}' ({variant.get('color')}, {variant.get('size')}) with ID: {variant_id}")
@@ -228,6 +235,7 @@ def auto_batch_insert_from_file(file_path):
                 "rental_price": rental_price_float,
                 "available_stock": stock_int,
                 "image_url": image_url if image_url is not None else "",
+                "product_url": product_url if product_url is not None else "",
                 "is_rental": is_rental,
                 "is_active": is_active,
                 "description": variant.get('description', '')
