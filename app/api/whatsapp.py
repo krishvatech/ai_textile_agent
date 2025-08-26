@@ -3,6 +3,7 @@ from fastapi import FastAPI, Request, Response, APIRouter
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import os
+import json
 import logging
 import httpx
 from sqlalchemy import text
@@ -452,6 +453,34 @@ def _primary_image_for_product(prod: dict) -> str | None:
     return _normalize_url(prod.get("image_url"))
 
 
+# --- Logging helper: build a compact product details dict
+def _product_log_dict(prod: dict) -> dict:
+    def _to_bool(v):
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() in {"true", "1", "yes", "y"}
+
+    # price fallbacks like in _product_caption
+    price = (prod.get("price") or prod.get("sale_price") or prod.get("selling_price")
+             or prod.get("variant_price") or prod.get("current_price"))
+
+    return {
+        "product_id": prod.get("product_id") or prod.get("id"),
+        "variant_id": prod.get("variant_id"),
+        "name": prod.get("name") or prod.get("product_name"),
+        "category": prod.get("category"),
+        "type": prod.get("type"),
+        "fabric": prod.get("fabric"),
+        "color": prod.get("color"),
+        "size": prod.get("size"),
+        "is_rental": _to_bool(prod.get("is_rental")),
+        "price": price,
+        "rental_price": prod.get("rental_price"),
+        "currency": (prod.get("currency") or "INR"),
+        "product_url": _normalize_url(prod.get("product_url") or prod.get("image_url")),
+    }
+
+
 @router.post("/webhook")
 async def receive_cloud_webhook(request: Request):
     print('Meta webhook..................')
@@ -611,6 +640,12 @@ async def receive_cloud_webhook(request: Request):
                         img = _primary_image_for_product(prod)
                         if not img:
                             continue
+                            
+                        # NEW: log product details cleanly
+                        details = _product_log_dict(prod)
+                        details["image_url"] = img
+                        logging.info(f"[PRODUCT] Sending product to {from_waid}: {json.dumps(details, ensure_ascii=False)}")
+
                         mid = await send_whatsapp_image_cloud(
                             to_waid=from_waid,
                             image_url=img,
@@ -618,6 +653,7 @@ async def receive_cloud_webhook(request: Request):
                         )
                         if mid:
                             sent_count += 1
+                            logging.info(f"[PRODUCT] Sent product message_id={mid} to {from_waid}")
                         
                         out_msgs.append(("image", _product_caption(prod), mid))
 
