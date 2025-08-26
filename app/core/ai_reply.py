@@ -18,12 +18,16 @@ from app.core.asked_now_detector import detect_requested_attributes_async
 from app.core.asked_now_detector import detect_requested_attributes_async
 import json
 import re
+import httpx
 from datetime import date as _date  # avoid touching globals
 
 
 load_dotenv()
 api_key = os.getenv("GPT_API_KEY")
 gpt_model = os.getenv("GPT_MODEL")
+sarvam_api_key = os.getenv("SARVAM_API_KEY")
+chat_url = os.getenv("SARVAM_CHAT_URL")
+model = os.getenv("SARVAM_LLM_MODEL")
 if not api_key:
     print("❌ Error: GPT_API_KEY not found in environment variables")
     exit(1)
@@ -359,31 +363,114 @@ def render_categories_reply(lang_root: str, categories: list[str]) -> str:
         "Which category would you like to explore? Rental or purchase, and your budget?"
     )
 
+
 # --- REPLACE THIS WHOLE FUNCTION ---
 async def FollowUP_Question(
     intent_type: str,
     entities: Dict[str, Any],
     language: Optional[str] = "en-IN",
     session_history: Optional[List[Dict[str, str]]] = None,
-    only_fields: Optional[List[str]] = None,   # restrict what we ask
-    max_fields: int = 2                        # cap how many we ask
+    only_fields: Optional[List[str]] = None,
+    max_fields: int = 2
 ) -> str:
     """
     Generates a short, merged follow-up question asking ONLY for specific missing fields,
-    optionally restricted to `only_fields` and capped by `max_fields`.
+    powered by Sarvam LLM, with strict Gujarati support & localized fallback.
     """
+
+    # ---- helpers ----
     def _is_missing(val):
         return (val is None) or (val == "") or (isinstance(val, (list, dict)) and not val)
 
+    def _lang_root(lang: Optional[str]) -> str:
+        return (lang or "en-IN").split("-")[0].lower()
+
+    # Localized field labels (expand as needed)
+    FIELD_LABELS = {
+        "en": {
+            "is_rental": "rent or buy",
+            "occasion": "occasion",
+            "fabric": "fabric",
+            "size": "size",
+            "color": "color",
+            "category": "category",
+            "quantity": "quantity",
+            "start_date": "start date",
+            "end_date": "end date",
+            "confirmation": "confirmation",
+            "price": "price",
+            "rental_price": "rental price",
+        },
+        "gu": {
+            "is_rental": "ભાડે કે ખરીદી",
+            "occasion": "પ્રસંગ",
+            "fabric": "કાપડ",
+            "size": "સાઇઝ",
+            "color": "રંગ",
+            "category": "વર્ગ",
+            "quantity": "જથ્થો",
+            "start_date": "શરૂઆતની તારીખ",
+            "end_date": "અંતીમ તારીખ",
+            "confirmation": "કન્ફોર્મ",
+            "price": "ભાવ",
+            "rental_price": "ભાડું",
+        },
+        "hi": {
+            "is_rental": "किराए या खरीद",
+            "occasion": "मौका",
+            "fabric": "कपड़ा",
+            "size": "साइज़",
+            "color": "रंग",
+            "category": "श्रेणी",
+            "quantity": "संख्या",
+            "start_date": "प्रारंभ तिथि",
+            "end_date": "समाप्ति तिथि",
+            "confirmation": "पुष्टिकरण",
+            "price": "कीमत",
+            "rental_price": "किराया",
+        }
+    }
+
+    def _label(field: str, lang: str) -> str:
+        labels = FIELD_LABELS.get(lang, FIELD_LABELS["en"])
+        return labels.get(field, field)
+
+    async def _sarvam_chat(messages: List[Dict[str, str]],
+                           prompt_str: str,
+                           model: Optional[str] = None,
+                           temperature: float = 0.3,
+                           max_tokens: int = 120) -> Optional[str]:
+        if not api_key:
+            return None
+
+        headers = {
+            "Authorization": f"Bearer {sarvam_api_key}",
+            "Content-Type": "application/json",
+        }
+
+        # 1) Chat-style attempt
+        try:
+            payload_chat = {
+                "model": "sarvam-1", 
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            }
+            async with httpx.AsyncClient(timeout=20) as client:
+                r = await client.post(chat_url, headers=headers, json=payload_chat)
+                if r.status_code == 200:
+                    data = r.json()
+                    content = (data.get("choices", [{}])[0]
+                                  .get("message", {})
+                                  .get("content"))
+                    if content:
+                        return content.strip()
+        except Exception:
+            pass
+
+    # ---- main logic (entity selection) ----
     is_rental_val = entities.get("is_rental", None)
-    # base_keys = [
-    #     "is_rental", "occasion", "fabric", "size", "color", "category",
-    #     "quantity", "start_date", "end_date", "confirmation"
-    # ]
-    # price_keys = (
-    #     ["rental_price"] if is_rental_val is True
-    #     else (["price"] if is_rental_val is False else ["price", "rental_price"])
-    # )
+
     base_keys = [
         "is_rental", "occasion", "fabric", "size", "color", "category",
         "quantity",
@@ -394,83 +481,123 @@ async def FollowUP_Question(
         else (["price"] if is_rental_val is False else ["price", "rental_price"])
     )
 
-    # Canonical order + determine missing
     entity_priority = base_keys + price_keys
     missing_fields = [k for k in entity_priority if _is_missing(entities.get(k))]
 
-    # Narrow to specific targets if provided
     if only_fields:
         wanted = set(only_fields)
         missing_fields = [k for k in missing_fields if k in wanted]
 
     if not missing_fields:
-        return "Thank you. I have all the information I need for your request!"
+        return "બધા વિગત મળી ગયા. આભાર!" if _lang_root(language) == "gu" else \
+               "Thank you. I have all the information I need for your request!"
 
-    # Stable sort order + cap count
-    entity_priority = [
+    # Stable order + cap
+    entity_priority_sorted = [
         "is_rental", "occasion", "fabric", "size", "color", "category",
         "quantity", "start_date", "end_date", "confirmation", "price", "rental_price"
     ]
-    field_display_names = {
-        "is_rental": "rental",
-        "occasion": "occasion",
-        "fabric": "fabric",
-        "size": "size",
-        "color": "color",
-        "category": "category",
-        "quantity": "quantity",
-        "start_date": "start_date",
-        "end_date": "end_date",
-        "confirmation": "confirmation",
-        "price": "price",
-        "rental_price": "rental_price",
-    }
-
     missing_sorted = sorted(
         missing_fields,
-        key=lambda x: entity_priority.index(x) if x in entity_priority else 999
+        key=lambda x: entity_priority_sorted.index(x) if x in entity_priority_sorted else 999
     )
-    missing_short = missing_sorted[: max(1, int(max_fields))]  # ensure ≥1
-    merged_fields = ", ".join([field_display_names.get(f, f) for f in missing_short])
+    missing_short = missing_sorted[: max(1, int(max_fields))]
 
-    # Locale hint
-    lang_root = (language or "en-IN").split("-")[0].lower()
-    lang_hint = {
-        "en": "English (India) — English only, no Hindi/Hinglish",
-        "hi": "Hindi in Devanagari script — no English/Hinglish",
-        "gu": "Gujarati script — no Hindi/English",
-    }.get(lang_root, f"the exact locale {language}")
+    # Language prep
+    lang = _lang_root(language)
+    non_empty = {k: v for k, v in (entities or {}).items() if v not in (None, "", [], {})}
+    textile_prompt = (globals().get("Textile_Prompt", "") or "").strip()
 
-    # Recent session context (optional)
+    # Localized list of missing fields for the prompt
+    missing_human = ", ".join([_label(f, lang) for f in missing_short])
+
+    # Recent context
     session_text = ""
     if session_history:
-        relevant_history = session_history[-5:]
-        conv_lines = [f"{m['role'].capitalize()}: {m['content']}" for m in relevant_history]
+        relevant = session_history[-5:]
+        conv_lines = []
+        for m in relevant:
+            role = (m.get("role") or "").capitalize() or "User"
+            content = m.get("content") or ""
+            conv_lines.append(f"{role}: {content}")
         session_text = "Conversation so far:\n" + "\n".join(conv_lines) + "\n"
 
-    # ✅ Compute non-empty details for the prompt (fixes the f-string issue)
-    non_empty = {k: v for k, v in (entities or {}).items() if v not in (None, "", [], {})}
+    # ---- Build language-strong prompts ----
+    if lang == "gu":
+        system_msg = (
+            "તમે એક ટેક્સટાઇલ દુકાનના મદદગાર છો. હંમેશાં ખૂબ સંક્ષિપ્ત, નમ્ર અને "
+            "ગુજરાતી લિપિમાં જ જવાબ આપો. હિંગ્લિશ/અંગ્રેજી શબ્દો ટાળો."
+        )
+        user_instr = (
+            f"{textile_prompt}\n"
+            f"{session_text}"
+            f"હમણાં સુધી મળેલી માહિતી (કી=ઇંગ્લિશ, મૂલ્ય=વેલ્યૂ): {json.dumps(non_empty, ensure_ascii=False)}\n"
+            f"હવે ફક્ત આ બાબતો પૂછો: {missing_human}.\n"
+            "એક જ સવાલ, ખૂબ જ ટૂંકો અને સહજ. અન્ય કઈ માહિતી ન પૂછશો."
+        )
+    elif lang == "hi":
+        system_msg = (
+            "आप एक टेक्सटाइल दुकान के सहायक हैं। हमेशा संक्षिप्त, विनम्र और "
+            "देवनागरी हिन्दी में ही उत्तर दें। हिंग्लिश/अंग्रेज़ी शब्द न प्रयोग करें।"
+        )
+        user_instr = (
+            f"{textile_prompt}\n"
+            f"{session_text}"
+            f"अब तक मिली जानकारी (keys in English): {json.dumps(non_empty, ensure_ascii=False)}\n"
+            f"अब केवल यह पूछें: {missing_human}.\n"
+            "एक ही सवाल, बहुत छोटा और स्वाभाविक। और कोई बात न पूछें।"
+        )
+    else:
+        system_msg = (
+            "You are a textile shop assistant. Be concise, polite, and reply ONLY in English."
+        )
+        user_instr = (
+            f"{textile_prompt}\n"
+            f"{session_text}"
+            f"Details so far: {json.dumps(non_empty, ensure_ascii=False)}\n"
+            f"Ask ONLY for: {missing_human}.\n"
+            "Return a single, very short question. Do not ask anything else."
+        )
 
-    # Prompt—ask ONLY for the narrowed fields
-    prompt = Textile_Prompt + (
-        f"You are a friendly assistant for a textile and clothing shop.\n"
-        f"{session_text}"
-        f"Collected details so far: {non_empty}\n"
-        f"Still missing: {merged_fields}.\n"
-        f"Ask naturally and politely for ONLY these field(s). Keep it very brief. "
-        f"Reply in {language.upper()}. Output a single question only.\n"
-        f"Write in {lang_hint}."
-    )
+    # Compose both chat messages and a plain prompt (for fallback endpoint)
+    messages = [
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": user_instr},
+    ]
+    plain_prompt = system_msg + "\n\n" + user_instr
 
-    client = AsyncOpenAI(api_key=api_key)
-    completion = await client.chat.completions.create(
-        model=gpt_model,
-        messages=[
-            {"role": "system", "content": "You are an expert, concise, friendly assistant. Respect language instructions strictly."},
-            {"role": "user", "content": prompt}
-        ]
-    )
-    return completion.choices[0].message.content.strip()
+    # ---- Call Sarvam ----
+    llm_text = await _sarvam_chat(messages, plain_prompt)
+
+    # ---- Localized fallback (if Sarvam fails) ----
+    if not llm_text:
+        if len(missing_short) == 1:
+            f1 = _label(missing_short[0], lang)
+            if lang == "gu":
+                return f"કૃપા કરીને તમારી {f1} જણાવશો?"
+            elif lang == "hi":
+                return f"कृपया अपनी {f1} बताइए?"
+            else:
+                return f"Could you please share your {f1}?"
+        else:
+            if lang == "gu":
+                fields = " અને ".join([_label(x, lang) for x in [*missing_short[:-1], missing_short[-1]]]) \
+                         if len(missing_short) == 2 else \
+                         ", ".join([_label(x, lang) for x in missing_short[:-1]]) + f" અને {_label(missing_short[-1], lang)}"
+                return f"કૃપા કરીને તમારી {fields} જણાવશો?"
+            elif lang == "hi":
+                fields = " और ".join([_label(x, lang) for x in [*missing_short[:-1], missing_short[-1]]]) \
+                         if len(missing_short) == 2 else \
+                         ", ".join([_label(x, lang) for x in missing_short[:-1]]) + f" और {_label(missing_short[-1], lang)}"
+                return f"कृपया अपनी {fields} बताइए?"
+            else:
+                fields = " and ".join([_label(x, lang) for x in [*missing_short[:-1], missing_short[-1]]]) \
+                         if len(missing_short) == 2 else \
+                         ", ".join([_label(x, lang) for x in missing_short[:-1]]) + f" and {_label(missing_short[-1], lang)}"
+                return f"Could you please share your {fields}?"
+
+    return llm_text.strip()
+
 
 
 # NEW: language/script instruction for the LLM

@@ -248,7 +248,9 @@ Entity extraction guidelines (normalize; be conservative; use null when unknown)
 - fabric: The product/garment fabric **Must be normalized to one of {allowed_fabric}**. Normalize regional/colloquial names to common fabric types (e.g., standard silk/cotton/blends). If uncertain, choose the closest standard fabric.
 - price: Unit price/rate per piece (number). If a numeric price is given and the request is about buying, set here; else null.
 - rental_price: Rent price/rate per piece (number). If a numeric price is given and rental intent is explicit, set here; else null.
-- size: Normalize **strictly to one of** {allowed_size}. Never invent values.
+- size: Recognize full names, abbreviations, numbers, or measurements; normalize to one of "S","M","L","XL","XXL","Child", or preserve numeric (e.g., "42").
+  Saree rule: if the category/name is "saree" (any spelling/script), always set size = "Freesize" and ignore other size mentions.
+  Normalize **strictly to one of** {allowed_size}. Never invent values.
   Use these rules:
   1) If any user size equals a value in {allowed_size} (case-insensitive), return that exact catalog value (preserve catalog casing).
   2) If user gives a **number** but {allowed_size} are **letters** (e.g., ["S","M","L","XL",...]), pick the **closest conceptual** letter from {allowed_size} (use common sense that larger numbers ≈ larger letters; XS<S<M<L<XL<XXL<3XL<4XL<5XL), then return that letter exactly as it appears in {allowed_size}.

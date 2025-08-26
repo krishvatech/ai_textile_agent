@@ -460,36 +460,3 @@ async def fetch_records_by_ids(ids: List[str], index_name: str = TEXT_INDEX_NAME
     return out
 
 
-# ---------------- demo ----------------
-
-async def demo():
-    tenant_id = 4  # <-- change if needed
-    entities = {
-        "category": "saree",
-        "size": "Freesize",
-        "fabric": "Jimmy chu",
-    }
-
-    results = await pinecone_fetch_records(entities=entities, tenant_id=tenant_id)
-
-    if not results:
-        print("No matches")
-        return
-
-    for i, it in enumerate(results, 1):
-        print(f"\n#{i}")
-        print(" id:", it.get("id"))
-        print(" score:", it.get("score"))
-        print(" product_name:", it.get("name"))
-        print(" is_rental:", it.get("is_rental"))
-        print(" category:", it.get("category"))
-        print(" occasion:", it.get("occasion"))
-        print(" fabric:", it.get("fabric"))
-        print(" color:", it.get("color"))
-        print(" size:", it.get("size"))
-        print(" variant_id:", it.get("variant_id"))
-        print(" product_id:", it.get("product_id"))
-
-
-if __name__ == "__main__":
-    asyncio.run(demo())
