@@ -622,7 +622,8 @@ async def receive_cloud_webhook(request: Request):
                     if followup_text:
                         await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
                         out_msgs.append(("text", followup_text))
-
+                
+                logging.info(f"============== out Messages :",out_msgs,  "=================")
                 # --- Persist all outbound messages BEFORE returning
                 for kind, txt in out_msgs:
                     await append_transcript_message(
