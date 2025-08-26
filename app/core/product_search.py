@@ -437,7 +437,6 @@ async def pinecone_fetch_records(entities: dict, tenant_id: int) -> List[Dict[st
     #     )
     # ]
     filtered_matches.sort(key=lambda x: (x["score"] is not None, x["score"]), reverse=True)
-    print("Filter_Mathces=", filtered_matches)
     return filtered_matches
 
 

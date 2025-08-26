@@ -606,11 +606,12 @@ async def receive_cloud_webhook(request: Request):
                         )
                         if ok:
                             sent_count += 1
-                            out_msgs.append(("text", _product_caption(prod)))
+                            
                         
                         logging.info("="*100)
                         logging.info(f"Image sent succesfully : {_product_caption(prod)}")
                         logging.info("="*100)
+                        out_msgs.append(("text", _product_caption(prod)))
 
                     if followup_text:
                         # tiny delay helps WA order messages correctly
