@@ -606,7 +606,7 @@ async def receive_cloud_webhook(request: Request):
                         )
                         if ok:
                             sent_count += 1
-                            out_msgs.append(("image", _product_caption(prod)))
+                            out_msgs.append(("text", _product_caption(prod)))
 
                     if followup_text:
                         # tiny delay helps WA order messages correctly
@@ -623,7 +623,7 @@ async def receive_cloud_webhook(request: Request):
                         await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
                         out_msgs.append(("text", followup_text))
                 
-                logging.info(f"============== out Messages :",out_msgs,  "=================")
+                logging.info(f"============== out Messages : {out_msgs}=================")
                 # --- Persist all outbound messages BEFORE returning
                 for kind, txt in out_msgs:
                     await append_transcript_message(
