@@ -451,7 +451,7 @@ async def FollowUP_Question(
         # 1) Chat-style attempt
         try:
             payload_chat = {
-                "model": "sarvam-1", 
+                "model": model, 
                 "messages": messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens
