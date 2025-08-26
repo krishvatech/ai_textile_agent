@@ -1064,6 +1064,33 @@ async def analyze_message(
             
     logging.info(f"intent_type(detected)..... {detected_intent}")
     logging.info(f"intent_type(resolved)..... {intent_type}")
+    try:
+        if intent_type == "asking_inquiry":
+            # do we already have a category in memory?
+            has_category_ctx = bool(acc_entities.get("category"))
+
+            # did user explicitly flip rent/buy this turn?
+            explicit_rent_buy = (clean_new_entities.get("is_rental") is not None)
+
+            # any other concrete attribute provided this turn?
+            concrete_attr_now = any(
+                (clean_new_entities.get(k) not in (None, "", [], {}))
+                for k in ("color", "fabric", "size", "occasion", "price", "rental_price", "quantity", "type")
+            )
+
+            # option-list / WH question? (EN + HI + GU cues)
+            tl = (text or "").lower()
+            is_option_list_q = ("?" in tl) or any(w in tl for w in [
+                "which", "what", "konsa", "kaunse", "kounsa",
+                "कौन", "कौनसा", "कौनसे", "क्या",
+                "કયા", "કયું", "કઈ", "શું",
+            ])
+
+            if has_category_ctx and (explicit_rent_buy or concrete_attr_now) and not is_option_list_q:
+                intent_type = "product_search"
+                logging.info("Override: context category + refinement → product_search")
+    except Exception as e:
+        logging.exception("Refinement override failed: %s", e)
     in_rental_context = (
         (acc_entities.get("is_rental") is True)
         or bool(acc_entities.get("product_variant_id"))
