@@ -260,7 +260,13 @@ Entity extraction guidelines (normalize; be conservative; use null when unknown)
 - occasion: The product occasion **Must be normalized to one of {allowed_occasion}**. Normalize to standard English occasion names regardless of language/script; if uncertain, choose the closest standard occasion
 - quantity: Number of pieces desired (number). Convert digits or number-words into an integer. Handle English / Hinglish / Hindi / Gujarati in native or roman scripts. Output quantity as a JSON number (not a string). If absent or ambiguous, set null.
 - location: Delivery location if stated; else null.
-- is_rental: Only set true if rental intent is explicit in that detected language; set false only if buy/purchase intent is explicit; otherwise null. Do not infer false for neutral queries.
+- is_rental: - Set `is_rental = true` only if explicit RENT words are present (rent/kiraye/bhade/lease/hire; incl. Hindi/Gujarati + romanized).
+- Set `is_rental = false` only if explicit BUY words are present (buy/purchase/order/kharid*; incl. Hindi/Gujarati + romanized).
+- If neither set appears, `is_rental = null`.
+- Neutral phrases (e.g., “I want”, “chahiye”, “mujhe chahiye”, “mne joie chhe”, “need/show/price/range”) MUST NOT set false; keep `null` unless RENT/BUY words also appear.
+- If both RENT and BUY words appear in the same turn → `is_rental = null` and ask “rent or buy?”.
+- Session stickiness: once `true`, do not switch to `false` on neutral text; only switch on explicit BUY words.
+- Output must be exactly one of: `true` | `false` | `null`.
 - start_date: If message mentions a booking/need date (absolute or relative like "aaj/today", "kal/tomorrow"), normalize to YYYY-MM-DD; else null.
 - end_date: If a range/return date is mentioned, normalize to YYYY-MM-DD; else null. If only a single date is given, set end_date = start_date.
 - type: The department/segment (e.g., "women", "men", "kids", "unisex").
