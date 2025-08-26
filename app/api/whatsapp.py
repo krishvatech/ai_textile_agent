@@ -614,8 +614,7 @@ async def receive_cloud_webhook(request: Request):
                         mid = await send_whatsapp_image_cloud(
                             to_waid=from_waid,
                             image_url=img,
-                            caption=_product_caption(prod),
-                            context_msg_id=msg_id,  # reply to inbound
+                            caption=_product_caption(prod)
                         )
                         if mid:
                             sent_count += 1
@@ -624,14 +623,14 @@ async def receive_cloud_webhook(request: Request):
 
                     if followup_text:
                         await asyncio.sleep(1.0)
-                        mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text, context_msg_id=msg_id)
+                        mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
                         out_msgs.append(("text", followup_text, mid))
                 else:
                     if reply_text:
-                        mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text, context_msg_id=msg_id)
+                        mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
                         out_msgs.append(("text", reply_text, mid))
                     if followup_text:
-                        mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text, context_msg_id=msg_id)
+                        mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
                         out_msgs.append(("text", followup_text, mid))
                 
                 logging.info(f"============== out Messages :{out_msgs}=================")
@@ -641,7 +640,7 @@ async def receive_cloud_webhook(request: Request):
                         db, chat_session,
                         role="assistant", text=txt, msg_id=mid,  # <-- add msg_id here
                         direction="out",
-                        meta={"kind": kind, "reply_to": msg_id, "channel": "cloud_api"},
+                        meta={"kind": kind, "channel": "cloud_api"}
                     )
                 await db.commit()
 
