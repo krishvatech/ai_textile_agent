@@ -408,7 +408,7 @@ async def FollowUP_Question(
             "size": "સાઇઝ",
             "color": "રંગ",
             "category": "વર્ગ",
-            "quantity": "જથ્થો",
+            "quantity": "quantity",
             "start_date": "શરૂઆતની તારીખ",
             "end_date": "અંતીમ તારીખ",
             "confirmation": "કન્ફોર્મ",
@@ -1064,7 +1064,13 @@ async def analyze_message(
             
     logging.info(f"intent_type(detected)..... {detected_intent}")
     logging.info(f"intent_type(resolved)..... {intent_type}")
-
+    in_rental_context = (
+        (acc_entities.get("is_rental") is True)
+        or bool(acc_entities.get("product_variant_id"))
+        or last_main_intent == "availability_check"
+    )
+    if intent_type in {"stock_check", "price_check"} and in_rental_context:
+        intent_type = "availability_check"
     # --- greeting
     if intent_type == "greeting":
         reply = "Hello! How can I assist you today?"
@@ -1365,6 +1371,7 @@ async def analyze_message(
             
     # --- availability
     elif intent_type == "availability_check":
+        last_main_intent_by_session[sk] = "availability_check"
         if acc_entities.get("is_rental") is False:
             ask = await FollowUP_Question(
                 intent_type,
@@ -1383,6 +1390,30 @@ async def analyze_message(
                 "collected_entities": acc_entities,
                 "reply": ask,
                 "reply_text": ask
+            }
+        # For rentals: enforce quantity before dates
+        def _is_missing(v): 
+            return v in (None, "", [], {})
+
+        if (acc_entities.get("is_rental") is True) and _is_missing(acc_entities.get("quantity")):
+            ask_q = await FollowUP_Question(
+                "availability_check",   # changed
+                acc_entities,
+                language,
+                session_history=history,
+                only_fields=["quantity"],
+                max_fields=1
+            )
+            history.append({"role": "assistant", "content": ask_q}); _commit()
+            last_main_intent_by_session[sk] = "availability_check"  # added
+            return {
+                "input_text": text,
+                "language": language,
+                "intent_type": "availability_check",  # changed
+                "history": history,
+                "collected_entities": acc_entities,
+                "reply": ask_q,
+                "reply_text": ask_q
             }
 
         # --- Define helper functions first ---
@@ -1810,6 +1841,27 @@ async def analyze_message(
             # If renting (or we already picked a variant and rental is not explicitly False),
             # we can still drive the rental-date flow.
             in_rental_flow = (is_rental_flag is True) or bool(acc_entities.get("product_variant_id"))
+
+        if in_rental_flow and _is_missing(acc_entities.get("quantity")):
+            ask_q = await FollowUP_Question(
+                "availability_check",           # was "product_search"
+                acc_entities,
+                language,
+                session_history=history,
+                only_fields=["quantity"],
+                max_fields=1
+            )
+            history.append({"role": "assistant", "content": ask_q}); _commit()
+            last_main_intent_by_session[sk] = "availability_check"
+            return {
+                "input_text": text,
+                "language": language,
+                "intent_type": "availability_check",  # was "product_search"
+                "history": history,
+                "collected_entities": acc_entities,
+                "reply": ask_q,
+                "reply_text": ask_q
+            }
 
         missing_dates = _is_missing(acc_entities.get("start_date")) or _is_missing(acc_entities.get("end_date"))
 
