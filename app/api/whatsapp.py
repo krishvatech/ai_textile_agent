@@ -512,6 +512,15 @@ async def receive_cloud_webhook(request: Request):
         mtype = msg.get("type")
         text_msg = msg.get("text", {}).get("body", "").strip() if mtype == "text" else f"[{mtype} message]"
 
+        
+        replied_message_id = None
+        context_obj = msg.get("context")
+        logging.info(f"========= Context Object ===========")
+        if context_obj and context_obj.get("id"):
+            logging.info(f"========= reply started ===========")
+            replied_message_id = context_obj.get("id")
+            logging.info(f"User replied to message ID: {replied_message_id}")
+
         async for db in get_db():
             try:
                 tenant_id = await get_tenant_id_by_phone(business_number, db)
@@ -525,7 +534,7 @@ async def receive_cloud_webhook(request: Request):
                 chat_session = await get_or_open_active_session(db, customer_id=customer.id)
                 await append_transcript_message(
                     db, chat_session, role="user", text=text_msg,
-                    msg_id=msg_id, direction="in", meta={"raw": data, "channel": "cloud_api"}
+                    msg_id=msg_id, direction="in", meta={"raw": data, "channel": "cloud_api","reply_to": replied_message_id}
                 )
 
                 # Detect language
