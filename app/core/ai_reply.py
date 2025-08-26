@@ -870,12 +870,26 @@ async def handle_asking_inquiry_variants(
     # Continue with existing logic for regular inquiries...
     try:
         asked_now = await detect_requested_attributes_async(text or "", acc_entities or {})
-        print("asked_now=",asked_now)
     except Exception:
         asked_now = []
-    
+
+    tl = (text or "").lower()
+    # These run EVEN IF the detector returned "category", so clear user intent wins.
+    if re.search(r"(?:\b|^)(kapad|kapda|kapde|kapdu)\b", tl) or ("કાપડ" in tl) or ("ફેબ્રિક" in tl) or re.search(r"\bfabrics?\b", tl):
+        asked_now = ["fabric"]
+    elif re.search(r"\b(colors?|colours?)\b", tl) or ("રંગ" in tl) or ("rang" in tl):
+        asked_now = ["color"]
+    elif re.search(r"\bsize(s)?\b", tl) or ("સાઇઝ" in tl) or ("માપ" in tl):
+        asked_now = ["size"]
+    elif re.search(r"\b(price|rate|cost|mrp)\b", tl) or ("કિંમત" in tl) or ("ભાવ" in tl):
+        asked_now = ["price"]
+
+    # Final fallback only if still nothing inferred
     if not asked_now:
         asked_now = ["category"]
+
+    print("asked_now  =", asked_now)
+
 
     needs_category = any(k in asked_now for k in ("price", "rental_price")) and not (acc_entities or {}).get("category")
 
