@@ -173,7 +173,7 @@ async def get_tenant_size_by_phone(phone_number: str, db):
         return (await db.execute(q, {"table": table, "col": col})).first() is not None
     sources = []
     # product_variants.fabric (if present)
-    if await col_exists("product_variants", "color"):
+    if await col_exists("product_variants", "size"):
         sources.append("""
             SELECT LOWER(TRIM(pv.size)) AS fab
             FROM product_variants pv
@@ -285,12 +285,11 @@ async def get_tenant_occasion_by_phone(phone_number: str, db):
 
 
 
-async def send_whatsapp_reply_cloud(to_waid: str, body) -> None:
-    """Send a WhatsApp reply using Meta Cloud API."""
+async def send_whatsapp_reply_cloud(to_waid: str, body, context_msg_id: str | None = None) -> str | None:
     msg = body if isinstance(body, str) else (body.get("reply_text") if isinstance(body, dict) else str(body))
     if not PHONE_NUMBER_ID or not WHATSAPP_TOKEN:
         logging.error("Cloud API envs missing: PHONE_NUMBER_ID/WHATSAPP_TOKEN")
-        return
+        return None
 
     url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
     payload = {
@@ -299,33 +298,46 @@ async def send_whatsapp_reply_cloud(to_waid: str, body) -> None:
         "type": "text",
         "text": {"body": (msg or "")[:4096]},
     }
+    if context_msg_id:
+        payload["context"] = {"message_id": context_msg_id}
+
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.post(url, json=payload, headers=headers)
     logging.info(f"[CLOUD] Send resp: {resp.status_code} {resp.text}")
+    try:
+        data = resp.json()
+        return (data.get("messages") or [{}])[0].get("id")
+    except Exception:
+        return None
 
 
-async def send_whatsapp_image_cloud(to_waid: str, image_url: str, caption: str | None = None) -> None:
-    """Send an image with optional caption via Meta Cloud API."""
+async def send_whatsapp_image_cloud(to_waid: str, image_url: str, caption: str | None = None, context_msg_id: str | None = None) -> str | None:
     if not PHONE_NUMBER_ID or not WHATSAPP_TOKEN:
         logging.error("Cloud API envs missing: PHONE_NUMBER_ID/WHATSAPP_TOKEN")
-        return
+        return None
 
     url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
     payload = {
         "messaging_product": "whatsapp",
         "to": to_waid.replace("+", "").strip(),
         "type": "image",
-        "image": {"link": image_url}
+        "image": {"link": image_url},
     }
     if caption:
-        # WhatsApp media caption limit is ~1024 chars; keep it safe
         payload["image"]["caption"] = caption[:1024]
+    if context_msg_id:
+        payload["context"] = {"message_id": context_msg_id}
 
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.post(url, json=payload, headers=headers)
     logging.info(f"[CLOUD] Send image resp: {resp.status_code} {resp.text}")
+    try:
+        data = resp.json()
+        return (data.get("messages") or [{}])[0].get("id")
+    except Exception:
+        return None
 
 
 def _normalize_url(u: str | None) -> str | None:
@@ -591,7 +603,7 @@ async def receive_cloud_webhook(request: Request):
                 # media_urls  = raw_obj.get("media") or []  # (unused here)
 
                 sent_count = 0
-                out_msgs: list[tuple[str, str]] = []  # (kind, text) pairs for transcript
+                out_msgs: list[tuple[str, str, str | None]] = []
 
                 # If we have products: send each image with caption, then one follow-up
                 if products:
@@ -599,45 +611,44 @@ async def receive_cloud_webhook(request: Request):
                         img = _primary_image_for_product(prod)
                         if not img:
                             continue
-                        ok = await send_whatsapp_image_cloud(
+                        mid = await send_whatsapp_image_cloud(
                             to_waid=from_waid,
                             image_url=img,
                             caption=_product_caption(prod),
+                            context_msg_id=msg_id,  # reply to inbound
                         )
-                        if ok:
+                        if mid:
                             sent_count += 1
-                            out_msgs.append(("image", _product_caption(prod)))
+                        
+                        out_msgs.append(("image", _product_caption(prod), mid))
 
                     if followup_text:
-                        # tiny delay helps WA order messages correctly
                         await asyncio.sleep(1.0)
-                        await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
-                        out_msgs.append(("text", followup_text))
-
+                        mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text, context_msg_id=msg_id)
+                        out_msgs.append(("text", followup_text, mid))
                 else:
-                    # No products -> send the normal reply (and optional follow-up)
                     if reply_text:
-                        await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
-                        out_msgs.append(("text", reply_text))
+                        mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text, context_msg_id=msg_id)
+                        out_msgs.append(("text", reply_text, mid))
                     if followup_text:
-                        await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
-                        out_msgs.append(("text", followup_text))
+                        mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text, context_msg_id=msg_id)
+                        out_msgs.append(("text", followup_text, mid))
                 
                 logging.info(f"============== out Messages :{out_msgs}=================")
                 # --- Persist all outbound messages BEFORE returning
-                for kind, txt in out_msgs:
+                for kind, txt, mid in out_msgs:
                     await append_transcript_message(
                         db, chat_session,
-                        role="assistant", text=txt,
+                        role="assistant", text=txt, msg_id=mid,  # <-- add msg_id here
                         direction="out",
-                        meta={"kind": kind, "reply_to": msg_id, "channel": "cloud_api"}
+                        meta={"kind": kind, "reply_to": msg_id, "channel": "cloud_api"},
                     )
                 await db.commit()
 
                 return {
                     "status": "ok",
                     "sent_images": sent_count,
-                    "sent_followup": any(k == "text" and t == followup_text for k, t in out_msgs),
+                    "sent_followup": any(m[0] == "text" and m[1] == followup_text for m in out_msgs),
                     "fallback": "none" if products else "text"
                 }
 
