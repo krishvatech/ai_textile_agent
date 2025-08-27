@@ -557,9 +557,10 @@ async def receive_cloud_webhook(request: Request):
         replied_message_id = None
         context_obj = msg.get("context")
         logging.info(f"========= Context Object ===========")
+        # Swipe reply FLow 
         if context_obj and context_obj.get("id"):
             logging.info("="*100)
-            logging.info("Normal Reply to Bot")
+            logging.info("========= Swipe Reply to Bot =========")
             replied_message_id = context_obj.get("id")
             logging.info(f"User replied to message ID: {replied_message_id}")
 
@@ -573,6 +574,8 @@ async def receive_cloud_webhook(request: Request):
 
                     # Persist inbound
                     customer = await get_or_create_customer(db, tenant_id=tenant_id, phone=from_waid)
+                    logging.info("="*100)
+                    logging.info("Customer details :",customer)
                     chat_session = await get_or_open_active_session(db, customer_id=customer.id)
                     await append_transcript_message(
                         db, chat_session, role="user", text=text_msg,
@@ -695,6 +698,7 @@ async def receive_cloud_webhook(request: Request):
                 finally:
                     break
         else:
+            # Normal FLow 
             logging.info("*"*100)
             logging.info("Normal Reply to Bot")
             async for db in get_db():
