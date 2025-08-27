@@ -833,6 +833,16 @@ async def receive_cloud_webhook(request: Request):
                     # Persist inbound
                     customer = await get_or_create_customer(db, tenant_id=tenant_id, phone=from_waid)
                     logging.info(f"========{from_waid}")
+                    transcript = await get_transcript_by_phone(from_waid, db)
+                    messages = _normalize_messages(transcript)
+                    last_assistant = next((m for m in reversed(messages) if m.get("role") == "assistant" and m.get("msg_id")), None)
+                    if last_assistant:
+                        derived_reply_id = last_assistant.get("msg_id")
+                        product_text = find_assistant_text_by_msg_id(messages, derived_reply_id)
+                        product_entities = find_entities_by_msg_id(messages, derived_reply_id)
+                        logging.info("="*20)
+                        logging.info(f"=========Product_text(derived)======== {product_text}")
+                        logging.info(f"=========Product_entities(derived)==== {product_entities}")
                     chat_session = await get_or_open_active_session(db, customer_id=customer.id)
                     await append_transcript_message(
                         db, chat_session, role="user", text=text_msg,
