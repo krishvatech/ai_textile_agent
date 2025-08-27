@@ -642,9 +642,9 @@ async def receive_cloud_webhook(request: Request):
                             continue
                             
                         # NEW: log product details cleanly
-                        details = _product_log_dict(prod)
-                        details["image_url"] = img
-                        logging.info(f"[PRODUCT] Sending product to {from_waid}: {json.dumps(details, ensure_ascii=False)}")
+                        # details = _product_log_dict(prod)
+                        # details["image_url"] = img
+                        # logging.info(f"[PRODUCT] Sending product to {from_waid}: {json.dumps(details, ensure_ascii=False)}")
 
                         mid = await send_whatsapp_image_cloud(
                             to_waid=from_waid,
