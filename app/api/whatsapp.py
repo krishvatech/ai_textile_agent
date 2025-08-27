@@ -534,33 +534,40 @@ def _primary_image_for_product(prod: dict) -> str | None:
             return _normalize_url(u)
     return _normalize_url(prod.get("image_url"))
 
+# --------FInding Entites by reply id --------------
+def find_entities_by_msg_id(messages: list[dict], msg_id: str):
+    """
+    Return the entities saved alongside an assistant message, searching:
+      1) the exact message (meta.entities)
+      2) a companion row with msg_id == f"{msg_id}:entities"
+         (take meta.entities if present, else parse text as JSON)
+    """
+    if not msg_id:
+        return None
 
-# --- Logging helper: build a compact product details dict
-def _product_log_dict(prod: dict) -> dict:
-    def _to_bool(v):
-        if isinstance(v, bool):
-            return v
-        return str(v).strip().lower() in {"true", "1", "yes", "y"}
+    # 1) exact message
+    for m in messages:
+        if m.get("msg_id") == msg_id and m.get("role") == "assistant":
+            ents = (m.get("meta") or {}).get("entities")
+            if ents not in (None, "", [], {}):
+                return ents
 
-    # price fallbacks like in _product_caption
-    price = (prod.get("price") or prod.get("sale_price") or prod.get("selling_price")
-             or prod.get("variant_price") or prod.get("current_price"))
+    # 2) companion ':entities' row
+    ent_id = f"{msg_id}:entities"
+    for m in messages:
+        if m.get("msg_id") == ent_id and m.get("role") == "assistant":
+            ents = (m.get("meta") or {}).get("entities")
+            if ents not in (None, "", [], {}):
+                return ents
+            # fallback: parse the text if it looks like JSON
+            try:
+                t = m.get("text")
+                if isinstance(t, str) and t.strip().startswith("{"):
+                    return json.loads(t)
+            except Exception:
+                pass
 
-    return {
-        "product_id": prod.get("product_id") or prod.get("id"),
-        "variant_id": prod.get("variant_id"),
-        "name": prod.get("name") or prod.get("product_name"),
-        "category": prod.get("category"),
-        "type": prod.get("type"),
-        "fabric": prod.get("fabric"),
-        "color": prod.get("color"),
-        "size": prod.get("size"),
-        "is_rental": _to_bool(prod.get("is_rental")),
-        "price": price,
-        "rental_price": prod.get("rental_price"),
-        "currency": (prod.get("currency") or "INR"),
-        "product_url": _normalize_url(prod.get("product_url") or prod.get("image_url")),
-    }
+    return None
 
 
 @router.post("/webhook")
@@ -661,8 +668,11 @@ async def receive_cloud_webhook(request: Request):
                     transcript = await get_transcript_by_phone(from_waid,db)
                     messages = _normalize_messages(transcript)
                     product_text = find_assistant_text_by_msg_id(messages, replied_message_id)
+                    product_entities = find_entities_by_msg_id(messages, replied_message_id)
                     logging.info("="*20)
                     logging.info(f"=========Product_text======== {product_text}")
+                    logging.info("="*20)
+                    logging.info(f"=========product_entities======== {product_entities}")
                     chat_session = await get_or_open_active_session(db, customer_id=customer.id)
                     await append_transcript_message(
                         db, chat_session, role="user", text=text_msg,
@@ -709,6 +719,7 @@ async def receive_cloud_webhook(request: Request):
                             session_key=f"{tenant_id}:whatsapp:wa:{from_waid}",
                         )
                         reply_text = raw_reply.get("reply_text") if isinstance(raw_reply, dict) else str(raw_reply)
+                        collected_entities = raw_reply.get("collected_entities") if isinstance(raw_reply, dict) else str(raw_reply)
                     except Exception:
                         logging.exception("[CLOUD] AI pipeline failed")
                         reply_text = "Sorry, I'm having trouble. I'll get back to you shortly."
@@ -763,12 +774,35 @@ async def receive_cloud_webhook(request: Request):
                     logging.info(f"============== out Messages :{out_msgs}=================")
                     # --- Persist all outbound messages BEFORE returning
                     for kind, txt, mid in out_msgs:
+                        meta = {"kind": kind, "channel": "cloud_api"}
+                        save_id = mid
+                        save_text = txt
+
+                        # If this is the image we sent, also attach entities in meta
+                        if kind == "image":
+                            if isinstance(collected_entities, (dict, list)):
+                                meta["entities"] = collected_entities
+
+                        # If this is our synthetic "entities" record, give it a unique id and store JSON
+                        if kind == "entities":
+                            base = mid or msg_id  # fall back to inbound id if needed
+                            save_id = f"{base}:entities"
+                            # store entities as compact JSON in text, and also inside meta
+                            if isinstance(txt, (dict, list)):
+                                meta["entities"] = txt
+                                save_text = json.dumps(txt, ensure_ascii=False)
+                            else:
+                                save_text = str(txt)
+
                         await append_transcript_message(
                             db, chat_session,
-                            role="assistant", text=txt, msg_id=mid,  # <-- add msg_id here
+                            role="assistant",
+                            text=save_text,
+                            msg_id=save_id,
                             direction="out",
-                            meta={"kind": kind, "channel": "cloud_api"}
+                            meta=meta,
                         )
+
                     await db.commit()
 
                     return {
@@ -845,6 +879,7 @@ async def receive_cloud_webhook(request: Request):
                             session_key=f"{tenant_id}:whatsapp:wa:{from_waid}",
                         )
                         reply_text = raw_reply.get("reply_text") if isinstance(raw_reply, dict) else str(raw_reply)
+                        collected_entities = raw_reply.get("collected_entities") if isinstance(raw_reply, dict) else str(raw_reply)
                     except Exception:
                         logging.exception("[CLOUD] AI pipeline failed")
                         reply_text = "Sorry, I'm having trouble. I'll get back to you shortly."
@@ -899,12 +934,35 @@ async def receive_cloud_webhook(request: Request):
                     logging.info(f"============== out Messages :{out_msgs}=================")
                     # --- Persist all outbound messages BEFORE returning
                     for kind, txt, mid in out_msgs:
+                        meta = {"kind": kind, "channel": "cloud_api"}
+                        save_id = mid
+                        save_text = txt
+
+                        # If this is the image we sent, also attach entities in meta
+                        if kind == "image":
+                            if isinstance(collected_entities, (dict, list)):
+                                meta["entities"] = collected_entities
+
+                        # If this is our synthetic "entities" record, give it a unique id and store JSON
+                        if kind == "entities":
+                            base = mid or msg_id  # fall back to inbound id if needed
+                            save_id = f"{base}:entities"
+                            # store entities as compact JSON in text, and also inside meta
+                            if isinstance(txt, (dict, list)):
+                                meta["entities"] = txt
+                                save_text = json.dumps(txt, ensure_ascii=False)
+                            else:
+                                save_text = str(txt)
+
                         await append_transcript_message(
                             db, chat_session,
-                            role="assistant", text=txt, msg_id=mid,  # <-- add msg_id here
+                            role="assistant",
+                            text=save_text,
+                            msg_id=save_id,
                             direction="out",
-                            meta={"kind": kind, "channel": "cloud_api"}
+                            meta=meta,
                         )
+
                     await db.commit()
 
                     return {
