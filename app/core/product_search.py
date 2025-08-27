@@ -11,6 +11,8 @@ from pinecone import Pinecone
 import open_clip
 import torch
 import unicodedata
+from app.core.image_clip import get_image_clip_embedding, get_text_clip_embedding
+from app.vector.pinecone_client import get_image_index
 
 # ---------- Setup ----------
 load_dotenv()
@@ -458,4 +460,25 @@ async def fetch_records_by_ids(ids: List[str], index_name: str = TEXT_INDEX_NAME
             out.append(md | {"id": id_})
     return out
 
+async def search_products_by_image(image_url, top_k=5, namespace=NAMESPACE):
+    img_emb = get_image_clip_embedding(image_url)  # This will be 512-dim if using ViT-B-32
+    index = get_image_index()
+    print('index :', index.describe_index_stats())
+    res = index.query(
+        vector=img_emb,
+        top_k=top_k,
+        include_metadata=True,
+        namespace=namespace
+    )
+    print('res..................122522', res)
+    products = []
+    for match in res.get("matches", []):
+        meta = match.get("metadata", {})
+        products.append({
+            "id": meta.get("id", "MISSING"),
+            "product_name": meta.get("product_name", "MISSING"),
+            "image_url": meta.get("image_url", "MISSING"),
+            "score": match.get("score", 0)
+        })
+    return products
 
