@@ -556,7 +556,6 @@ async def receive_cloud_webhook(request: Request):
         
         replied_message_id = None
         context_obj = msg.get("context")
-        logging.info(f"========= Context Object ===========")
         # Swipe reply FLow 
         if context_obj and context_obj.get("id"):
             logging.info("="*100)
