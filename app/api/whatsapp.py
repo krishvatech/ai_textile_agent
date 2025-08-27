@@ -18,7 +18,7 @@ from app.core.chat_persistence import (
     append_transcript_message,
 )
 from app.services.wa_media import download_media_bytes
-from app.services.visual_search import visual_search_bytes_sync, format_matches_for_whatsapp
+from app.services.visual_search import visual_search_bytes_sync, format_matches_for_whatsapp_images
 
 
 # Load environment variables
@@ -861,21 +861,46 @@ async def receive_cloud_webhook(request: Request):
                             # Tenant scope: search only within this tenant (or set to None for all)
                             matches = visual_search_bytes_sync(
                                 img_bytes,
-                                tenant_id=tenant_id,   # you already computed tenant_id in this scope
+                                tenant_id=tenant_id,
                                 top_k=5,
                             )
 
-                            reply_text = format_matches_for_whatsapp(matches, limit=5)
-                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
+                            # Build WhatsApp image messages (uses image_url + caption)
+                            msgs = format_matches_for_whatsapp_images(matches, limit=5)
 
-                            # persist outbound reply in your transcript (optional but recommended)
-                            await append_transcript_message(
-                                db, chat_session,
-                                role="assistant", text=reply_text, msg_id=mid,
-                                direction="out", meta={"kind": "text", "channel": "cloud_api"}
-                            )
+                            out_msgs: list[tuple[str, str, str | None]] = []
+                            sent_count = 0
+
+                            for m in msgs:
+                                if m.get("type") == "image":
+                                    mid = await send_whatsapp_image_cloud(
+                                        to_waid=from_waid,
+                                        image_url=m["image"]["link"],
+                                        caption=m["image"].get("caption", "")
+                                    )
+                                    if mid:
+                                        sent_count += 1
+                                    out_msgs.append(("image", m["image"].get("caption", ""), mid))
+                                else:
+                                    # fallback text (e.g., no results)
+                                    body = (m.get("text") or {}).get("body", "No visually similar items found.")
+                                    mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=body)
+                                    out_msgs.append(("text", body, mid))
+
+                            # Persist outbound replies
+                            for kind, txt, mid in out_msgs:
+                                await append_transcript_message(
+                                    db, chat_session,
+                                    role="assistant",
+                                    text=txt,
+                                    msg_id=mid,
+                                    direction="out",
+                                    meta={"kind": kind, "channel": "cloud_api"}
+                                )
+
                             await db.commit()
-                            return {"status": "ok", "mode": "visual_search"}
+                            return {"status": "ok", "mode": "visual_search", "sent_images": sent_count}
+
                         except Exception:
                             logging.exception("[CLOUD] Visual search failed")
                             await db.rollback()
@@ -887,6 +912,7 @@ async def receive_cloud_webhook(request: Request):
                             )
                             await db.commit()
                             return {"status": "error", "mode": "visual_search_failed"}
+
 
                     # Detect language
                     SUPPORTED_LANGUAGES = ["gu-IN", "hi-IN", "en-IN", "en-US"]
