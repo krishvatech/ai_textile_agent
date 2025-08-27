@@ -450,6 +450,56 @@ async def get_transcript_by_phone(phone_number: str, db):
     return result if isinstance(result, (list, dict)) else []
 
 
+def _normalize_messages(transcript):
+    """
+    Returns a flat list[dict] of messages from whatever structure you stored.
+    Accepts list or dict or JSON string.
+    """
+    if transcript is None:
+        return []
+
+    data = transcript
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            return []
+
+    if isinstance(data, list):
+        return data
+
+    if isinstance(data, dict):
+        # Common containers you might have used
+        for key in ("history", "messages", "items"):
+            val = data.get(key)
+            if isinstance(val, list):
+                return val
+        # If the whole dict is a single message, wrap it
+        if {"role", "msg_id"} <= set(data.keys()):
+            return [data]
+        return []
+
+    return []
+
+def _extract_reply_to_id(msg: dict) -> str | None:
+    """Get reply_to id from message meta or raw.context.id."""
+    # Preferred: your flattened meta
+    reply_to = (msg.get("meta") or {}).get("reply_to")
+    if reply_to:
+        return reply_to
+
+    # Fallback: pull from raw Cloud API context.id if present
+    try:
+        return msg["meta"]["raw"]["entry"][0]["changes"][0]["value"]["messages"][0]["context"]["id"]
+    except Exception:
+        return None
+
+def find_assistant_text_by_msg_id(messages: list[dict], msg_id: str) -> str | None:
+    for m in messages:
+        if m.get("msg_id") == msg_id and m.get("role") == "assistant":
+            return m.get("text")
+    return None
+
 # --- Cloud API Webhook (Meta) ----------------------------------------------
 processed_meta_msg_ids = set()
 
@@ -609,10 +659,16 @@ async def receive_cloud_webhook(request: Request):
                     logging.info(f"========{from_waid}")
                     logging.info("="*100)
                     transcript = await get_transcript_by_phone(from_waid,db)
-                    if transcript:
-                        logging.info("Transcript:\n%s", json.dumps(transcript, ensure_ascii=False, indent=2))
-                    else:
-                        logging.info("Transcript: <empty>")
+                    # meta=transcript.get(msg.get("meta") or {})
+                    # reply_id =meta.get("reply_to")
+                    # if reply_id == replied_message_id:
+                    #     logging.info("="*20)
+                    #     logging.info("============== Replay ID matched ============")
+                    #     logging.info(reply_id)
+                    messages = _normalize_messages(transcript)
+                    product_text = find_assistant_text_by_msg_id(messages, replied_message_id)
+                    logging.info("="*20)
+                    logging.info(f"=========Product_text======== {product_text}")
                     chat_session = await get_or_open_active_session(db, customer_id=customer.id)
                     await append_transcript_message(
                         db, chat_session, role="user", text=text_msg,
@@ -752,7 +808,9 @@ async def receive_cloud_webhook(request: Request):
                     logging.info("="*100)
                     transcript = await get_transcript_by_phone(from_waid,db)
                     if transcript:
-                        logging.info("Transcript:\n%s", json.dumps(transcript, ensure_ascii=False, indent=2))
+                        transcript = json.dumps(transcript, ensure_ascii=False, indent=2)
+                        logging.info("="*20)
+                        logging.info(transcript)
                     else:
                         logging.info("Transcript: <empty>")
                     logging.info("Transcript:\n%s", json.dumps(transcript, ensure_ascii=False, indent=2))
