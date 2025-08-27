@@ -709,6 +709,9 @@ async def receive_cloud_webhook(request: Request):
                             allowed_size=tenant_size,
                             allowed_type=tenant_type,
                         )
+                        logging.info("="*20)
+                        logging.info(f"New ENtities Form the intent type ====== {entities}")
+                        logging.info("="*20)
                         raw_reply = await analyze_message(
                             text=text_msg,
                             tenant_id=tenant_id,
@@ -914,6 +917,9 @@ async def receive_cloud_webhook(request: Request):
                             allowed_size=tenant_size,
                             allowed_type=tenant_type,
                         )
+                        logging.info("="*20)
+                        logging.info(f"New ENtities Form the intent type ====== {entities}")
+                        logging.info("="*20)
                         raw_reply = await analyze_message(
                             text=text_msg,
                             tenant_id=tenant_id,
