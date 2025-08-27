@@ -681,41 +681,6 @@ async def receive_cloud_webhook(request: Request):
                         db, chat_session, role="user", text=text_msg,
                         msg_id=msg_id, direction="in", meta={"raw": data, "channel": "cloud_api","reply_to": replied_message_id}
                     )
-                    if mtype == "image" and "image" in msg:
-                        try:
-                            media_id = msg["image"].get("id")  # e.g. "640153432482263"
-                            img_bytes = await download_media_bytes(media_id)
-
-                            # Tenant scope: search only within this tenant (or set to None for all)
-                            matches = visual_search_bytes_sync(
-                                img_bytes,
-                                tenant_id=tenant_id,   # you already computed tenant_id in this scope
-                                top_k=5,
-                                modality="image"       # compare against image vectors only
-                            )
-
-                            reply_text = format_matches_for_whatsapp(matches, limit=5)
-                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
-
-                            # persist outbound reply in your transcript (optional but recommended)
-                            await append_transcript_message(
-                                db, chat_session,
-                                role="assistant", text=reply_text, msg_id=mid,
-                                direction="out", meta={"kind": "text", "channel": "cloud_api"}
-                            )
-                            await db.commit()
-                            return {"status": "ok", "mode": "visual_search"}
-                        except Exception:
-                            logging.exception("[CLOUD] Visual search failed")
-                            await db.rollback()
-                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body="Sorry, I couldn't read that image.")
-                            await append_transcript_message(
-                                db, chat_session,
-                                role="assistant", text="(visual search error)", msg_id=mid,
-                                direction="out", meta={"kind": "text", "channel": "cloud_api"}
-                            )
-                            await db.commit()
-                            return {"status": "error", "mode": "visual_search_failed"}
                     # Detect language
                     SUPPORTED_LANGUAGES = ["gu-IN", "hi-IN", "en-IN", "en-US"]
                     current_language = customer.preferred_language or "en-IN"
@@ -885,6 +850,41 @@ async def receive_cloud_webhook(request: Request):
                         db, chat_session, role="user", text=text_msg,
                         msg_id=msg_id, direction="in", meta={"raw": data, "channel": "cloud_api","reply_to": replied_message_id}
                     )
+                    if mtype == "image" and "image" in msg:
+                        try:
+                            media_id = msg["image"].get("id")  # e.g. "640153432482263"
+                            img_bytes = await download_media_bytes(media_id)
+
+                            # Tenant scope: search only within this tenant (or set to None for all)
+                            matches = visual_search_bytes_sync(
+                                img_bytes,
+                                tenant_id=tenant_id,   # you already computed tenant_id in this scope
+                                top_k=5,
+                                modality="image"       # compare against image vectors only
+                            )
+
+                            reply_text = format_matches_for_whatsapp(matches, limit=5)
+                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
+
+                            # persist outbound reply in your transcript (optional but recommended)
+                            await append_transcript_message(
+                                db, chat_session,
+                                role="assistant", text=reply_text, msg_id=mid,
+                                direction="out", meta={"kind": "text", "channel": "cloud_api"}
+                            )
+                            await db.commit()
+                            return {"status": "ok", "mode": "visual_search"}
+                        except Exception:
+                            logging.exception("[CLOUD] Visual search failed")
+                            await db.rollback()
+                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body="Sorry, I couldn't read that image.")
+                            await append_transcript_message(
+                                db, chat_session,
+                                role="assistant", text="(visual search error)", msg_id=mid,
+                                direction="out", meta={"kind": "text", "channel": "cloud_api"}
+                            )
+                            await db.commit()
+                            return {"status": "error", "mode": "visual_search_failed"}
 
                     # Detect language
                     SUPPORTED_LANGUAGES = ["gu-IN", "hi-IN", "en-IN", "en-US"]
