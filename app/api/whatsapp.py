@@ -558,140 +558,275 @@ async def receive_cloud_webhook(request: Request):
         context_obj = msg.get("context")
         logging.info(f"========= Context Object ===========")
         if context_obj and context_obj.get("id"):
-            logging.info(f"========= reply started ===========")
+            logging.info("="*100)
+            logging.info("Normal Reply to Bot")
             replied_message_id = context_obj.get("id")
             logging.info(f"User replied to message ID: {replied_message_id}")
 
-        async for db in get_db():
-            try:
-                tenant_id = await get_tenant_id_by_phone(business_number, db)
-                tenant_name = await get_tenant_name_by_phone(business_number, db) or "Your Shop"
-                if not tenant_id:
-                    logging.error(f"[CLOUD] No tenant found for business number: '{business_number}'")
-                    return {"status": "no_tenant"}
-
-                # Persist inbound
-                customer = await get_or_create_customer(db, tenant_id=tenant_id, phone=from_waid)
-                chat_session = await get_or_open_active_session(db, customer_id=customer.id)
-                await append_transcript_message(
-                    db, chat_session, role="user", text=text_msg,
-                    msg_id=msg_id, direction="in", meta={"raw": data, "channel": "cloud_api","reply_to": replied_message_id}
-                )
-
-                # Detect language
-                SUPPORTED_LANGUAGES = ["gu-IN", "hi-IN", "en-IN", "en-US"]
-                current_language = customer.preferred_language or "en-IN"
-                if current_language not in SUPPORTED_LANGUAGES:
-                    detected = await detect_language(text_msg, "en-IN")
-                    current_language = detected[0] if isinstance(detected, tuple) else detected
-                    await update_customer_language(db, customer.id, current_language)
-
-                # Tenant filters
-                tenant_categories = await get_tenant_category_by_phone(business_number, db)
-                tenant_fabric    = await get_tenant_fabric_by_phone(business_number, db)
-                tenant_color     = await get_tenant_color_by_phone(business_number, db)
-                tenant_occasion  = await get_tenant_occasion_by_phone(business_number, db)
-                tenant_size  = await get_tenant_size_by_phone(business_number, db)
-                tenant_type  = await get_tenant_type_by_phone(business_number, db)
-
-                # --- AI pipeline
-                raw_reply = None
+            async for db in get_db():
                 try:
-                    intent_type, entities, confidence = await detect_textile_intent_openai(
-                        text_msg, current_language,
-                        allowed_categories=tenant_categories,
-                        allowed_fabric=tenant_fabric,
-                        allowed_color=tenant_color,
-                        allowed_occasion=tenant_occasion,
-                        allowed_size=tenant_size,
-                        allowed_type=tenant_type,
-                    )
-                    raw_reply = await analyze_message(
-                        text=text_msg,
-                        tenant_id=tenant_id,
-                        tenant_name=tenant_name,
-                        language=current_language,
-                        intent=intent_type,
-                        new_entities=entities,
-                        intent_confidence=confidence,
-                        mode="chat",
-                        session_key=f"{tenant_id}:whatsapp:wa:{from_waid}",
-                    )
-                    reply_text = raw_reply.get("reply_text") if isinstance(raw_reply, dict) else str(raw_reply)
-                except Exception:
-                    logging.exception("[CLOUD] AI pipeline failed")
-                    reply_text = "Sorry, I'm having trouble. I'll get back to you shortly."
+                    tenant_id = await get_tenant_id_by_phone(business_number, db)
+                    tenant_name = await get_tenant_name_by_phone(business_number, db) or "Your Shop"
+                    if not tenant_id:
+                        logging.error(f"[CLOUD] No tenant found for business number: '{business_number}'")
+                        return {"status": "no_tenant"}
 
-                print("reply=", reply_text)
-
-                                # --- Safely extract followup + media/products
-                raw_obj = raw_reply if isinstance(raw_reply, dict) else {}
-                followup_text = (raw_obj.get("followup_reply") or "").strip() or None
-                print("Followup_Question = ",followup_text)
-                products      = (raw_obj.get("pinecone_data") or [])[:5]  # max 5
-                # media_urls  = raw_obj.get("media") or []  # (unused here)
-
-                sent_count = 0
-                out_msgs: list[tuple[str, str, str | None]] = []
-
-                # If we have products: send each image with caption, then one follow-up
-                if products:
-                    for prod in products:
-                        img = _primary_image_for_product(prod)
-                        if not img:
-                            continue
-                            
-                        # NEW: log product details cleanly
-                        # details = _product_log_dict(prod)
-                        # details["image_url"] = img
-                        # logging.info(f"[PRODUCT] Sending product to {from_waid}: {json.dumps(details, ensure_ascii=False)}")
-
-                        mid = await send_whatsapp_image_cloud(
-                            to_waid=from_waid,
-                            image_url=img,
-                            caption=_product_caption(prod)
-                        )
-                        if mid:
-                            sent_count += 1
-                            logging.info(f"[PRODUCT] Sent product message_id={mid} to {from_waid}")
-                        
-                        out_msgs.append(("image", _product_caption(prod), mid))
-
-                    if followup_text:
-                        await asyncio.sleep(1.0)
-                        mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
-                        out_msgs.append(("text", followup_text, mid))
-                else:
-                    if reply_text:
-                        mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
-                        out_msgs.append(("text", reply_text, mid))
-                    if followup_text:
-                        mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
-                        out_msgs.append(("text", followup_text, mid))
-                
-                logging.info(f"============== out Messages :{out_msgs}=================")
-                # --- Persist all outbound messages BEFORE returning
-                for kind, txt, mid in out_msgs:
+                    # Persist inbound
+                    customer = await get_or_create_customer(db, tenant_id=tenant_id, phone=from_waid)
+                    chat_session = await get_or_open_active_session(db, customer_id=customer.id)
                     await append_transcript_message(
-                        db, chat_session,
-                        role="assistant", text=txt, msg_id=mid,  # <-- add msg_id here
-                        direction="out",
-                        meta={"kind": kind, "channel": "cloud_api"}
+                        db, chat_session, role="user", text=text_msg,
+                        msg_id=msg_id, direction="in", meta={"raw": data, "channel": "cloud_api","reply_to": replied_message_id}
                     )
-                await db.commit()
 
-                return {
-                    "status": "ok",
-                    "sent_images": sent_count,
-                    "sent_followup": any(m[0] == "text" and m[1] == followup_text for m in out_msgs),
-                    "fallback": "none" if products else "text"
-                }
+                    # Detect language
+                    SUPPORTED_LANGUAGES = ["gu-IN", "hi-IN", "en-IN", "en-US"]
+                    current_language = customer.preferred_language or "en-IN"
+                    if current_language not in SUPPORTED_LANGUAGES:
+                        detected = await detect_language(text_msg, "en-IN")
+                        current_language = detected[0] if isinstance(detected, tuple) else detected
+                        await update_customer_language(db, customer.id, current_language)
 
-            except Exception:
-                logging.exception("[CLOUD] Webhook DB flow failed; rolling back")
-                await db.rollback()
-                return {"status": "error"}
-            finally:
-                break
+                    # Tenant filters
+                    tenant_categories = await get_tenant_category_by_phone(business_number, db)
+                    tenant_fabric    = await get_tenant_fabric_by_phone(business_number, db)
+                    tenant_color     = await get_tenant_color_by_phone(business_number, db)
+                    tenant_occasion  = await get_tenant_occasion_by_phone(business_number, db)
+                    tenant_size  = await get_tenant_size_by_phone(business_number, db)
+                    tenant_type  = await get_tenant_type_by_phone(business_number, db)
+
+                    # --- AI pipeline
+                    raw_reply = None
+                    try:
+                        intent_type, entities, confidence = await detect_textile_intent_openai(
+                            text_msg, current_language,
+                            allowed_categories=tenant_categories,
+                            allowed_fabric=tenant_fabric,
+                            allowed_color=tenant_color,
+                            allowed_occasion=tenant_occasion,
+                            allowed_size=tenant_size,
+                            allowed_type=tenant_type,
+                        )
+                        raw_reply = await analyze_message(
+                            text=text_msg,
+                            tenant_id=tenant_id,
+                            tenant_name=tenant_name,
+                            language=current_language,
+                            intent=intent_type,
+                            new_entities=entities,
+                            intent_confidence=confidence,
+                            mode="chat",
+                            session_key=f"{tenant_id}:whatsapp:wa:{from_waid}",
+                        )
+                        reply_text = raw_reply.get("reply_text") if isinstance(raw_reply, dict) else str(raw_reply)
+                    except Exception:
+                        logging.exception("[CLOUD] AI pipeline failed")
+                        reply_text = "Sorry, I'm having trouble. I'll get back to you shortly."
+
+                    print("reply=", reply_text)
+
+                                    # --- Safely extract followup + media/products
+                    raw_obj = raw_reply if isinstance(raw_reply, dict) else {}
+                    followup_text = (raw_obj.get("followup_reply") or "").strip() or None
+                    print("Followup_Question = ",followup_text)
+                    products      = (raw_obj.get("pinecone_data") or [])[:5]  # max 5
+                    # media_urls  = raw_obj.get("media") or []  # (unused here)
+
+                    sent_count = 0
+                    out_msgs: list[tuple[str, str, str | None]] = []
+
+                    # If we have products: send each image with caption, then one follow-up
+                    if products:
+                        for prod in products:
+                            img = _primary_image_for_product(prod)
+                            if not img:
+                                continue
+                                
+                            # NEW: log product details cleanly
+                            # details = _product_log_dict(prod)
+                            # details["image_url"] = img
+                            # logging.info(f"[PRODUCT] Sending product to {from_waid}: {json.dumps(details, ensure_ascii=False)}")
+
+                            mid = await send_whatsapp_image_cloud(
+                                to_waid=from_waid,
+                                image_url=img,
+                                caption=_product_caption(prod)
+                            )
+                            if mid:
+                                sent_count += 1
+                                logging.info(f"[PRODUCT] Sent product message_id={mid} to {from_waid}")
+                            
+                            out_msgs.append(("image", _product_caption(prod), mid))
+
+                        if followup_text:
+                            await asyncio.sleep(1.0)
+                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
+                            out_msgs.append(("text", followup_text, mid))
+                    else:
+                        if reply_text:
+                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
+                            out_msgs.append(("text", reply_text, mid))
+                        if followup_text:
+                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
+                            out_msgs.append(("text", followup_text, mid))
+                    
+                    logging.info(f"============== out Messages :{out_msgs}=================")
+                    # --- Persist all outbound messages BEFORE returning
+                    for kind, txt, mid in out_msgs:
+                        await append_transcript_message(
+                            db, chat_session,
+                            role="assistant", text=txt, msg_id=mid,  # <-- add msg_id here
+                            direction="out",
+                            meta={"kind": kind, "channel": "cloud_api"}
+                        )
+                    await db.commit()
+
+                    return {
+                        "status": "ok",
+                        "sent_images": sent_count,
+                        "sent_followup": any(m[0] == "text" and m[1] == followup_text for m in out_msgs),
+                        "fallback": "none" if products else "text"
+                    }
+
+                except Exception:
+                    logging.exception("[CLOUD] Webhook DB flow failed; rolling back")
+                    await db.rollback()
+                    return {"status": "error"}
+                finally:
+                    break
+        else:
+            logging.info("*"*100)
+            logging.info("Normal Reply to Bot")
+            async for db in get_db():
+                try:
+                    tenant_id = await get_tenant_id_by_phone(business_number, db)
+                    tenant_name = await get_tenant_name_by_phone(business_number, db) or "Your Shop"
+                    if not tenant_id:
+                        logging.error(f"[CLOUD] No tenant found for business number: '{business_number}'")
+                        return {"status": "no_tenant"}
+
+                    # Persist inbound
+                    customer = await get_or_create_customer(db, tenant_id=tenant_id, phone=from_waid)
+                    chat_session = await get_or_open_active_session(db, customer_id=customer.id)
+                    await append_transcript_message(
+                        db, chat_session, role="user", text=text_msg,
+                        msg_id=msg_id, direction="in", meta={"raw": data, "channel": "cloud_api","reply_to": replied_message_id}
+                    )
+
+                    # Detect language
+                    SUPPORTED_LANGUAGES = ["gu-IN", "hi-IN", "en-IN", "en-US"]
+                    current_language = customer.preferred_language or "en-IN"
+                    if current_language not in SUPPORTED_LANGUAGES:
+                        detected = await detect_language(text_msg, "en-IN")
+                        current_language = detected[0] if isinstance(detected, tuple) else detected
+                        await update_customer_language(db, customer.id, current_language)
+
+                    # Tenant filters
+                    tenant_categories = await get_tenant_category_by_phone(business_number, db)
+                    tenant_fabric    = await get_tenant_fabric_by_phone(business_number, db)
+                    tenant_color     = await get_tenant_color_by_phone(business_number, db)
+                    tenant_occasion  = await get_tenant_occasion_by_phone(business_number, db)
+                    tenant_size  = await get_tenant_size_by_phone(business_number, db)
+                    tenant_type  = await get_tenant_type_by_phone(business_number, db)
+
+                    # --- AI pipeline
+                    raw_reply = None
+                    try:
+                        intent_type, entities, confidence = await detect_textile_intent_openai(
+                            text_msg, current_language,
+                            allowed_categories=tenant_categories,
+                            allowed_fabric=tenant_fabric,
+                            allowed_color=tenant_color,
+                            allowed_occasion=tenant_occasion,
+                            allowed_size=tenant_size,
+                            allowed_type=tenant_type,
+                        )
+                        raw_reply = await analyze_message(
+                            text=text_msg,
+                            tenant_id=tenant_id,
+                            tenant_name=tenant_name,
+                            language=current_language,
+                            intent=intent_type,
+                            new_entities=entities,
+                            intent_confidence=confidence,
+                            mode="chat",
+                            session_key=f"{tenant_id}:whatsapp:wa:{from_waid}",
+                        )
+                        reply_text = raw_reply.get("reply_text") if isinstance(raw_reply, dict) else str(raw_reply)
+                    except Exception:
+                        logging.exception("[CLOUD] AI pipeline failed")
+                        reply_text = "Sorry, I'm having trouble. I'll get back to you shortly."
+
+                    print("reply=", reply_text)
+
+                                    # --- Safely extract followup + media/products
+                    raw_obj = raw_reply if isinstance(raw_reply, dict) else {}
+                    followup_text = (raw_obj.get("followup_reply") or "").strip() or None
+                    print("Followup_Question = ",followup_text)
+                    products      = (raw_obj.get("pinecone_data") or [])[:5]  # max 5
+                    # media_urls  = raw_obj.get("media") or []  # (unused here)
+
+                    sent_count = 0
+                    out_msgs: list[tuple[str, str, str | None]] = []
+
+                    # If we have products: send each image with caption, then one follow-up
+                    if products:
+                        for prod in products:
+                            img = _primary_image_for_product(prod)
+                            if not img:
+                                continue
+                                
+                            # NEW: log product details cleanly
+                            # details = _product_log_dict(prod)
+                            # details["image_url"] = img
+                            # logging.info(f"[PRODUCT] Sending product to {from_waid}: {json.dumps(details, ensure_ascii=False)}")
+
+                            mid = await send_whatsapp_image_cloud(
+                                to_waid=from_waid,
+                                image_url=img,
+                                caption=_product_caption(prod)
+                            )
+                            if mid:
+                                sent_count += 1
+                                logging.info(f"[PRODUCT] Sent product message_id={mid} to {from_waid}")
+                            
+                            out_msgs.append(("image", _product_caption(prod), mid))
+
+                        if followup_text:
+                            await asyncio.sleep(1.0)
+                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
+                            out_msgs.append(("text", followup_text, mid))
+                    else:
+                        if reply_text:
+                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
+                            out_msgs.append(("text", reply_text, mid))
+                        if followup_text:
+                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
+                            out_msgs.append(("text", followup_text, mid))
+                    
+                    logging.info(f"============== out Messages :{out_msgs}=================")
+                    # --- Persist all outbound messages BEFORE returning
+                    for kind, txt, mid in out_msgs:
+                        await append_transcript_message(
+                            db, chat_session,
+                            role="assistant", text=txt, msg_id=mid,  # <-- add msg_id here
+                            direction="out",
+                            meta={"kind": kind, "channel": "cloud_api"}
+                        )
+                    await db.commit()
+
+                    return {
+                        "status": "ok",
+                        "sent_images": sent_count,
+                        "sent_followup": any(m[0] == "text" and m[1] == followup_text for m in out_msgs),
+                        "fallback": "none" if products else "text"
+                    }
+
+                except Exception:
+                    logging.exception("[CLOUD] Webhook DB flow failed; rolling back")
+                    await db.rollback()
+                    return {"status": "error"}
+                finally:
+                    break
 
     return {"status": "ok"}
