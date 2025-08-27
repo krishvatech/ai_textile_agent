@@ -575,7 +575,6 @@ async def receive_cloud_webhook(request: Request):
                     customer = await get_or_create_customer(db, tenant_id=tenant_id, phone=from_waid)
                     logging.info("="*100)
                     logging.info(f"========{from_waid}")
-                    logging.info(f"Customer details : {json.dumps(customer, ensure_ascii=False)}")
                     logging.info("="*100)
                     chat_session = await get_or_open_active_session(db, customer_id=customer.id)
                     await append_transcript_message(
