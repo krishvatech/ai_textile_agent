@@ -572,6 +572,30 @@ def find_entities_by_msg_id(messages: list[dict], msg_id: str):
 
     return None
 
+# -----------merge Entitie sfor reply message
+def _merge_entities(base: dict | None, overlay: dict | None, override: bool = False) -> dict:
+    """
+    Merge overlay into base.
+    - If override=False (default): only fill when base[key] is empty/None/""
+    - If override=True: overlay overwrites base for matching keys
+    """
+    if not isinstance(base, dict):
+        base = {}
+    if not isinstance(overlay, dict):
+        return base
+
+    merged = dict(base)
+    for k, v in overlay.items():
+        if v in (None, "", [], {}):
+            continue
+        if override:
+            merged[k] = v
+        else:
+            if k not in merged or merged[k] in (None, "", [], {}):
+                merged[k] = v
+    return merged
+
+
 
 @router.post("/webhook")
 async def receive_cloud_webhook(request: Request):
@@ -709,6 +733,9 @@ async def receive_cloud_webhook(request: Request):
                             allowed_size=tenant_size,
                             allowed_type=tenant_type,
                         )
+                        if product_entities:
+                            entities = _merge_entities(entities, product_entities)   # override=False (fill only)
+                            logging.info(f"[ENTITIES] merged with product_entities: {entities}")
                         logging.info("="*20)
                         logging.info(f"New ENtities Form the intent type ====== {entities}")
                         logging.info("="*20)
@@ -942,6 +969,9 @@ async def receive_cloud_webhook(request: Request):
                             allowed_size=tenant_size,
                             allowed_type=tenant_type,
                         )
+                        if product_entities:
+                            entities = _merge_entities(entities, product_entities)   # override=False (fill only)
+                            logging.info(f"[ENTITIES] merged with product_entities (normal flow): {entities}")
                         logging.info("="*20)
                         logging.info(f"New ENtities Form the intent type ====== {entities}")
                         logging.info("="*20)
