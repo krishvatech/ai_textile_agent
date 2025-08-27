@@ -417,6 +417,38 @@ async def get_tenant_products_by_phone(phone_number: str, db):
     rows = (await db.execute(q, {"phone": phone_number})).fetchall() or []
     return [(r[0], r[1]) for r in rows]
 
+# ---------- Get Transcript from DB Via Whastapp Number -------------
+async def get_transcript_by_phone(phone_number: str, db):
+    query = text("""
+        WITH c AS (
+            SELECT id
+            FROM customers
+            WHERE phone = :phone
+              AND is_active = TRUE
+            LIMIT 1
+        )
+        SELECT cs.transcript
+        FROM chat_sessions cs, c
+        WHERE cs.customer_id = c.id
+        ORDER BY cs.started_at DESC
+        LIMIT 1
+    """)
+    result = await db.execute(query, {"phone": phone_number})
+    result = result.scalar_one_or_none()
+    if result is None:
+        return []
+    
+    # If stored as text, decode; if JSONB, driver already gives list/dict
+    if isinstance(result, (bytes, bytearray)):
+        result = result.decode("utf-8", errors="ignore")
+    if isinstance(result, str):
+        try:
+            return json.loads(result)
+        except Exception:
+            return []
+
+    return result if isinstance(result, (list, dict)) else []
+
 
 # --- Cloud API Webhook (Meta) ----------------------------------------------
 processed_meta_msg_ids = set()
@@ -576,6 +608,11 @@ async def receive_cloud_webhook(request: Request):
                     logging.info("="*100)
                     logging.info(f"========{from_waid}")
                     logging.info("="*100)
+                    transcript = await get_transcript_by_phone(from_waid,db)
+                    if transcript:
+                        logging.info("Transcript:\n%s", json.dumps(transcript, ensure_ascii=False, indent=2))
+                    else:
+                        logging.info("Transcript: <empty>")
                     chat_session = await get_or_open_active_session(db, customer_id=customer.id)
                     await append_transcript_message(
                         db, chat_session, role="user", text=text_msg,
@@ -711,6 +748,14 @@ async def receive_cloud_webhook(request: Request):
 
                     # Persist inbound
                     customer = await get_or_create_customer(db, tenant_id=tenant_id, phone=from_waid)
+                    logging.info(f"========{from_waid}")
+                    logging.info("="*100)
+                    transcript = await get_transcript_by_phone(from_waid,db)
+                    if transcript:
+                        logging.info("Transcript:\n%s", json.dumps(transcript, ensure_ascii=False, indent=2))
+                    else:
+                        logging.info("Transcript: <empty>")
+                    logging.info("Transcript:\n%s", json.dumps(transcript, ensure_ascii=False, indent=2))
                     chat_session = await get_or_open_active_session(db, customer_id=customer.id)
                     await append_transcript_message(
                         db, chat_session, role="user", text=text_msg,
