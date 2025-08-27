@@ -863,7 +863,6 @@ async def receive_cloud_webhook(request: Request):
                                 img_bytes,
                                 tenant_id=tenant_id,   # you already computed tenant_id in this scope
                                 top_k=5,
-                                modality="image"       # compare against image vectors only
                             )
 
                             reply_text = format_matches_for_whatsapp(matches, limit=5)
