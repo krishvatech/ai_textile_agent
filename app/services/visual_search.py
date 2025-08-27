@@ -5,6 +5,7 @@ from PIL import Image
 import torch, open_clip
 from pinecone import Pinecone
 import requests
+from typing import Tuple
 from dotenv import load_dotenv
 load_dotenv()
 PINECONE_API_KEY   = os.getenv("PINECONE_API_KEY")
@@ -106,3 +107,36 @@ def send_whatsapp_messages(to_wa_id: str, messages: List[Dict[str, Any]]) -> Non
         payload = {**base, **msg}
         r = requests.post(url, headers=headers, json=payload, timeout=30)
         r.raise_for_status()
+        
+def group_matches_by_product(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Collapse matches so we keep only one variant per (tenant_id, product_id).
+    Tie-break: prefer available_stock > 0, then higher score, then having image_url.
+    """
+    best: Dict[Tuple[Any, Any], Dict[str, Any]] = {}
+    for m in matches or []:
+        md = (m.get("metadata") or {})
+        key = (md.get("tenant_id"), md.get("product_id"))
+        prev = best.get(key)
+
+        # Build a ranking tuple for current and previous
+        curr_rank = (
+            (md.get("available_stock") or 0) > 0,
+            float(m.get("score") or 0.0),
+            bool(md.get("image_url")),
+        )
+        if prev is None:
+            best[key] = m
+        else:
+            pmd = (prev.get("metadata") or {})
+            prev_rank = (
+                (pmd.get("available_stock") or 0) > 0,
+                float(prev.get("score") or 0.0),
+                bool(pmd.get("image_url")),
+            )
+            if curr_rank > prev_rank:
+                best[key] = m
+
+    # Return sorted by score desc
+    out = list(best.values())
+    out.sort(key=lambda x: float(x.get("score") or 0.0), reverse=True)
+    return out

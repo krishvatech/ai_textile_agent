@@ -18,7 +18,7 @@ from app.core.chat_persistence import (
     append_transcript_message,
 )
 from app.services.wa_media import download_media_bytes
-from app.services.visual_search import visual_search_bytes_sync, format_matches_for_whatsapp_images
+from app.services.visual_search import visual_search_bytes_sync, format_matches_for_whatsapp_images,group_matches_by_product
 
 
 # Load environment variables
@@ -889,10 +889,11 @@ async def receive_cloud_webhook(request: Request):
                             matches = visual_search_bytes_sync(
                                 img_bytes,
                                 tenant_id=tenant_id,
-                                top_k=5,
+                                top_k=20,
                             )
-
+                            matches = group_matches_by_product(matches)
                             # Build WhatsApp image messages (uses image_url + caption)
+                            matches = matches[:5]  
                             msgs = format_matches_for_whatsapp_images(matches, limit=5)
 
                             out_msgs: list[tuple[str, str, str | None]] = []
