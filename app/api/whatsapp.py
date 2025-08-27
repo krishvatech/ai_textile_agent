@@ -659,12 +659,6 @@ async def receive_cloud_webhook(request: Request):
                     logging.info(f"========{from_waid}")
                     logging.info("="*100)
                     transcript = await get_transcript_by_phone(from_waid,db)
-                    # meta=transcript.get(msg.get("meta") or {})
-                    # reply_id =meta.get("reply_to")
-                    # if reply_id == replied_message_id:
-                    #     logging.info("="*20)
-                    #     logging.info("============== Replay ID matched ============")
-                    #     logging.info(reply_id)
                     messages = _normalize_messages(transcript)
                     product_text = find_assistant_text_by_msg_id(messages, replied_message_id)
                     logging.info("="*20)
@@ -805,15 +799,6 @@ async def receive_cloud_webhook(request: Request):
                     # Persist inbound
                     customer = await get_or_create_customer(db, tenant_id=tenant_id, phone=from_waid)
                     logging.info(f"========{from_waid}")
-                    logging.info("="*100)
-                    transcript = await get_transcript_by_phone(from_waid,db)
-                    if transcript:
-                        transcript = json.dumps(transcript, ensure_ascii=False, indent=2)
-                        logging.info("="*20)
-                        logging.info(transcript)
-                    else:
-                        logging.info("Transcript: <empty>")
-                    logging.info("Transcript:\n%s", json.dumps(transcript, ensure_ascii=False, indent=2))
                     chat_session = await get_or_open_active_session(db, customer_id=customer.id)
                     await append_transcript_message(
                         db, chat_session, role="user", text=text_msg,
