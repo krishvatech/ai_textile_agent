@@ -5,9 +5,11 @@ from PIL import Image
 import torch, open_clip
 from pinecone import Pinecone
 
+from dotenv import load_dotenv
+load_dotenv()
 PINECONE_API_KEY   = os.getenv("PINECONE_API_KEY")
-PINECONE_INDEX     = os.getenv("PINECONE_INDEX", "ai-textile-agent")
-PINECONE_NAMESPACE = os.getenv("PINECONE_NAMESPACE", "default")
+PINECONE_INDEX     = os.getenv("PINECONE_INDEX", "textile-products")
+PINECONE_NAMESPACE = os.getenv("PINECONE_NAMESPACE", "ns1")
 MODEL_NAME_IMAGE   = "ViT-B-32-quickgelu"
 
 if not PINECONE_API_KEY:
@@ -42,21 +44,19 @@ def embed_image_bytes(image_bytes: bytes) -> List[float]:
         feats = feats / feats.norm(dim=-1, keepdim=True)
     return feats[0].cpu().numpy().astype("float32").tolist()
 
-def _build_filter(tenant_id: Optional[int], modality: str = "image") -> Optional[Dict[str, Any]]:
+def _build_filter(tenant_id: Optional[int]) -> Optional[Dict[str, Any]]:
     f: Dict[str, Any] = {}
     if tenant_id is not None:
         f["tenant_id"] = {"$eq": int(tenant_id)}
-    if modality in ("image", "text"):
-        f["modality"] = {"$eq": modality}
     return f or None
 
 def visual_search_bytes_sync(image_bytes: bytes, *, tenant_id: Optional[int] = None,
-                             top_k: int = 12, modality: str = "image") -> List[Dict[str, Any]]:
+                             top_k: int = 12) -> List[Dict[str, Any]]:
     index, _, _ = _ensure_backends()
     vec = embed_image_bytes(image_bytes)
     res = index.query(
         vector=vec, top_k=int(top_k), include_metadata=True,
-        namespace=PINECONE_NAMESPACE, filter=_build_filter(tenant_id, modality)
+        namespace=PINECONE_NAMESPACE, filter=_build_filter(tenant_id)
     )
     return (res or {}).get("matches") or []
 

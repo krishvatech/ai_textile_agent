@@ -1,7 +1,9 @@
 import os
 import httpx
+from dotenv import load_dotenv
+load_dotenv()
 
-META_TOKEN = os.getenv("META_CLOUD_API_TOKEN") or os.getenv("WHATSAPP_TOKEN") or ""
+META_TOKEN = os.getenv("WHATSAPP_TOKEN")
 GRAPH_BASE = os.getenv("GRAPH_BASE", "https://graph.facebook.com")
 GRAPH_VER  = os.getenv("GRAPH_VER", "v20.0")
 
