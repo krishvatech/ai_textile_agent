@@ -849,6 +849,14 @@ async def receive_cloud_webhook(request: Request):
                         )
 
                         reply_text = raw_reply.get("reply_text") if isinstance(raw_reply, dict) else str(raw_reply)
+                        # Personalize greeting once the AI says it's a greeting
+                        if isinstance(raw_reply, dict) and raw_reply.get("intent_type") == "greeting":
+                            person = (getattr(customer, "name", None) or sender_name or "").strip()
+                            reply_text = (
+                                f"Hello {person} How can I assist you today?"
+                                if person else "Hello! How can I assist you today?"
+                            )
+
                         collected_entities = raw_reply.get("collected_entities") if isinstance(raw_reply, dict) else {}
                     except Exception:
                         logging.exception("[CLOUD] AI pipeline failed")
@@ -1039,6 +1047,14 @@ async def receive_cloud_webhook(request: Request):
                                 session_key=f"{tenant_id}:whatsapp:wa:{from_waid}",
                             )
                             reply_text         = raw_reply.get("reply_text") if isinstance(raw_reply, dict) else str(raw_reply)
+                            # Personalize greeting once the AI says it's a greeting
+                            if isinstance(raw_reply, dict) and raw_reply.get("intent_type") == "greeting":
+                                person = (getattr(customer, "name", None) or sender_name or "").strip()
+                                reply_text = (
+                                    f"Hello {person} How can I assist you today?"
+                                    if person else "Hello! How can I assist you today?"
+                                )
+
                             collected_entities = raw_reply.get("collected_entities") if isinstance(raw_reply, dict) else None
                         except Exception:
                             logging.exception("[CLOUD] AI pipeline failed")

@@ -18,7 +18,9 @@ from app.core.asked_now_detector import detect_requested_attributes_async
 from app.core.asked_now_detector import detect_requested_attributes_async
 import json
 import re
-import http
+import httpx
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 from datetime import date, datetime, timedelta, timezone
 from datetime import date as _date  # avoid touching globals
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -985,9 +987,6 @@ def filter_non_empty_entities(entities: dict) -> dict:
         return {}
     return {k: v for k, v in entities.items() if v not in (None, "", [], {})}
 
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import text
-
 DEPT_SET = {"women","men","girls","boys","kids"}
 
 async def db_type_for_category(db: AsyncSession, tenant_id: int, category: str) -> str | None:
@@ -1156,7 +1155,13 @@ async def analyze_message(
         intent_type = "availability_check"
     # --- greeting
     if intent_type == "greeting":
-        reply = "Hello! How can I assist you today?"
+        nm = None
+        try:
+            nm = (new_entities or {}).get("user_name") or (new_entities or {}).get("name")
+        except Exception:
+            nm = None
+        nm = (nm or "").strip()
+        reply = f"Hello {nm} How can I assist you today?" if nm else "Hello! How can I assist you today?"
         history.append({"role": "assistant", "content": reply})
         _commit()
         return {
@@ -1167,6 +1172,7 @@ async def analyze_message(
             "history": history,
             "collected_entities": acc_entities
         }
+
 
     elif intent_type == "product_search":
         # -------------------------------
