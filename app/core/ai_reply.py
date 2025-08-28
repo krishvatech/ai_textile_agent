@@ -1123,17 +1123,15 @@ async def analyze_message(
             intent_type = intent_type or "availability_check"
 
     # Optional: plain “25” as follow-up → treat as end date if start exists, else start date
-    if not raw_new_entities.get("start_date") and not raw_new_entities.get("end_date"):
+    expecting_end = bool((prev_entities or {}).get("start_date") and not (prev_entities or {}).get("end_date"))
+    if expecting_end and not raw_new_entities.get("start_date") and not raw_new_entities.get("end_date"):
         only_day = _quick_single_day(text or "")
         if only_day:
             today = datetime.now(IST).date()
             y, m = today.year, today.month
             last_day = calendar.monthrange(y, m)[1]
             only_day = min(only_day, last_day)
-            if (prev_entities or {}).get("start_date") and not (prev_entities or {}).get("end_date"):
-                raw_new_entities["end_date"] = date(y, m, only_day).isoformat()
-            else:
-                raw_new_entities["start_date"] = date(y, m, only_day).isoformat()
+            raw_new_entities["end_date"] = date(y, m, only_day).isoformat()
             intent_type = intent_type or "availability_check"
     clean_new_entities = filter_non_empty_entities(raw_new_entities)
     cat_now = (clean_new_entities.get("category") or acc_entities.get("category"))
