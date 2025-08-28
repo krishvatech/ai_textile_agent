@@ -732,7 +732,7 @@ async def llm_route_other(
         "allowed_actions": ["smalltalk","help","followup","handoff","unknown"],
         "allowed_followup_fields": [
             "is_rental","occasion","fabric","size","color","category",
-            "product_name","quantity","location","type","price","rental_price",
+            "product_name","quantity","type","price","rental_price",
             "user_name","confirmation"
         ],
         "output_contract": {
@@ -1543,9 +1543,7 @@ async def analyze_message(
                 original_delta = (end_date - start_date)
                 s = start_date.replace(year=today.year)
                 e = s + original_delta
-                if s < today:
-                    s = s.replace(year=today.year + 1)
-                    e = s + original_delta
+                # keep current year even if the range is in the past
                 start_date, end_date = s, e
             acc_entities["start_date"] = start_date.isoformat()
             acc_entities["end_date"] = end_date.isoformat()
@@ -1621,7 +1619,8 @@ async def analyze_message(
             _has_year(turn_start_raw) or _has_year(turn_end_raw)
         )
 
-        if start_date and not any_year_specified:
+        typed_range_this_turn = bool(turn_has_both_distinct or (turn_start and turn_end and has_range_tokens))
+        if start_date and not any_year_specified and not typed_range_this_turn:
             today = _date.today()
             print("today=",today)
             current_year = _date.today().year
@@ -1727,7 +1726,7 @@ async def analyze_message(
             intent_type, acc_entities, language, session_history=history,
             only_fields=["confirmation"], max_fields=1
         )
-        final_reply = f"{avail_line} {confirm_q}".strip()
+        final_reply = f"{avail_line}".strip()
 
         history.append({"role": "assistant", "content": final_reply}); _commit()
         payload = {

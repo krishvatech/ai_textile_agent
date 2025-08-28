@@ -128,20 +128,32 @@ Intents (lowercase values):
 - asking_inquiry — ONLY when the user asks about availability/options/prices/etc. AND none of rules (-1, 0, 1, 2, 3, 3a, or 4) match.
 If any product attribute (including occasion) is present, do NOT return asking_inquiry — return product_search instead.
 - website_inquiry — message contains a URL to one of our store domains and refers to a specific website/product/page. Treat ANY Shopify product/collection URL (https://*.myshopify.com/products/... or /collections/...) as our store.
-- confirmation — user explicitly confirms proceeding to BUY or RENT the currently selected product (e.g., “confirm this”, “book it”, “I’ll take it”, “order now”, “reserve kar do”, “haan confirm”). This is a final go-ahead, not just a preference update.
+- confirmation — user explicitly confirms proceeding to BUY or RENT the currently selected product. This includes short affirmatives like:
+  yes/y/ok/okay/k/done/confirm/confirmed/book/book it/reserve/ha/haa/haan/hanji/ji/“theek hai”/“ठीक है”/“બરાબર”/“ઓકે”
+  — but ONLY when (a) the last bot turn asked for confirmation OR (b) exactly one product is in focus (e.g., context has product_variant_id).
+  This is a final go-ahead, not just a preference update.
 - stock_check — user replies with ONLY a quantity (e.g., "1", "2", "25", "2 pcs"), meaning “check if this many of the currently selected item/category is available right now.”
 - other — order status, tracking, delivery, payment, returns, complaints, small talk, or unrelated topics.
 
 Decision rules (apply in order; pick exactly one):
 
 0) CONFIRMATION LOCK (highest priority):
-   If the message is an explicit confirmation to proceed with BUY or RENT of the product that is already selected/in focus (e.g., context has product_variant_id, or there is exactly one selected item, or the user is replying “yes/confirm/book it” to the bot’s confirmation prompt), then:
-   → intent = confirmation
-   → set "confirmation": "yes" at the top level
-   → set entities.is_rental = true if rental terms are explicitly mentioned (e.g., “on rent / kiraye par / rent pe / book for rent / haa”); set entities.is_rental = false if buy/purchase is explicit; otherwise leave null.
-   → carry forward category (and other known filters) from Context when obvious; only fill what the user said now if new.
-   → if dates/quantity are mentioned, populate start_date/end_date/quantity accordingly.
-   This rule OVERRIDES all other rules.
+   Treat the message as confirmation when EITHER is true:
+   • The last assistant message asked for confirmation (e.g., “Could you please share your confirmation?”, “Shall I book it?”, “Proceed to reserve?”), AND the user reply is a SHORT AFFIRMATIVE; OR
+   • Exactly one product is in focus (e.g., context has product_variant_id or exactly one selected item) AND the user reply is a SHORT AFFIRMATIVE.
+
+   SHORT AFFIRMATIVES (roman + native; not exhaustive):
+   yes, y, ok, okay, k, done, confirm, confirmed, book, book it, reserve,
+   ha, haa, haan, hanji, ji, theek hai, thik hai, “हाँ”, “हा”, “जी”, “ठीक है”, “હા”, “હાં”, “બરાબર”, “ઓકે”.
+
+   When this lock fires:
+   → intent = "confirmation"
+   → top-level "confirmation" = "yes"
+   → entities.is_rental = true if RENT words appear (rent/on rent/rent pe/kiraye par/bhade/etc.); entities.is_rental = false if BUY words appear (buy/purchase/order/kharid*); else null.
+   → Carry forward known context (category/type/fabric/color/size/is_rental) conservatively; only overwrite fields explicitly mentioned now.
+   → If dates/quantity are present, normalize start_date/end_date/quantity.
+
+   This rule OVERRIDES all other rules (never classify such messages as "greeting").
 
 1) PRODUCT-SEARCH LOCK (highest after 0):
    If the message contains ANY product attribute — name, category, fabric, color, size, or occasion —
@@ -224,6 +236,7 @@ Decision rules (apply in order; pick exactly one):
    UNLESS Rule 0 or 1 already fired. If no specific product is selected, still return availability_check (the app will ask the user to pick a product).
 
 6) Else if it is only a salutation → greeting.
+   Do NOT return greeting if Rule 0 conditions are met; short affirmatives during a confirmation step are NOT greetings.
 
 7) Else if the message is primarily about availability/options/prices/rental without a clear category → asking_inquiry.
 
