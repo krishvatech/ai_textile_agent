@@ -46,8 +46,7 @@ MAIN_INTENTS = {
     "price_inquiry", "discount_inquiry", "availability_check"
 }
 REFINEMENT_INTENTS = {
-    "asking_inquiry", "color_preference", "size_query", "fabric_inquiry",
-    "delivery_inquiry", "payment_query"
+    "asking_inquiry", "color_preference", "size_query", "fabric_inquiry"
 }
 
 # Quick “DD-DD” and “DD” parsers that assume current month & year (IST)
@@ -2041,7 +2040,45 @@ async def analyze_message(
             
         return payload
 
-       
+    elif intent_type == "confirmation":
+        # LLM already decided this is a confirmation.
+        # Just render a single-line summary and STOP (no follow-ups).
+
+        def _fmt(d):
+            if not d:
+                return None
+            obj = _parse_as_date(d)
+            return obj.strftime("%d %b %Y") if obj else None
+
+        name = (acc_entities.get("name") or "your selection")
+        qty  = acc_entities.get("quantity") or 1
+        rb   = "rental" if acc_entities.get("is_rental") else "purchase"
+
+        s = _fmt(acc_entities.get("start_date"))
+        e = _fmt(acc_entities.get("end_date"))
+        # show dates only for rental and only if both exist
+        date_part = f" | {s} to {e}" if (acc_entities.get("is_rental") and s and e) else ""
+
+        reply = f"Thanks for confirming. Summary: {name} | qty {qty} | {rb}{date_part}."
+
+        # mark confirmed so future 'yes' replies don’t trigger more prompts
+        acc_entities["order_confirmed"] = True
+
+        history.append({"role": "assistant", "content": reply})
+        session_memory[sk] = history
+        session_entities[sk] = acc_entities
+
+        return {
+            "input_text": text,
+            "language": language,
+            "intent_type": "confirmation",
+            "history": history,
+            "collected_entities": acc_entities,
+            "reply_text": reply
+            # intentionally no "followup_reply"
+        }
+
+    
     # --- other / fallback
     elif intent_type == "other" or intent_type is None:
         def _is_missing(v): 
