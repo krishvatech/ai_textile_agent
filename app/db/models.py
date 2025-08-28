@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Enum, JSON, Table, UniqueConstraint, Index
+    Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Enum, JSON, Table, UniqueConstraint, Index, Text
 )
 from sqlalchemy.orm import relationship, declarative_base
 from datetime import datetime
@@ -37,6 +37,8 @@ class Tenant(Base):
     __tablename__ = "tenants"
     id = Column(Integer, primary_key=True)
     name = Column(String, unique=True, index=True, nullable=False)
+    email = Column(String, unique=True, nullable=True)
+    password = Column(String, nullable=True)
     whatsapp_number = Column(String, unique=True, index=True, nullable=False)
     phone_number = Column(String, nullable=True)
     address = Column(String, nullable=True)
@@ -94,6 +96,8 @@ class Product(Base):
     type = Column(String, nullable=True)  # e.g., saree, lehenga, sherwani
     category = Column(String, nullable=True)
     description = Column(String, nullable=True)
+    extra_info = Column(Text, nullable=True)  # Any additional attributes
+    product_url = Column(Text, nullable=True)  # Link to product page
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     # Relationships
@@ -126,6 +130,7 @@ class ProductVariant(Base):
     price = Column(Float, nullable=False)
     available_stock = Column(Integer, default=0, nullable=False)
     is_rental = Column(Boolean, default=False, nullable=False)
+    product_url = Column(Text, nullable=True)
     rental_price = Column(Float, nullable=True)
     image_url = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
@@ -217,10 +222,3 @@ class ChatSession(Base):
     transcript = Column(JSON, nullable=True)  # List of messages, or plain text
     # Relationships
     customer = relationship("Customer", back_populates="chat_sessions")
-
-
-
-
-
-
-
