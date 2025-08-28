@@ -237,7 +237,15 @@ async def _lookup_basic_attrs_by_ids(db, product_id: int | None, variant_id: int
             category = _first_nonempty(m, ["category"])
             fabric   = _first_nonempty(m, ["fabric"])
             occasion = _first_nonempty(m, ["occasion"])
-
+            occ_row = await _fetch_one_or_rollback(db, """
+               SELECT LOWER(TRIM(o.name)) AS occ
+               FROM product_variant_occasions pvo
+               JOIN occasions o ON o.id = pvo.occasion_id
+               WHERE pvo.variant_id = :vid
+               LIMIT 1
+           """, {"vid": variant_id})
+            if occ_row and occ_row.occ:
+               occasion = occasion or occ_row.occ
             if any([category, fabric, occasion, color, is_rental is not None]):
                 return {
                     "category": category,
@@ -289,7 +297,17 @@ async def _lookup_basic_attrs_by_ids(db, product_id: int | None, variant_id: int
             category = _first_nonempty(m, ["category"])
             fabric   = _first_nonempty(m, ["fabric"])
             occasion = _first_nonempty(m, ["occasion"])
-
+            if not occasion:
+               occ_row = await _fetch_one_or_rollback(db, """
+                   SELECT LOWER(TRIM(o.name)) AS occ
+                   FROM product_variants pv
+                   JOIN product_variant_occasions pvo ON pvo.variant_id = pv.id
+                   JOIN occasions o ON o.id = pvo.occasion_id
+                   WHERE pv.product_id = :pid
+                   LIMIT 1
+               """, {"pid": product_id})
+               if occ_row and occ_row.occ:
+                   occasion = occ_row.occ
             if any([category, fabric, occasion, color, is_rental is not None]):
                 return {
                     "category": category,
@@ -433,119 +451,7 @@ def _norm_bool(v):
         return False
     return None
 
-def _pick_from_allowed(text_lc: str, allowed: list[str] | None) -> str | None:
-    if not text_lc:
-        return None
-    for w in (allowed or []):
-        if not w:
-            continue
-        wlc = w.lower().strip()
-        if wlc and wlc in text_lc:
-            return wlc
-    return None
 
-async def fetch_occasion_from_db(db, product_id: int | None, variant_id: int | None) -> str | None:
-    """
-    Try mapping table (product_variant_occasions -> occasions.name),
-    then direct columns on product_variants / products if present.
-    Returns lowercased occasion or None.
-    """
-    params = {}
-    if variant_id:
-        # A) mapping table by variant
-        q = text("""
-            SELECT LOWER(TRIM(o.name)) AS occ
-            FROM product_variant_occasions pvo
-            JOIN occasions o ON o.id = pvo.occasion_id
-            WHERE pvo.variant_id = :vid
-              AND o.name IS NOT NULL AND TRIM(o.name) <> ''
-            LIMIT 1
-        """)
-        row = (await db.execute(q, {"vid": variant_id})).first()
-        if row and row[0]:
-            return row[0]
-
-        # B) direct column on variant
-        q2 = text("""
-            SELECT LOWER(TRIM(occasion)) AS occ
-            FROM product_variants
-            WHERE id = :vid AND occasion IS NOT NULL AND TRIM(occasion) <> ''
-            LIMIT 1
-        """)
-        row2 = (await db.execute(q2, {"vid": variant_id})).first()
-        if row2 and row2[0]:
-            return row2[0]
-
-        # C) fallback via product direct column
-        q3 = text("""
-            SELECT LOWER(TRIM(p.occasion)) AS occ
-            FROM products p
-            JOIN product_variants pv ON pv.product_id = p.id
-            WHERE pv.id = :vid AND p.occasion IS NOT NULL AND TRIM(p.occasion) <> ''
-            LIMIT 1
-        """)
-        row3 = (await db.execute(q3, {"vid": variant_id})).first()
-        if row3 and row3[0]:
-            return row3[0]
-
-    if product_id:
-        # mapping by product (via any variant)
-        q4 = text("""
-            SELECT LOWER(TRIM(o.name)) AS occ
-            FROM products p
-            JOIN product_variants pv ON pv.product_id = p.id
-            JOIN product_variant_occasions pvo ON pvo.variant_id = pv.id
-            JOIN occasions o ON o.id = pvo.occasion_id
-            WHERE p.id = :pid
-              AND o.name IS NOT NULL AND TRIM(o.name) <> ''
-            LIMIT 1
-        """)
-        row4 = (await db.execute(q4, {"pid": product_id})).first()
-        if row4 and row4[0]:
-            return row4[0]
-
-        # direct column on product
-        q5 = text("""
-            SELECT LOWER(TRIM(occasion)) AS occ
-            FROM products
-            WHERE id = :pid AND occasion IS NOT NULL AND TRIM(occasion) <> ''
-            LIMIT 1
-        """)
-        row5 = (await db.execute(q5, {"pid": product_id})).first()
-        if row5 and row5[0]:
-            return row5[0]
-
-    return None
-
-def infer_occasion_from_caption(caption: str | None, allowed_occasions: list[str] | None) -> str | None:
-    t = (caption or "").lower()
-    occ_list = allowed_occasions 
-    return _pick_from_allowed(t, occ_list)
-
-async def fill_occasion_if_missing(
-    db,
-    entities: dict,
-    *,
-    product_id: int | None,
-    variant_id: int | None,
-    caption: str | None,
-    allowed_occasions: list[str] | None
-) -> dict:
-    """
-    If category or color is present but occasion is missing, try DB first, then caption.
-    Returns the same dict (mutated) for convenience.
-    """
-    has_trigger = (entities.get("category") is not None) or (entities.get("color") is not None)
-    if not has_trigger:
-        return entities
-
-    if not entities.get("occasion"):
-        occ = await fetch_occasion_from_db(db, product_id, variant_id)
-        if not occ:
-            occ = infer_occasion_from_caption(caption, allowed_occasions)
-        if occ:
-            entities["occasion"] = occ
-    return entities
 
 # Optional explicit exports
 __all__ = [
