@@ -18,7 +18,11 @@ from app.core.chat_persistence import (
 )
 from app.services.wa_media import download_media_bytes
 from app.services.visual_search import visual_search_bytes_sync, format_matches_for_whatsapp_images,group_matches_by_product
-from app.core.product_pick_ import find_assistant_image_caption_by_msg_id,find_prev_assistant_image_caption,resolve_product_from_caption_async
+from app.core.product_pick_ import (
+    resolve_product_from_caption_async,
+    get_attrs_for_product_async,
+    extract_attrs_from_text,find_assistant_image_caption_by_msg_id,find_prev_assistant_image_caption,_ensure_allowed_lists
+)
 import re
 from sqlalchemy import text
 from app.db.session import SessionLocal  # ensure this is imported
@@ -601,6 +605,7 @@ def _merge_entities(base: dict | None, overlay: dict | None, override: bool = Fa
 
 @router.post("/webhook")
 async def receive_cloud_webhook(request: Request):
+    entities: dict = {}
     print('Meta webhook..................')
     """Handle inbound messages from Meta Cloud API (value.messages)."""
     raw = await request.body()
@@ -696,35 +701,26 @@ async def receive_cloud_webhook(request: Request):
                     logging.info("="*100)
                     transcript = await get_transcript_by_phone(from_waid,db)
                     messages = _normalize_messages(transcript)
-                    # 1) Try to get the caption of the exact image that was replied to
+                    # 1) Pick the right caption (image caption if reply was to an image; else previous assistant image)
                     caption = find_assistant_image_caption_by_msg_id(messages, replied_message_id)
-
-                    # 2) If user replied to a TEXT prompt instead, get the nearest previous assistant image caption
                     if not caption:
                         caption = find_prev_assistant_image_caption(messages, replied_message_id)
 
                     logging.info("="*20)
                     logging.info(f"=========Caption used for resolve======== {caption}")
 
-                    # 3) Resolve from caption (URL → DB, else first line)
+                    # 2) Resolve product name + ids from caption (URL → DB, else caption line)  ✅ async
                     resolved = await resolve_product_from_caption_async(caption)
-
                     resolved_name        = resolved.get("name")
                     resolved_product_id  = resolved.get("product_id")
                     resolved_variant_id  = resolved.get("variant_id")
                     resolved_url         = resolved.get("product_url")
-
-                    # We don't use product_entities in swipe flow anymore – make it explicit
-                    product_entities = None
-
                     logging.info(f"✅ Resolved swipe → name='{resolved_name}', product_id={resolved_product_id}, variant_id={resolved_variant_id}, url={resolved_url}")
 
-                    chat_session = await get_or_open_active_session(db, customer_id=customer.id)
-                    await append_transcript_message(
-                        db, chat_session, role="user", text=text_msg,
-                        msg_id=msg_id, direction="in", meta={"raw": data, "channel": "cloud_api","reply_to": replied_message_id}
-                    )
-                    # Detect language
+                    # We no longer use product_entities in swipe flow
+                    product_entities = None
+
+                    # ✅ Language detection (same logic as normal flow)
                     SUPPORTED_LANGUAGES = ["gu-IN", "hi-IN", "en-IN", "en-US"]
                     current_language = customer.preferred_language or "en-IN"
                     if current_language not in SUPPORTED_LANGUAGES:
@@ -732,56 +728,73 @@ async def receive_cloud_webhook(request: Request):
                         current_language = detected[0] if isinstance(detected, tuple) else detected
                         await update_customer_language(db, customer.id, current_language)
 
-                    # Tenant filters
+                    # ✅ Tenant filters (load real lists, not just defaults)
                     tenant_categories = await get_tenant_category_by_phone(business_number, db)
-                    tenant_fabric    = await get_tenant_fabric_by_phone(business_number, db)
-                    tenant_color     = await get_tenant_color_by_phone(business_number, db)
-                    tenant_occasion  = await get_tenant_occasion_by_phone(business_number, db)
-                    tenant_size  = await get_tenant_size_by_phone(business_number, db)
-                    tenant_type  = await get_tenant_type_by_phone(business_number, db)
+                    tenant_fabric     = await get_tenant_fabric_by_phone(business_number, db)
+                    tenant_color      = await get_tenant_color_by_phone(business_number, db)
+                    tenant_occasion   = await get_tenant_occasion_by_phone(business_number, db)
+                    tenant_size       = await get_tenant_size_by_phone(business_number, db)
+                    tenant_type       = await get_tenant_type_by_phone(business_number, db)
 
-                    # --- AI pipeline
-                    raw_reply = None
-                    try:
-                        intent_type, entities, confidence = await detect_textile_intent_openai(
-                            text_msg, current_language,
-                            allowed_categories=tenant_categories,
-                            allowed_fabric=tenant_fabric,
-                            allowed_color=tenant_color,
-                            allowed_occasion=tenant_occasion,
-                            allowed_size=tenant_size,
-                            allowed_type=tenant_type,
-                        )
+                    # Make sure entities exists before merging
+                    if not isinstance(entities, dict):
+                        entities = {}
+                    # 3) Fetch category/fabric/occasion from DB by ids (fast), with caption fallback
+                    attrs_db = await get_attrs_for_product_async(resolved_product_id, resolved_variant_id)
+                    attrs_text = extract_attrs_from_text(
+                        caption,
+                        allowed_categories=tenant_categories,
+                        allowed_fabrics=tenant_fabric,
+                        allowed_occasions=tenant_occasion,
+                    )
 
-                        # ✅ Only in swipe flow: fill the product name we just resolved (no product_entities)
-                        if resolved_name:
-                            entities = _merge_entities(entities, {"name": resolved_name})
+                    category = attrs_db.get("category") or attrs_text.get("category")
+                    fabric   = attrs_db.get("fabric")   or attrs_text.get("fabric")
+                    occasion = attrs_db.get("occasion") or attrs_text.get("occasion")
 
-                        # (product_entities is None in swipe flow, so this is a no-op now)
-                        if product_entities:
-                            entities = _merge_entities(entities, product_entities)   # override=False (fill only)
+                    # Merge into entities BEFORE intent/analyze
+                    seed_entities = {"name": resolved_name}
+                    if category: seed_entities["category"] = category
+                    if fabric:   seed_entities["fabric"]   = fabric
+                    if occasion: seed_entities["occasion"] = occasion
 
-                        logging.info("="*20)
-                        logging.info(f"New ENtities Form the intent type ====== {entities}")
-                        logging.info("="*20)
+                    logging.info(f"[ATTRS] From DB: {attrs_db} | From text: {attrs_text} | Seed: {seed_entities}")
 
-                        raw_reply = await analyze_message(
-                            text=text_msg,
-                            tenant_id=tenant_id,
-                            tenant_name=tenant_name,
-                            language=current_language,
-                            intent=intent_type,
-                            new_entities=entities,
-                            intent_confidence=confidence,
-                            mode="chat",
-                            session_key=f"{tenant_id}:whatsapp:wa:{from_waid}",
-                        )
+                    # Run intent detection (it may return None values)
+                    intent_type, ai_entities, confidence = await detect_textile_intent_openai(
+                        text_msg, current_language,
+                        allowed_categories=tenant_categories,
+                        allowed_fabric=tenant_fabric,
+                        allowed_color=tenant_color,
+                        allowed_occasion=tenant_occasion,
+                        allowed_size=tenant_size,
+                        allowed_type=tenant_type,
+                    )
+                    entities = ai_entities or {}
+                    for k, v in (seed_entities or {}).items():
+                        if v and not entities.get(k):   # only fill when AI left it empty/None
+                            entities[k] = v
 
-                        reply_text = raw_reply.get("reply_text") if isinstance(raw_reply, dict) else str(raw_reply)
-                        collected_entities = raw_reply.get("collected_entities") if isinstance(raw_reply, dict) else str(raw_reply)
-                    except Exception:
-                        logging.exception("[CLOUD] AI pipeline failed")
-                        reply_text = "Sorry, I'm having trouble. I'll get back to you shortly."
+                    logging.info(f"[ENTITIES] After coalesce with seed: {entities}")
+                    # entities already has name/category/fabric/occasion merged
+                    raw_reply = await analyze_message(
+                        text=text_msg,
+                        tenant_id=tenant_id,
+                        tenant_name=tenant_name,
+                        language=current_language,
+                        intent=intent_type,
+                        new_entities=entities,   # ← this now includes name/fabric/occasion
+                        intent_confidence=confidence,
+                        mode="chat",
+                        session_key=f"{tenant_id}:whatsapp:wa:{from_waid}",
+                    )
+
+
+                    reply_text = raw_reply.get("reply_text") if isinstance(raw_reply, dict) else str(raw_reply)
+                    collected_entities = raw_reply.get("collected_entities") if isinstance(raw_reply, dict) else str(raw_reply)
+                except Exception:
+                    logging.exception("[CLOUD] AI pipeline failed")
+                    reply_text = "Sorry, I'm having trouble. I'll get back to you shortly."
 
                     print("reply=", reply_text)
 
@@ -1122,7 +1135,10 @@ async def receive_cloud_webhook(request: Request):
                         doc      = msg["document"]
                         mime     = (doc.get("mime_type") or "").lower()
                         media_id = doc.get("id")
-
+                        VIDEO_UNAVAILABLE_MSG = (
+                        "🎥 Video understanding is under development right now. "
+                        "Please send a clear photo or text so I can help."
+                        )
                         # If the document is actually a video file, say it's under development
                         if media_id and mime.startswith("video/"):
                             mid = await send_whatsapp_reply_cloud(
