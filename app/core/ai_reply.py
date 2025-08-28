@@ -72,6 +72,22 @@ def _parse_as_date(val) -> date | None:
 
     return None
 
+def _past_date_msg(s: date, e: Optional[date], language: str) -> str:
+    lr = (language or 'en-IN').split('-')[0].lower()
+    if e:
+        if lr == 'hi':
+            return f"यह तिथियाँ अतीत में हैं ({s.strftime('%d %b %Y')} से {e.strftime('%d %b %Y')}). कृपया भविष्य की तारीखें भेजें."
+        if lr == 'gu':
+            return f"આ તારીખો ભૂતકાળની છે ({s.strftime('%d %b %Y')} થી {e.strftime('%d %b %Y')}). કૃપા કરીને ભવિષ્યની તારીખો આપો."
+        return f"That date range is in the past ({s.strftime('%d %b %Y')} to {e.strftime('%d %b %Y')}). Please share a future range."
+    else:
+        if lr == 'hi':
+            return f"यह तारीख अतीत में है ({s.strftime('%d %b %Y')}). कृपया भविष्य की तारीख भेजें."
+        if lr == 'gu':
+            return f"આ તારીખ ભૂતકાળમાં છે ({s.strftime('%d %b %Y')}). કૃપા કરીને ભવિષ્યની તારીખ આપો."
+        return f"That date is in the past ({s.strftime('%d %b %Y')}). Please share a future date."
+
+
 # =============== Website inquiry ===========
 
 # --- price + formatting helpers ---
@@ -1574,29 +1590,33 @@ async def analyze_message(
             s = _parse_as_date(turn_start)
             e = _parse_as_date(turn_end)
 
-            # Proceed only if both parsed successfully
             if s and e:
                 start_date, end_date = s, e
 
                 if not msg_has_year:
                     today = datetime.now(IST).date()
-                    delta = (end_date - start_date)
 
-                    # snap start to THIS year (preserve month/day exactly)
+                    # Snap BOTH to the current year (no next-year bump)
                     s_aligned = date(today.year, start_date.month, start_date.day)
-                    e_aligned = s_aligned + delta
+                    e_aligned = date(today.year, end_date.month, end_date.day)
 
-                    # if still past, bump to NEXT year
+                    # If the aligned range is in the past, DON'T auto-bump — ask for future dates
                     if e_aligned < today:
-                        s_aligned = date(today.year + 1, start_date.month, start_date.day)
-                        e_aligned = s_aligned + delta
+                        msg = _past_date_msg(s_aligned, e_aligned, language)
+                        history.append({"role": "assistant", "content": msg}); _commit()
+                        return {
+                            "input_text": text, "language": language, "intent_type": intent_type,
+                            "history": history, "collected_entities": acc_entities,
+                            "reply": msg, "reply_text": msg
+                        }
 
+                    # Use current-year aligned values
                     start_date, end_date = s_aligned, e_aligned
 
                 acc_entities["start_date"] = start_date.isoformat()
                 acc_entities["end_date"]   = end_date.isoformat()
             else:
-                # couldn't parse; leave as-is so your follow-up asks for dates
+                # couldn't parse; let follow-up ask for dates
                 acc_entities.pop("start_date", None)
                 acc_entities.pop("end_date", None)
         logging.info(
@@ -1670,6 +1690,18 @@ async def analyze_message(
             _has_year(prev_start_raw) or _has_year(prev_end_raw) or
             _has_year(turn_start_raw) or _has_year(turn_end_raw)
         )
+
+        if start_date and not any_year_specified:
+            today = _date.today()
+            # single-date past OR range that ends in past
+            if (end_date and end_date < today) or (not end_date and start_date < today):
+                msg = _past_date_msg(start_date, end_date, language)
+                history.append({"role": "assistant", "content": msg}); _commit()
+                return {
+                    "input_text": text, "language": language, "intent_type": intent_type,
+                    "history": history, "collected_entities": acc_entities,
+                    "reply": msg, "reply_text": msg
+                }
 
         typed_range_this_turn = bool(turn_has_both_distinct or (turn_start and turn_end and has_range_tokens))
         if start_date and not any_year_specified and not typed_range_this_turn:
