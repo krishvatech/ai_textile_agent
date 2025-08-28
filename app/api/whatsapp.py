@@ -349,6 +349,14 @@ async def send_whatsapp_image_cloud(to_waid: str, image_url: str, caption: str |
     except Exception:
         return None
 
+# ------- Normalize Phone ----------
+def _normalize_waid_phone(waid: str | None) -> str | None:
+    """Turn '918799559020' into '+918799559020' for customers.phone."""
+    if not waid:
+        return None
+    digits = re.sub(r"\D+", "", waid)
+    return f"+{digits}" if digits else None
+
 
 def _normalize_url(u: str | None) -> str | None:
     if not u:
@@ -642,6 +650,7 @@ async def receive_cloud_webhook(request: Request):
 
     msgs_to_process = []
     business_number = ""
+    contact_name_map: dict[str, str | None] = {}  
 
     # Handle standard Meta Cloud API format
     for entry in data.get("entry", []):
@@ -652,6 +661,12 @@ async def receive_cloud_webhook(request: Request):
             if msgs:
                 business_number = (CLOUD_SENDER_NUMBER or meta.get("display_phone_number", "")).replace("+", "").replace(" ", "")
                 msgs_to_process.extend(msgs)
+        
+        for c in value.get("contacts", []):
+            wa = (c.get("wa_id") or "").strip()
+            nm = (c.get("profile") or {}).get("name")
+            if wa:
+                contact_name_map[wa] = nm
 
     # Handle custom payload format
     if not msgs_to_process:
@@ -706,7 +721,15 @@ async def receive_cloud_webhook(request: Request):
                         return {"status": "no_tenant"}
 
                     # Persist inbound
-                    customer = await get_or_create_customer(db, tenant_id=tenant_id, phone=from_waid)
+                    sender_name = contact_name_map.get(from_waid)
+                    customer = await get_or_create_customer(
+                        db,
+                        tenant_id=tenant_id,
+                        phone=_normalize_waid_phone(from_waid),   # saves +E.164 in customers.phone
+                        whatsapp_id=from_waid,                    # saves raw wa_id in customers.whatsapp_id
+                        name=sender_name,                         # saves profile name
+                    )
+
                     logging.info("=" * 100)
                     logging.info(f"========{from_waid}")
                     logging.info("=" * 100)
@@ -927,7 +950,15 @@ async def receive_cloud_webhook(request: Request):
                         return {"status": "no_tenant"}
 
                     # Persist inbound
-                    customer = await get_or_create_customer(db, tenant_id=tenant_id, phone=from_waid)
+                    sender_name = contact_name_map.get(from_waid)
+                    customer = await get_or_create_customer(
+                        db,
+                        tenant_id=tenant_id,
+                        phone=_normalize_waid_phone(from_waid),   # saves +E.164 in customers.phone
+                        whatsapp_id=from_waid,                    # saves raw wa_id in customers.whatsapp_id
+                        name=sender_name,                         # saves profile name
+                    )
+
                     logging.info(f"========{from_waid}")
 
                     # Pull transcript and derive product context (for logs + intent merge)

@@ -37,15 +37,25 @@ async def get_or_create_customer(
         await db.flush()
     else:
         dirty = False
-        if name and not customer.name:
+        # back-fill whatsapp_id/phone if empty, or refresh if changed
+        if whatsapp_id and (not customer.whatsapp_id or customer.whatsapp_id != whatsapp_id):
+            customer.whatsapp_id = whatsapp_id
+            dirty = True
+        if phone and (not customer.phone or customer.phone != phone):
+            customer.phone = phone
+            dirty = True
+        # set/refresh name
+        if name and customer.name != name:
             customer.name = name
             dirty = True
+        # preferred_language as before
         if preferred_language and customer.preferred_language != preferred_language:
             customer.preferred_language = preferred_language
             dirty = True
         if dirty:
             db.add(customer)
             await db.flush()
+
     return customer
 
 
