@@ -18,6 +18,7 @@ from app.core.asked_now_detector import detect_requested_attributes_async
 from app.core.asked_now_detector import detect_requested_attributes_async
 import json
 import re
+import calendar
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
@@ -48,6 +49,32 @@ REFINEMENT_INTENTS = {
     "asking_inquiry", "color_preference", "size_query", "fabric_inquiry",
     "delivery_inquiry", "payment_query"
 }
+
+# Quick “DD-DD” and “DD” parsers that assume current month & year (IST)
+DAY_RANGE_RE  = re.compile(r'(\b\d{1,2})\s*(?:[-–—]|to|till|until|upto|up to|se|tak)\s*(\d{1,2})\b', re.I)
+SINGLE_DAY_RE = re.compile(r'\b(\d{1,2})\b')
+
+MONTH_NAME_RE = re.compile(r'\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b', re.I)
+NUM_MONTH_RE   = re.compile(r'\b\d{1,2}[\/\.]\d{1,2}(?:[\/\.]\d{2,4})?\b')
+
+def _has_month(s: str) -> bool:
+    t = str(s or "")
+    return bool(MONTH_NAME_RE.search(t) or NUM_MONTH_RE.search(t))
+
+def _quick_day_range(text: str) -> tuple[Optional[int], Optional[int]]:
+    if not text: return (None, None)
+    m = DAY_RANGE_RE.search(text)
+    if not m: return (None, None)
+    d1, d2 = int(m.group(1)), int(m.group(2))
+    if not (1 <= d1 <= 31 and 1 <= d2 <= 31): return (None, None)
+    return d1, d2
+
+def _quick_single_day(text: str) -> Optional[int]:
+    if not text: return None
+    m = SINGLE_DAY_RE.search(text)
+    if not m: return None
+    d = int(m.group(1))
+    return d if 1 <= d <= 31 else None
 
 def _parse_as_date(val) -> date | None:
     """Parse a value into a date. Tries ISO first; then day-first for India."""
@@ -1075,6 +1102,39 @@ async def analyze_message(
     prev_entities = dict(acc_entities)  # <--- ADD THIS LINE
     # --- Clean and merge new entities into memory (critical!) ---
     raw_new_entities = new_entities or {}
+    if not raw_new_entities.get("start_date") and not raw_new_entities.get("end_date"):
+        d1, d2 = _quick_day_range(text or "")
+        if d1 and d2:
+            today = datetime.now(IST).date()
+            y, m = today.year, today.month
+            last_day = calendar.monthrange(y, m)[1]
+            d1 = min(d1, last_day)
+            d2 = min(d2, last_day)
+            s = date(y, m, d1)
+            e = date(y, m, d2)
+            if e < s:
+                # if user typed 28-2 etc., push end into next month sensibly
+                nm, ny = (m + 1, y) if m < 12 else (1, y + 1)
+                last_next = calendar.monthrange(ny, nm)[1]
+                e = date(ny, nm, min(d2, last_next))
+            raw_new_entities["start_date"] = s.isoformat()
+            raw_new_entities["end_date"]   = e.isoformat()
+            # if classifier said "other", gently push into availability flow
+            intent_type = intent_type or "availability_check"
+
+    # Optional: plain “25” as follow-up → treat as end date if start exists, else start date
+    if not raw_new_entities.get("start_date") and not raw_new_entities.get("end_date"):
+        only_day = _quick_single_day(text or "")
+        if only_day:
+            today = datetime.now(IST).date()
+            y, m = today.year, today.month
+            last_day = calendar.monthrange(y, m)[1]
+            only_day = min(only_day, last_day)
+            if (prev_entities or {}).get("start_date") and not (prev_entities or {}).get("end_date"):
+                raw_new_entities["end_date"] = date(y, m, only_day).isoformat()
+            else:
+                raw_new_entities["start_date"] = date(y, m, only_day).isoformat()
+            intent_type = intent_type or "availability_check"
     clean_new_entities = filter_non_empty_entities(raw_new_entities)
     cat_now = (clean_new_entities.get("category") or acc_entities.get("category"))
     if cat_now and not clean_new_entities.get("type"):
@@ -1533,7 +1593,7 @@ async def analyze_message(
 
         msg = (text or "")
         msg_lower = msg.lower()
-        dash_is_range = re.search(r"\s[-–—]\s", msg) is not None  # only hyphen with spaces around
+        dash_is_range = re.search(r"\b\d{1,2}\s*[-–—]\s*\d{1,2}\b", msg) is not None  # only hyphen with spaces around
         has_range_tokens = (
             re.search(r"\b(to|till|until|upto|up to|between|from)\b", msg_lower) is not None
             or (" se " in msg_lower and " tak " in msg_lower)  # Hindi "se ... tak"
@@ -1575,10 +1635,18 @@ async def analyze_message(
 
             if start_date and not msg_has_year:
                 today = datetime.now(IST).date()
-                candidate = start_date.replace(year=today.year)
-                if candidate < today:
-                    candidate = candidate.replace(year=today.year)
-                start_date = candidate
+                if not _has_month(msg):
+                    # Snap to current month & year
+                    y, m = today.year, today.month
+                    last = calendar.monthrange(y, m)[1]
+                    d = min(start_date.day, last)
+                    start_date = date(y, m, d)
+                else:
+                    # Month was typed — keep month, snap only year (and bump if still past)
+                    candidate = start_date.replace(year=today.year)
+                    if candidate < today:
+                        candidate = candidate.replace(year=today.year + 1)
+                    start_date = candidate
 
             end_date = None
 
@@ -1602,11 +1670,27 @@ async def analyze_message(
                 if not msg_has_year:
                     today = datetime.now(IST).date()
 
-                    # Snap BOTH to the current year (no next-year bump)
-                    s_aligned = date(today.year, start_date.month, start_date.day)
-                    e_aligned = date(today.year, end_date.month, end_date.day)
+                    if not _has_month(msg):
+                        # Snap BOTH to current YEAR & MONTH
+                        y, m = today.year, today.month
+                        last_this = calendar.monthrange(y, m)[1]
+                        d1 = min(start_date.day, last_this)
+                        d2 = min(end_date.day,   last_this)
+                        s_aligned = date(y, m, d1)
 
-                    # If the aligned range is in the past, DON'T auto-bump — ask for future dates
+                        # If end day < start day in the same month, push end to next month safely
+                        if d2 < d1:
+                            nm, ny = (m + 1, y) if m < 12 else (1, y + 1)
+                            last_next = calendar.monthrange(ny, nm)[1]
+                            e_aligned = date(ny, nm, min(end_date.day, last_next))
+                        else:
+                            e_aligned = date(y, m, d2)
+                    else:
+                        # Month was typed — keep month, snap only year
+                        s_aligned = date(today.year, start_date.month, start_date.day)
+                        e_aligned = date(today.year, end_date.month,   end_date.day)
+
+                    # If the aligned range is entirely in the past, prompt for future dates (existing behavior)
                     if e_aligned < today:
                         msg = _past_date_msg(s_aligned, e_aligned, language)
                         history.append({"role": "assistant", "content": msg}); _commit()
@@ -1616,7 +1700,6 @@ async def analyze_message(
                             "reply": msg, "reply_text": msg
                         }
 
-                    # Use current-year aligned values
                     start_date, end_date = s_aligned, e_aligned
 
                 acc_entities["start_date"] = start_date.isoformat()

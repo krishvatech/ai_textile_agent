@@ -853,7 +853,7 @@ async def receive_cloud_webhook(request: Request):
                         if isinstance(raw_reply, dict) and raw_reply.get("intent_type") == "greeting":
                             person = (getattr(customer, "name", None) or sender_name or "").strip()
                             reply_text = (
-                                f"Hello {person} How can I assist you today?"
+                                f"Hello {person},\n How can I assist you today?"
                                 if person else "Hello! How can I assist you today?"
                             )
 
@@ -1051,7 +1051,7 @@ async def receive_cloud_webhook(request: Request):
                             if isinstance(raw_reply, dict) and raw_reply.get("intent_type") == "greeting":
                                 person = (getattr(customer, "name", None) or sender_name or "").strip()
                                 reply_text = (
-                                    f"Hello {person} How can I assist you today?"
+                                    f"Hello {person},\n How can I assist you today?"
                                     if person else "Hello! How can I assist you today?"
                                 )
 
