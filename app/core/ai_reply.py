@@ -18,9 +18,10 @@ from app.core.asked_now_detector import detect_requested_attributes_async
 from app.core.asked_now_detector import detect_requested_attributes_async
 import json
 import re
-import httpx
+import http
+from datetime import date, datetime, timedelta, timezone
 from datetime import date as _date  # avoid touching globals
-
+IST = timezone(timedelta(hours=5, minutes=30))
 
 load_dotenv()
 api_key = os.getenv("GPT_API_KEY")
@@ -45,6 +46,31 @@ REFINEMENT_INTENTS = {
     "asking_inquiry", "color_preference", "size_query", "fabric_inquiry",
     "delivery_inquiry", "payment_query"
 }
+
+def _parse_as_date(val) -> date | None:
+    """Parse a value into a date. Tries ISO first; then day-first for India."""
+    if not val:
+        return None
+    if isinstance(val, date):
+        return val
+    s = str(val).strip()
+
+    # Strict ISO first (YYYY-MM-DD)
+    try:
+        return date.fromisoformat(s)
+    except Exception:
+        pass
+
+    # Fallback: natural parse with day-first
+    if dateparser:
+        try:
+            # default gives missing pieces (like year) a sensible base
+            dt = dateparser.parse(s, dayfirst=True, yearfirst=False, default=datetime.now(IST))
+            return dt.date() if dt else None
+        except Exception:
+            return None
+
+    return None
 
 # =============== Website inquiry ===========
 
@@ -1520,33 +1546,59 @@ async def analyze_message(
             acc_entities["start_date"] = start_date.isoformat()
             acc_entities["end_date"] = end_date.isoformat()
 
-        # Case B: no previous start; user sent a single date -> treat as START only, ask END later
-        elif not prev_start and turn_is_single and turn_start and not has_range_tokens:
-            
-            start_date = turn_start
-            if not msg_has_year:
-                today = _date.today()
+        # Case B: no previous start; user sent a single date (not a range)
+        elif not prev_start and turn_is_single and (turn_start is not None) and not has_range_tokens:
+            # Parse to a date object safely
+            start_date = _parse_as_date(turn_start)
+
+            if start_date and not msg_has_year:
+                today = datetime.now(IST).date()
                 candidate = start_date.replace(year=today.year)
                 if candidate < today:
-                    candidate = candidate.replace(year=today.year + 1)
+                    candidate = candidate.replace(year=today.year)
                 start_date = candidate
+
             end_date = None
-            acc_entities["start_date"] = start_date.isoformat()
+
+            if start_date:
+                acc_entities["start_date"] = start_date.isoformat()
+            else:
+                # parsing failed; let followup ask for a valid date
+                acc_entities.pop("start_date", None)
+
             # critical: wipe any accidental single-day 'end_date' coming from NER/merge
             acc_entities.pop("end_date", None)
-
         # Case C: explicit range this turn (or two different dates)
-        elif turn_has_both_distinct:
-            start_date, end_date = turn_start, turn_end
-            if not msg_has_year:
-                today = _date.today()
-                original_delta = (end_date - start_date)
-                s = start_date.replace(year=today.year)
-                e = s + original_delta
-                # keep current year even if the range is in the past
+        elif (turn_start is not None and turn_end is not None) and (turn_has_both_distinct or has_range_tokens):
+            # Parse both into date objects
+            s = _parse_as_date(turn_start)
+            e = _parse_as_date(turn_end)
+
+            # Proceed only if both parsed successfully
+            if s and e:
                 start_date, end_date = s, e
-            acc_entities["start_date"] = start_date.isoformat()
-            acc_entities["end_date"] = end_date.isoformat()
+
+                if not msg_has_year:
+                    today = datetime.now(IST).date()
+                    delta = (end_date - start_date)
+
+                    # snap start to THIS year (preserve month/day exactly)
+                    s_aligned = date(today.year, start_date.month, start_date.day)
+                    e_aligned = s_aligned + delta
+
+                    # if still past, bump to NEXT year
+                    if e_aligned < today:
+                        s_aligned = date(today.year + 1, start_date.month, start_date.day)
+                        e_aligned = s_aligned + delta
+
+                    start_date, end_date = s_aligned, e_aligned
+
+                acc_entities["start_date"] = start_date.isoformat()
+                acc_entities["end_date"]   = end_date.isoformat()
+            else:
+                # couldn't parse; leave as-is so your follow-up asks for dates
+                acc_entities.pop("start_date", None)
+                acc_entities.pop("end_date", None)
         logging.info(
             f"[DATES ALIGNED] msg_has_year={msg_has_year}, has_range_tokens={has_range_tokens}, "
             f"start_date={start_date}, end_date={end_date}"
