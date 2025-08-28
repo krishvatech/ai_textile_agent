@@ -1161,7 +1161,7 @@ async def analyze_message(
         except Exception:
             nm = None
         nm = (nm or "").strip()
-        reply = f"Hello {nm} How can I assist you today?" if nm else "Hello! How can I assist you today?"
+        reply = f"Hello {nm},\nHow can I assist you today?" if nm else "Hello! How can I assist you today?"
         history.append({"role": "assistant", "content": reply})
         _commit()
         return {
