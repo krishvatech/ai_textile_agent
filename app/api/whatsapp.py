@@ -602,6 +602,17 @@ def _merge_entities(base: dict | None, overlay: dict | None, override: bool = Fa
     return merged
 
 
+# ----------- Static FollowUp For Visual Search -------------
+def _visual_followup_text(lang: str = "en-IN") -> str:
+    m = {
+        "gu-IN": "👇 તમારે ગમે તે પ્રોડક્ટ પર 'I want this' લખીને જવાબ આપો, અથવા fabric/રંગ/size કહો જેથી હું વધુ સારી રીતે બતાવી શકું.",
+        "hi-IN": "👇 जो पसंद आए उस प्रोडक्ट पर 'I want this' लिखकर रिप्लाई करें, या fabric/रंग/size बताएं ताकि मैं और बेहतर दिखा सकूं।",
+        "en-IN": "👇 Reply 'I want this' on the product you like, or tell me fabric/colour/size to refine.",
+        "en-US": "👇 Reply 'I want this' on the product you like, or tell me fabric/color/size to refine.",
+    }
+    return m.get(lang, m["en-IN"])
+
+
 
 @router.post("/webhook")
 async def receive_cloud_webhook(request: Request):
@@ -1079,25 +1090,39 @@ async def receive_cloud_webhook(request: Request):
 
                             matches = visual_search_bytes_sync(img_bytes, tenant_id=tenant_id, top_k=20)
                             matches = group_matches_by_product(matches)[:5]
-                            msgs    = format_matches_for_whatsapp_images(matches, limit=5)
 
                             out_msgs: list[tuple[str, str, str | None]] = []
                             sent_count = 0
 
-                            for m in msgs:
-                                if m.get("type") == "image":
-                                    mid = await send_whatsapp_image_cloud(
-                                        to_waid=from_waid,
-                                        image_url=m["image"]["link"],
-                                        caption=m["image"].get("caption", "")
-                                    )
-                                    if mid:
-                                        sent_count += 1
-                                    out_msgs.append(("image", m["image"].get("caption", ""), mid))
-                                else:
-                                    body = (m.get("text") or {}).get("body", "No visually similar items found.")
-                                    mid  = await send_whatsapp_reply_cloud(to_waid=from_waid, body=body)
-                                    out_msgs.append(("text", body, mid))
+                            # Use rich caption (Rent/Sale + price + Website) just like text flow
+                            for match in matches:
+                                md = (match or {}).get("metadata") or {}
+                                img = _primary_image_for_product(md) or md.get("image_url")
+                                if not img:
+                                    continue
+                                cap = _product_caption(md)
+                                mid = await send_whatsapp_image_cloud(
+                                    to_waid=from_waid,
+                                    image_url=img,
+                                    caption=cap
+                                )
+                                if mid:
+                                    sent_count += 1
+                                    logging.info(f"[PRODUCT] Sent product message_id={mid} to {from_waid}")
+                                out_msgs.append(("image", cap, mid))
+
+                            # If nothing sent, give one short fallback
+                            if sent_count == 0:
+                                body = "Sorry, I couldn’t find visually similar items."
+                                mid  = await send_whatsapp_reply_cloud(to_waid=from_waid, body=body)
+                                out_msgs.append(("text", body, mid))
+                            else:
+                                # Add a follow-up question in user’s saved language
+                                current_language = (customer.preferred_language or "en-IN")
+                                ftxt = _visual_followup_text(current_language)
+                                mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=ftxt)
+                                out_msgs.append(("text", ftxt, mid))
+
 
                             for kind, txt, mid in out_msgs:
                                 await append_transcript_message(
@@ -1174,25 +1199,35 @@ async def receive_cloud_webhook(request: Request):
 
                                 matches = visual_search_bytes_sync(img_bytes, tenant_id=tenant_id, top_k=20)
                                 matches = group_matches_by_product(matches)[:5]
-                                msgs    = format_matches_for_whatsapp_images(matches, limit=5)
 
                                 out_msgs: list[tuple[str, str, str | None]] = []
                                 sent_count = 0
 
-                                for m in msgs:
-                                    if m.get("type") == "image":
-                                        mid = await send_whatsapp_image_cloud(
-                                            to_waid=from_waid,
-                                            image_url=m["image"]["link"],
-                                            caption=m["image"].get("caption", "")
-                                        )
-                                        if mid:
-                                            sent_count += 1
-                                        out_msgs.append(("image", m["image"].get("caption", ""), mid))
-                                    else:
-                                        body = (m.get("text") or {}).get("body", "No visually similar items found.")
-                                        mid  = await send_whatsapp_reply_cloud(to_waid=from_waid, body=body)
-                                        out_msgs.append(("text", body, mid))
+                                for match in matches:
+                                    md = (match or {}).get("metadata") or {}
+                                    img = _primary_image_for_product(md) or md.get("image_url")
+                                    if not img:
+                                        continue
+                                    cap = _product_caption(md)
+                                    mid = await send_whatsapp_image_cloud(
+                                        to_waid=from_waid,
+                                        image_url=img,
+                                        caption=cap
+                                    )
+                                    if mid:
+                                        sent_count += 1
+                                    out_msgs.append(("image", cap, mid))
+
+                                if sent_count == 0:
+                                    body = "Sorry, I couldn’t find visually similar items."
+                                    mid  = await send_whatsapp_reply_cloud(to_waid=from_waid, body=body)
+                                    out_msgs.append(("text", body, mid))
+                                else:
+                                    current_language = (customer.preferred_language or "en-IN")
+                                    ftxt = _visual_followup_text(current_language)
+                                    mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=ftxt)
+                                    out_msgs.append(("text", ftxt, mid))
+
 
                                 for kind, txt, mid in out_msgs:
                                     await append_transcript_message(
