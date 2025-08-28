@@ -6,7 +6,6 @@ import os
 import json
 import logging
 import httpx
-from sqlalchemy import text
 import asyncio
 from app.db.session import get_db
 from app.core.lang_utils import detect_language
@@ -19,7 +18,10 @@ from app.core.chat_persistence import (
 )
 from app.services.wa_media import download_media_bytes
 from app.services.visual_search import visual_search_bytes_sync, format_matches_for_whatsapp_images,group_matches_by_product
-
+from app.core.product_pick_ import find_assistant_image_caption_by_msg_id,find_prev_assistant_image_caption,resolve_product_from_caption_async
+import re
+from sqlalchemy import text
+from app.db.session import SessionLocal  # ensure this is imported
 
 # Load environment variables
 load_dotenv()
@@ -694,12 +696,29 @@ async def receive_cloud_webhook(request: Request):
                     logging.info("="*100)
                     transcript = await get_transcript_by_phone(from_waid,db)
                     messages = _normalize_messages(transcript)
-                    product_text = find_assistant_text_by_msg_id(messages, replied_message_id)
-                    product_entities = find_entities_by_msg_id(messages, replied_message_id)
+                    # 1) Try to get the caption of the exact image that was replied to
+                    caption = find_assistant_image_caption_by_msg_id(messages, replied_message_id)
+
+                    # 2) If user replied to a TEXT prompt instead, get the nearest previous assistant image caption
+                    if not caption:
+                        caption = find_prev_assistant_image_caption(messages, replied_message_id)
+
                     logging.info("="*20)
-                    logging.info(f"=========Product_text======== {product_text}")
-                    logging.info("="*20)
-                    logging.info(f"=========product_entities======== {product_entities}")
+                    logging.info(f"=========Caption used for resolve======== {caption}")
+
+                    # 3) Resolve from caption (URL → DB, else first line)
+                    resolved = await resolve_product_from_caption_async(caption)
+
+                    resolved_name        = resolved.get("name")
+                    resolved_product_id  = resolved.get("product_id")
+                    resolved_variant_id  = resolved.get("variant_id")
+                    resolved_url         = resolved.get("product_url")
+
+                    # We don't use product_entities in swipe flow anymore – make it explicit
+                    product_entities = None
+
+                    logging.info(f"✅ Resolved swipe → name='{resolved_name}', product_id={resolved_product_id}, variant_id={resolved_variant_id}, url={resolved_url}")
+
                     chat_session = await get_or_open_active_session(db, customer_id=customer.id)
                     await append_transcript_message(
                         db, chat_session, role="user", text=text_msg,
@@ -733,12 +752,19 @@ async def receive_cloud_webhook(request: Request):
                             allowed_size=tenant_size,
                             allowed_type=tenant_type,
                         )
+
+                        # ✅ Only in swipe flow: fill the product name we just resolved (no product_entities)
+                        if resolved_name:
+                            entities = _merge_entities(entities, {"name": resolved_name})
+
+                        # (product_entities is None in swipe flow, so this is a no-op now)
                         if product_entities:
                             entities = _merge_entities(entities, product_entities)   # override=False (fill only)
-                            logging.info(f"[ENTITIES] merged with product_entities: {entities}")
+
                         logging.info("="*20)
                         logging.info(f"New ENtities Form the intent type ====== {entities}")
                         logging.info("="*20)
+
                         raw_reply = await analyze_message(
                             text=text_msg,
                             tenant_id=tenant_id,
@@ -750,6 +776,7 @@ async def receive_cloud_webhook(request: Request):
                             mode="chat",
                             session_key=f"{tenant_id}:whatsapp:wa:{from_waid}",
                         )
+
                         reply_text = raw_reply.get("reply_text") if isinstance(raw_reply, dict) else str(raw_reply)
                         collected_entities = raw_reply.get("collected_entities") if isinstance(raw_reply, dict) else str(raw_reply)
                     except Exception:
@@ -758,7 +785,7 @@ async def receive_cloud_webhook(request: Request):
 
                     print("reply=", reply_text)
 
-                                    # --- Safely extract followup + media/products
+                    # --- Safely extract followup + media/products
                     raw_obj = raw_reply if isinstance(raw_reply, dict) else {}
                     followup_text = (raw_obj.get("followup_reply") or "").strip() or None
                     print("Followup_Question = ",followup_text)
