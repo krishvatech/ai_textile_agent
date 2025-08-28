@@ -189,85 +189,118 @@ async def resolve_product_from_caption_async(caption: str | None):
 
 async def _lookup_basic_attrs_by_ids(db, product_id: int | None, variant_id: int | None):
     """
-    Returns {"category": ..., "fabric": ..., "occasion": ...} or {} if not found.
-    Tries several common schema patterns; safe even if columns don't exist.
-    Order: variant JSON → variant columns → product JSON → product columns.
+    Returns {"category": ..., "fabric": ..., "occasion": ..., "color": ..., "is_rental": ...}
+    Tries several schema patterns; safe even if columns don't exist.
+    Order: variant JSON → variant row (*) → product JSON → product row (*).
     """
-    # A) VARIANT-LEVEL
+    # ---------- A) VARIANT-LEVEL ----------
     if variant_id:
-        # A1) JSON columns on variants
+        # A1) Try JSON columns on variants
         for json_col in ["metadata", "meta", "attrs", "attributes"]:
             row = await _fetch_one_or_rollback(db, f"""
                 SELECT
-                    {json_col}->>'category' AS category,
-                    {json_col}->>'fabric'   AS fabric,
-                    {json_col}->>'occasion' AS occasion
+                    {json_col}->>'category'  AS category,
+                    {json_col}->>'fabric'    AS fabric,
+                    {json_col}->>'occasion'  AS occasion,
+                    {json_col}->>'color'     AS color,
+                    {json_col}->>'is_rental' AS is_rental
                 FROM product_variants pv
                 WHERE pv.id = :vid
                 LIMIT 1
             """, {"vid": variant_id})
-            if row and (row.category or row.fabric or row.occasion):
+            if row and any([row.category, row.fabric, row.occasion, row.color, row.is_rental]):
                 return {
                     "category": row.category,
                     "fabric": row.fabric,
-                    "occasion": row.occasion
+                    "occasion": row.occasion,
+                    "color": row.color,
+                    "is_rental": _norm_bool(row.is_rental),
                 }
 
-        # A2) Direct columns on variants
-        row = await _fetch_one_or_rollback(db, """
-            SELECT
-                pv.category AS category,
-                pv.fabric   AS fabric,
-                pv.occasion AS occasion
-            FROM product_variants pv
+        # A2) Schema-safe: fetch the whole row and pick available columns
+        vrow = await _fetch_one_or_rollback(db, """
+            SELECT * FROM product_variants pv
             WHERE pv.id = :vid
             LIMIT 1
         """, {"vid": variant_id})
-        if row and (row.category or row.fabric or row.occasion):
-            return {
-                "category": row.category,
-                "fabric": row.fabric,
-                "occasion": row.occasion
-            }
+        if vrow:
+            m = dict(vrow._mapping)
+            color = _first_nonempty(m, ["color", "colour", "primary_color", "colors"])
+            # rental flags we might see on variants
+            rental_flag = _first_nonempty(m, ["is_rental", "for_rent", "is_for_rent", "rental_available", "rentable"])
+            rental_price = _first_nonempty(m, ["rental_price", "rent_price", "price_rent"])
+            is_rental = _norm_bool(rental_flag)
+            if is_rental is None and rental_price not in (None, "", 0, "0"):
+                is_rental = True
 
-    # B) PRODUCT-LEVEL
+            # category/fabric/occasion direct columns if present
+            category = _first_nonempty(m, ["category"])
+            fabric   = _first_nonempty(m, ["fabric"])
+            occasion = _first_nonempty(m, ["occasion"])
+
+            if any([category, fabric, occasion, color, is_rental is not None]):
+                return {
+                    "category": category,
+                    "fabric": fabric,
+                    "occasion": occasion,
+                    "color": color,
+                    "is_rental": is_rental,
+                }
+
+    # ---------- B) PRODUCT-LEVEL ----------
     if product_id:
-        # B1) JSON columns on products
+        # B1) Try JSON columns on products
         for json_col in ["metadata", "meta", "attrs", "attributes"]:
             row = await _fetch_one_or_rollback(db, f"""
                 SELECT
-                    {json_col}->>'category' AS category,
-                    {json_col}->>'fabric'   AS fabric,
-                    {json_col}->>'occasion' AS occasion
+                    {json_col}->>'category'  AS category,
+                    {json_col}->>'fabric'    AS fabric,
+                    {json_col}->>'occasion'  AS occasion,
+                    {json_col}->>'color'     AS color,
+                    {json_col}->>'is_rental' AS is_rental
                 FROM products p
                 WHERE p.id = :pid
                 LIMIT 1
             """, {"pid": product_id})
-            if row and (row.category or row.fabric or row.occasion):
+            if row and any([row.category, row.fabric, row.occasion, row.color, row.is_rental]):
                 return {
                     "category": row.category,
                     "fabric": row.fabric,
-                    "occasion": row.occasion
+                    "occasion": row.occasion,
+                    "color": row.color,
+                    "is_rental": _norm_bool(row.is_rental),
                 }
 
-        # B2) Direct columns on products
-        row = await _fetch_one_or_rollback(db, """
-            SELECT
-                p.category AS category,
-                p.fabric   AS fabric,
-                p.occasion AS occasion
-            FROM products p
+        # B2) Schema-safe: fetch the whole product row
+        prow = await _fetch_one_or_rollback(db, """
+            SELECT * FROM products p
             WHERE p.id = :pid
             LIMIT 1
         """, {"pid": product_id})
-        if row and (row.category or row.fabric or row.occasion):
-            return {
-                "category": row.category,
-                "fabric": row.fabric,
-                "occasion": row.occasion
-            }
+        if prow:
+            m = dict(prow._mapping)
+            color = _first_nonempty(m, ["color", "colour", "primary_color", "colors"])
+            rental_flag = _first_nonempty(m, ["is_rental", "for_rent", "is_for_rent", "rental_available", "rentable"])
+            rental_price = _first_nonempty(m, ["rental_price", "rent_price", "price_rent"])
+            is_rental = _norm_bool(rental_flag)
+            if is_rental is None and rental_price not in (None, "", 0, "0"):
+                is_rental = True
+
+            category = _first_nonempty(m, ["category"])
+            fabric   = _first_nonempty(m, ["fabric"])
+            occasion = _first_nonempty(m, ["occasion"])
+
+            if any([category, fabric, occasion, color, is_rental is not None]):
+                return {
+                    "category": category,
+                    "fabric": fabric,
+                    "occasion": occasion,
+                    "color": color,
+                    "is_rental": is_rental,
+                }
 
     return {}
+
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -288,15 +321,26 @@ def _pick_from_allowed(text_lc: str, allowed: list[str] | None) -> str | None:
 def extract_attrs_from_text(caption: str | None,
                             allowed_categories: list[str] | None,
                             allowed_fabrics: list[str] | None,
-                            allowed_occasions: list[str] | None):
+                            allowed_occasions: list[str] | None,
+                            allowed_colors: list[str] | None):
     """
-    Heuristic fallback: scan caption to guess attrs from allowed lists.
+    Heuristic fallback: scan caption to guess attrs from allowed lists + rental intent.
     """
     t = (caption or "").lower()
+
+    def _infer_is_rental(text_lc: str) -> bool | None:
+        if "rent" in text_lc or "rental" in text_lc:
+            return True
+        if any(x in text_lc for x in ["buy", "purchase", "sale:", "selling price", "mrp", "price:"]) and "rent" not in text_lc:
+            return False
+        return None
+
     return {
         "category": _pick_from_allowed(t, allowed_categories),
         "fabric":   _pick_from_allowed(t, allowed_fabrics),
         "occasion": _pick_from_allowed(t, allowed_occasions),
+        "color":    _pick_from_allowed(t, allowed_colors),
+        "is_rental": _infer_is_rental(t),
     }
 
 
@@ -308,17 +352,20 @@ async def get_attrs_for_product_async(product_id: int | None,
                                       variant_id: int | None) -> dict:
     """
     Open async session and try variant/product patterns; return normalized dict.
-    Guarantees keys: category, fabric, occasion (values may be None).
+    Keys: category, fabric, occasion, color, is_rental  (values may be None).
     """
     async with SessionLocal() as db:
         attrs = await _lookup_basic_attrs_by_ids(db, product_id, variant_id)
         out = {}
-        for k in ("category", "fabric", "occasion"):
+        for k in ("category", "fabric", "occasion", "color", "is_rental"):
             v = (attrs or {}).get(k)
             if isinstance(v, str) and not v.strip():
                 v = None
+            if k == "is_rental":
+                v = _norm_bool(v)
             out[k] = v
         return out
+
 def find_assistant_image_caption_by_msg_id(messages, msg_id: str) -> str | None:
     for m in messages or []:
         if (
@@ -363,6 +410,142 @@ def _ensure_allowed_lists(local_vars: dict):
         local_vars.get("tenant_size", []) or [],
         local_vars.get("tenant_type", []) or [],
     )
+
+def _first_nonempty(mapping, keys):
+    """Return the first non-empty value in mapping for any of the keys."""
+    if not mapping:
+        return None
+    for k in keys:
+        if k in mapping and mapping[k] not in (None, "", " ", []):
+            return mapping[k]
+    return None
+
+def _norm_bool(v):
+    """Normalize many DB representations to True/False/None."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in {"1", "true", "t", "yes", "y"}:
+        return True
+    if s in {"0", "false", "f", "no", "n"}:
+        return False
+    return None
+
+def _pick_from_allowed(text_lc: str, allowed: list[str] | None) -> str | None:
+    if not text_lc:
+        return None
+    for w in (allowed or []):
+        if not w:
+            continue
+        wlc = w.lower().strip()
+        if wlc and wlc in text_lc:
+            return wlc
+    return None
+
+async def fetch_occasion_from_db(db, product_id: int | None, variant_id: int | None) -> str | None:
+    """
+    Try mapping table (product_variant_occasions -> occasions.name),
+    then direct columns on product_variants / products if present.
+    Returns lowercased occasion or None.
+    """
+    params = {}
+    if variant_id:
+        # A) mapping table by variant
+        q = text("""
+            SELECT LOWER(TRIM(o.name)) AS occ
+            FROM product_variant_occasions pvo
+            JOIN occasions o ON o.id = pvo.occasion_id
+            WHERE pvo.variant_id = :vid
+              AND o.name IS NOT NULL AND TRIM(o.name) <> ''
+            LIMIT 1
+        """)
+        row = (await db.execute(q, {"vid": variant_id})).first()
+        if row and row[0]:
+            return row[0]
+
+        # B) direct column on variant
+        q2 = text("""
+            SELECT LOWER(TRIM(occasion)) AS occ
+            FROM product_variants
+            WHERE id = :vid AND occasion IS NOT NULL AND TRIM(occasion) <> ''
+            LIMIT 1
+        """)
+        row2 = (await db.execute(q2, {"vid": variant_id})).first()
+        if row2 and row2[0]:
+            return row2[0]
+
+        # C) fallback via product direct column
+        q3 = text("""
+            SELECT LOWER(TRIM(p.occasion)) AS occ
+            FROM products p
+            JOIN product_variants pv ON pv.product_id = p.id
+            WHERE pv.id = :vid AND p.occasion IS NOT NULL AND TRIM(p.occasion) <> ''
+            LIMIT 1
+        """)
+        row3 = (await db.execute(q3, {"vid": variant_id})).first()
+        if row3 and row3[0]:
+            return row3[0]
+
+    if product_id:
+        # mapping by product (via any variant)
+        q4 = text("""
+            SELECT LOWER(TRIM(o.name)) AS occ
+            FROM products p
+            JOIN product_variants pv ON pv.product_id = p.id
+            JOIN product_variant_occasions pvo ON pvo.variant_id = pv.id
+            JOIN occasions o ON o.id = pvo.occasion_id
+            WHERE p.id = :pid
+              AND o.name IS NOT NULL AND TRIM(o.name) <> ''
+            LIMIT 1
+        """)
+        row4 = (await db.execute(q4, {"pid": product_id})).first()
+        if row4 and row4[0]:
+            return row4[0]
+
+        # direct column on product
+        q5 = text("""
+            SELECT LOWER(TRIM(occasion)) AS occ
+            FROM products
+            WHERE id = :pid AND occasion IS NOT NULL AND TRIM(occasion) <> ''
+            LIMIT 1
+        """)
+        row5 = (await db.execute(q5, {"pid": product_id})).first()
+        if row5 and row5[0]:
+            return row5[0]
+
+    return None
+
+def infer_occasion_from_caption(caption: str | None, allowed_occasions: list[str] | None) -> str | None:
+    t = (caption or "").lower()
+    occ_list = allowed_occasions 
+    return _pick_from_allowed(t, occ_list)
+
+async def fill_occasion_if_missing(
+    db,
+    entities: dict,
+    *,
+    product_id: int | None,
+    variant_id: int | None,
+    caption: str | None,
+    allowed_occasions: list[str] | None
+) -> dict:
+    """
+    If category or color is present but occasion is missing, try DB first, then caption.
+    Returns the same dict (mutated) for convenience.
+    """
+    has_trigger = (entities.get("category") is not None) or (entities.get("color") is not None)
+    if not has_trigger:
+        return entities
+
+    if not entities.get("occasion"):
+        occ = await fetch_occasion_from_db(db, product_id, variant_id)
+        if not occ:
+            occ = infer_occasion_from_caption(caption, allowed_occasions)
+        if occ:
+            entities["occasion"] = occ
+    return entities
 
 # Optional explicit exports
 __all__ = [

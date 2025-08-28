@@ -679,9 +679,9 @@ async def receive_cloud_webhook(request: Request):
         
         replied_message_id = None
         context_obj = msg.get("context")
-        # Swipe reply FLow 
+        # Swipe reply FLow
         if context_obj and context_obj.get("id"):
-            logging.info("="*100)
+            logging.info("=" * 100)
             logging.info("========= Swipe Reply to Bot =========")
             replied_message_id = context_obj.get("id")
             logging.info(f"User replied to message ID: {replied_message_id}")
@@ -696,17 +696,19 @@ async def receive_cloud_webhook(request: Request):
 
                     # Persist inbound
                     customer = await get_or_create_customer(db, tenant_id=tenant_id, phone=from_waid)
-                    logging.info("="*100)
+                    logging.info("=" * 100)
                     logging.info(f"========{from_waid}")
-                    logging.info("="*100)
-                    transcript = await get_transcript_by_phone(from_waid,db)
+                    logging.info("=" * 100)
+
+                    transcript = await get_transcript_by_phone(from_waid, db)
                     messages = _normalize_messages(transcript)
+
                     # 1) Pick the right caption (image caption if reply was to an image; else previous assistant image)
                     caption = find_assistant_image_caption_by_msg_id(messages, replied_message_id)
                     if not caption:
                         caption = find_prev_assistant_image_caption(messages, replied_message_id)
 
-                    logging.info("="*20)
+                    logging.info("=" * 20)
                     logging.info(f"=========Caption used for resolve======== {caption}")
 
                     # 2) Resolve product name + ids from caption (URL → DB, else caption line)  ✅ async
@@ -715,7 +717,10 @@ async def receive_cloud_webhook(request: Request):
                     resolved_product_id  = resolved.get("product_id")
                     resolved_variant_id  = resolved.get("variant_id")
                     resolved_url         = resolved.get("product_url")
-                    logging.info(f"✅ Resolved swipe → name='{resolved_name}', product_id={resolved_product_id}, variant_id={resolved_variant_id}, url={resolved_url}")
+                    logging.info(
+                        f"✅ Resolved swipe → name='{resolved_name}', product_id={resolved_product_id}, "
+                        f"variant_id={resolved_variant_id}, url={resolved_url}"
+                    )
 
                     # We no longer use product_entities in swipe flow
                     product_entities = None
@@ -739,71 +744,92 @@ async def receive_cloud_webhook(request: Request):
                     # Make sure entities exists before merging
                     if not isinstance(entities, dict):
                         entities = {}
+
                     # 3) Fetch category/fabric/occasion from DB by ids (fast), with caption fallback
+                    # Fetch attrs from DB (category, fabric, occasion, color, is_rental)
                     attrs_db = await get_attrs_for_product_async(resolved_product_id, resolved_variant_id)
+
+                    # Fallback: infer from caption using allowed lists (now includes colors and is_rental)
                     attrs_text = extract_attrs_from_text(
                         caption,
                         allowed_categories=tenant_categories,
                         allowed_fabrics=tenant_fabric,
                         allowed_occasions=tenant_occasion,
+                        allowed_colors=tenant_color,   # ← NEW
                     )
 
-                    category = attrs_db.get("category") or attrs_text.get("category")
-                    fabric   = attrs_db.get("fabric")   or attrs_text.get("fabric")
-                    occasion = attrs_db.get("occasion") or attrs_text.get("occasion")
+                    category  = attrs_db.get("category")  or attrs_text.get("category")
+                    fabric    = attrs_db.get("fabric")    or attrs_text.get("fabric")
+                    occasion  = attrs_db.get("occasion")  or attrs_text.get("occasion")
+                    color     = attrs_db.get("color")     or attrs_text.get("color")
+                    is_rental = attrs_db.get("is_rental")
+                    if is_rental is None:
+                        is_rental = attrs_text.get("is_rental")
 
-                    # Merge into entities BEFORE intent/analyze
+                    # Keep your resolved attrs as a seed (do NOT merge into entities yet)
                     seed_entities = {"name": resolved_name}
-                    if category: seed_entities["category"] = category
-                    if fabric:   seed_entities["fabric"]   = fabric
-                    if occasion: seed_entities["occasion"] = occasion
+                    if category:  seed_entities["category"]  = category
+                    if fabric:    seed_entities["fabric"]    = fabric
+                    if occasion:  seed_entities["occasion"]  = occasion
+                    if color:     seed_entities["color"]     = color
+                    if is_rental is not None:
+                        seed_entities["is_rental"] = bool(is_rental)
 
                     logging.info(f"[ATTRS] From DB: {attrs_db} | From text: {attrs_text} | Seed: {seed_entities}")
 
-                    # Run intent detection (it may return None values)
-                    intent_type, ai_entities, confidence = await detect_textile_intent_openai(
-                        text_msg, current_language,
-                        allowed_categories=tenant_categories,
-                        allowed_fabric=tenant_fabric,
-                        allowed_color=tenant_color,
-                        allowed_occasion=tenant_occasion,
-                        allowed_size=tenant_size,
-                        allowed_type=tenant_type,
-                    )
-                    entities = ai_entities or {}
-                    for k, v in (seed_entities or {}).items():
-                        if v and not entities.get(k):   # only fill when AI left it empty/None
-                            entities[k] = v
+                    # ---- AI pipeline (safe) ---------------------------------------------------------
+                    try:
+                        # Run intent detection (it may return None values)
+                        intent_type, ai_entities, confidence = await detect_textile_intent_openai(
+                            text_msg, current_language,
+                            allowed_categories=tenant_categories,
+                            allowed_fabric=tenant_fabric,
+                            allowed_color=tenant_color,
+                            allowed_occasion=tenant_occasion,
+                            allowed_size=tenant_size,
+                            allowed_type=tenant_type,
+                        )
+                        entities = ai_entities or {}
+                        for k, v in (seed_entities or {}).items():
+                            if k == "is_rental":
+                                # special: only fill if AI didn't decide (is None or key missing)
+                                if entities.get(k) is None:
+                                    entities[k] = v
+                            else:
+                                if v and not entities.get(k):
+                                    entities[k] = v
 
-                    logging.info(f"[ENTITIES] After coalesce with seed: {entities}")
-                    # entities already has name/category/fabric/occasion merged
-                    raw_reply = await analyze_message(
-                        text=text_msg,
-                        tenant_id=tenant_id,
-                        tenant_name=tenant_name,
-                        language=current_language,
-                        intent=intent_type,
-                        new_entities=entities,   # ← this now includes name/fabric/occasion
-                        intent_confidence=confidence,
-                        mode="chat",
-                        session_key=f"{tenant_id}:whatsapp:wa:{from_waid}",
-                    )
+                        logging.info(f"[ENTITIES] After coalesce with seed: {entities}")
 
+                        # entities already has name/category/fabric/occasion merged
+                        raw_reply = await analyze_message(
+                            text=text_msg,
+                            tenant_id=tenant_id,
+                            tenant_name=tenant_name,
+                            language=current_language,
+                            intent=intent_type,
+                            new_entities=entities,   # ← this now includes name/fabric/occasion
+                            intent_confidence=confidence,
+                            mode="chat",
+                            session_key=f"{tenant_id}:whatsapp:wa:{from_waid}",
+                        )
 
-                    reply_text = raw_reply.get("reply_text") if isinstance(raw_reply, dict) else str(raw_reply)
-                    collected_entities = raw_reply.get("collected_entities") if isinstance(raw_reply, dict) else str(raw_reply)
-                except Exception:
-                    logging.exception("[CLOUD] AI pipeline failed")
-                    reply_text = "Sorry, I'm having trouble. I'll get back to you shortly."
+                        reply_text = raw_reply.get("reply_text") if isinstance(raw_reply, dict) else str(raw_reply)
+                        collected_entities = raw_reply.get("collected_entities") if isinstance(raw_reply, dict) else {}
+                    except Exception:
+                        logging.exception("[CLOUD] AI pipeline failed")
+                        raw_reply = {}
+                        reply_text = "Sorry, I'm having trouble. I'll get back to you shortly."
+                        collected_entities = {}
+                    # -----------------------------------------------------------------------------
 
-                    print("reply=", reply_text)
+                    print("--reply=", reply_text)
 
                     # --- Safely extract followup + media/products
                     raw_obj = raw_reply if isinstance(raw_reply, dict) else {}
                     followup_text = (raw_obj.get("followup_reply") or "").strip() or None
-                    print("Followup_Question = ",followup_text)
-                    products      = (raw_obj.get("pinecone_data") or [])[:5]  # max 5
-                    # media_urls  = raw_obj.get("media") or []  # (unused here)
+                    print("Followup_Question = ", followup_text)
+                    products = (raw_obj.get("pinecone_data") or [])[:5]  # max 5
 
                     sent_count = 0
                     out_msgs: list[tuple[str, str, str | None]] = []
@@ -814,12 +840,8 @@ async def receive_cloud_webhook(request: Request):
                             img = _primary_image_for_product(prod)
                             if not img:
                                 continue
-                                
-                            # NEW: log product details cleanly
-                            # details = _product_log_dict(prod)
-                            # details["image_url"] = img
-                            # logging.info(f"[PRODUCT] Sending product to {from_waid}: {json.dumps(details, ensure_ascii=False)}")
 
+                            # Send product image with caption
                             mid = await send_whatsapp_image_cloud(
                                 to_waid=from_waid,
                                 image_url=img,
@@ -828,7 +850,7 @@ async def receive_cloud_webhook(request: Request):
                             if mid:
                                 sent_count += 1
                                 logging.info(f"[PRODUCT] Sent product message_id={mid} to {from_waid}")
-                            
+
                             out_msgs.append(("image", _product_caption(prod), mid))
 
                         if followup_text:
@@ -842,8 +864,9 @@ async def receive_cloud_webhook(request: Request):
                         if followup_text:
                             mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
                             out_msgs.append(("text", followup_text, mid))
-                    
+
                     logging.info(f"============== out Messages :{out_msgs}=================")
+
                     # --- Persist all outbound messages BEFORE returning
                     for kind, txt, mid in out_msgs:
                         meta = {"kind": kind, "channel": "cloud_api"}
@@ -854,26 +877,14 @@ async def receive_cloud_webhook(request: Request):
                         if kind == "image":
                             if isinstance(collected_entities, (dict, list)):
                                 meta["entities"] = collected_entities
-
-                        # If this is our synthetic "entities" record, give it a unique id and store JSON
-                        if kind == "entities":
-                            base = mid or msg_id  # fall back to inbound id if needed
-                            save_id = f"{base}:entities"
-                            # store entities as compact JSON in text, and also inside meta
-                            if isinstance(txt, (dict, list)):
-                                meta["entities"] = txt
-                                save_text = json.dumps(txt, ensure_ascii=False)
-                            else:
-                                save_text = str(txt)
-
-                        await append_transcript_message(
-                            db, chat_session,
-                            role="assistant",
-                            text=save_text,
-                            msg_id=save_id,
-                            direction="out",
-                            meta=meta,
-                        )
+                            await append_transcript_message(
+                                db, chat_session,
+                                role="assistant",
+                                text=save_text,
+                                msg_id=save_id,
+                                direction="out",
+                                meta=meta,
+                            )
 
                     await db.commit()
 
@@ -890,6 +901,7 @@ async def receive_cloud_webhook(request: Request):
                     return {"status": "error"}
                 finally:
                     break
+
         else:
             # ------------------------ Normal Flow ------------------------
             logging.info("*" * 100)
