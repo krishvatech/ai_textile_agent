@@ -1677,10 +1677,14 @@ async def analyze_message(
                         == str(resolve_filters.get(key) or "").strip().lower()) if resolve_filters.get(key) else True
 
             strict = [m for m in (matches or []) if _match_attr(m, "color") and _match_attr(m, "size") and _match_attr(m, "fabric")]
-            pick = strict if len(strict) == 1 else (matches if len(matches or []) == 1 else None)
+            picked = None
+            if len(strict) == 1:
+                picked = strict[0]
+            elif len(matches or []) == 1:
+                picked = matches[0]
 
-            if pick and pick.get("variant_id"):
-                variant_id = pick["variant_id"]
+            if picked and picked.get("variant_id"):
+                variant_id = picked["variant_id"]
                 acc_entities["product_variant_id"] = variant_id
             else:
                 opts = (matches or [])[:5]

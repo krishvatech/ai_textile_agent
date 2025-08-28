@@ -204,7 +204,7 @@ Decision rules (apply in order; pick exactly one):
    Behavior:
      • intent = stock_check
      • entities.is_rental: set false if buy wording is explicit; true if rent wording is explicit; else leave as-is/null.
-     • entities.quantity: if a number is present, set it; otherwise default to 1.
+     • entities.quantity: set it ONLY if the message contains a numeric count; otherwise leave null.
    This rule OVERRIDES Rules 1, 4 and 4a, and takes precedence over Rule 0 only when the message is NOT an explicit confirmation (“confirm/book/pay”).
 
 2) If a product category is explicitly present → product_search, UNLESS Rule 0 or 1a/1b/1c/1d/1e already fired.
@@ -258,7 +258,12 @@ Entity extraction guidelines (normalize; be conservative; use null when unknown)
   4) If {allowed_size} contains **both** numbers and letters, first try to resolve within the same kind (number→nearest number, letter→nearest letter). If not possible, choose the closest across kinds by the same conceptual rule.
   5) If nothing maps confidently, set size = null (the app will ask a follow-up). Do **not** output values outside {allowed_size}.
 - occasion: The product occasion **Must be normalized to one of {allowed_occasion}**. Normalize to standard English occasion names regardless of language/script; if uncertain, choose the closest standard occasion
-- quantity: Number of pieces desired (number). Convert digits or number-words into an integer. Handle English / Hinglish / Hindi / Gujarati in native or roman scripts. Output quantity as a JSON number (not a string). If absent or ambiguous, set null.
+- quantity: 
+    Quantity rule (STRICT):
+   • Never infer or default quantity.
+   • Set "quantity" ONLY if the user explicitly typed a numeric count in the message.
+   • If not explicit, return "quantity": null.
+Number of pieces desired (number). Convert digits or number-words into an integer. Handle English / Hinglish / Hindi / Gujarati in native or roman scripts. Output quantity as a JSON number (not a string). If absent or ambiguous, set null.
 - location: Delivery location if stated; else null.
 - is_rental: - Set `is_rental = true` only if explicit RENT words are present (rent/kiraye/bhade/lease/hire; incl. Hindi/Gujarati + romanized).
 - Set `is_rental = false` only if explicit BUY words are present (buy/purchase/order/kharid*; incl. Hindi/Gujarati + romanized).
