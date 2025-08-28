@@ -878,9 +878,10 @@ async def receive_cloud_webhook(request: Request):
                 finally:
                     break
         else:
-            # Normal FLow 
-            logging.info("*"*100)
+            # ------------------------ Normal Flow ------------------------
+            logging.info("*" * 100)
             logging.info("Normal Reply to Bot")
+
             async for db in get_db():
                 try:
                     tenant_id = await get_tenant_id_by_phone(business_number, db)
@@ -892,36 +893,168 @@ async def receive_cloud_webhook(request: Request):
                     # Persist inbound
                     customer = await get_or_create_customer(db, tenant_id=tenant_id, phone=from_waid)
                     logging.info(f"========{from_waid}")
+
+                    # Pull transcript and derive product context (for logs + intent merge)
                     transcript = await get_transcript_by_phone(from_waid, db)
-                    messages = _normalize_messages(transcript)
-                    last_assistant = next((m for m in reversed(messages) if m.get("role") == "assistant" and m.get("msg_id")), None)
-                    if last_assistant:
-                        derived_reply_id = last_assistant.get("msg_id")
-                        product_text = find_assistant_text_by_msg_id(messages, derived_reply_id)
-                        product_entities = find_entities_by_msg_id(messages, derived_reply_id)
-                        logging.info("="*20)
-                        logging.info(f"=========Product_text(derived)======== {product_text}")
-                        logging.info(f"=========Product_entities(derived)==== {product_entities}")
+                    messages   = _normalize_messages(transcript)
+
+                    # Use last assistant message as the "reply_id" context when user isn't swiping
+                    last_assistant = next((m for m in reversed(messages)
+                                        if m.get("role") == "assistant" and m.get("msg_id")), None)
+                    derived_reply_id   = last_assistant.get("msg_id") if last_assistant else None
+                    product_text       = find_assistant_text_by_msg_id(messages, derived_reply_id) if derived_reply_id else None
+                    product_entities   = find_entities_by_msg_id(messages, derived_reply_id) if derived_reply_id else None
+
+                    logging.info("=" * 20)
+                    logging.info(f"=========Product_text(derived)======== {product_text}")
+                    logging.info(f"=========Product_entities(derived)==== {product_entities}")
+
                     chat_session = await get_or_open_active_session(db, customer_id=customer.id)
+
+                    # Always store inbound first
                     await append_transcript_message(
-                        db, chat_session, role="user", text=text_msg,
-                        msg_id=msg_id, direction="in", meta={"raw": data, "channel": "cloud_api","reply_to": replied_message_id}
+                        db, chat_session,
+                        role="user", text=text_msg,
+                        msg_id=msg_id, direction="in",
+                        meta={"raw": data, "channel": "cloud_api", "reply_to": None},
                     )
-                    if mtype == "image" and "image" in msg:
+
+                    # ------------------------ PRIORITIZED TYPE DISPATCH ------------------------
+                    # 1) TEXT
+                    if mtype == "text" and "text" in msg:
+                        # Detect language
+                        SUPPORTED_LANGUAGES = ["gu-IN", "hi-IN", "en-IN", "en-US"]
+                        current_language = customer.preferred_language or "en-IN"
+                        if current_language not in SUPPORTED_LANGUAGES:
+                            detected = await detect_language(text_msg, "en-IN")
+                            current_language = detected[0] if isinstance(detected, tuple) else detected
+                            await update_customer_language(db, customer.id, current_language)
+
+                        # Tenant filters
+                        tenant_categories = await get_tenant_category_by_phone(business_number, db)
+                        tenant_fabric     = await get_tenant_fabric_by_phone(business_number, db)
+                        tenant_color      = await get_tenant_color_by_phone(business_number, db)
+                        tenant_occasion   = await get_tenant_occasion_by_phone(business_number, db)
+                        tenant_size       = await get_tenant_size_by_phone(business_number, db)
+                        tenant_type       = await get_tenant_type_by_phone(business_number, db)
+
+                        # --- AI pipeline
+                        raw_reply = None
                         try:
-                            media_id = msg["image"].get("id")  # e.g. "640153432482263"
+                            intent_type, entities, confidence = await detect_textile_intent_openai(
+                                text_msg, current_language,
+                                allowed_categories=tenant_categories,
+                                allowed_fabric=tenant_fabric,
+                                allowed_color=tenant_color,
+                                allowed_occasion=tenant_occasion,
+                                allowed_size=tenant_size,
+                                allowed_type=tenant_type,
+                            )
+
+                            # Merge any entities we captured alongside the last assistant card
+                            if product_entities:
+                                entities = _merge_entities(entities, product_entities)  # fill-only
+                                logging.info(f"[ENTITIES] merged with product_entities (normal flow): {entities}")
+
+                            logging.info("=" * 20)
+                            logging.info(f"New ENtities Form the intent type ====== {entities}")
+                            logging.info("=" * 20)
+
+                            raw_reply = await analyze_message(
+                                text=text_msg,
+                                tenant_id=tenant_id,
+                                tenant_name=tenant_name,
+                                language=current_language,
+                                intent=intent_type,
+                                new_entities=entities,
+                                intent_confidence=confidence,
+                                mode="chat",
+                                session_key=f"{tenant_id}:whatsapp:wa:{from_waid}",
+                            )
+                            reply_text         = raw_reply.get("reply_text") if isinstance(raw_reply, dict) else str(raw_reply)
+                            collected_entities = raw_reply.get("collected_entities") if isinstance(raw_reply, dict) else None
+                        except Exception:
+                            logging.exception("[CLOUD] AI pipeline failed")
+                            reply_text = "Sorry, I'm having trouble. I'll get back to you shortly."
+                            collected_entities = None
+
+                        print("reply=", reply_text)
+
+                        # --- Outbound (products + followup + text)
+                        raw_obj       = raw_reply if isinstance(raw_reply, dict) else {}
+                        followup_text = (raw_obj.get("followup_reply") or "").strip() or None
+                        products      = (raw_obj.get("pinecone_data") or [])[:5]
+
+                        sent_count = 0
+                        out_msgs: list[tuple[str, str, str | None]] = []
+
+                        if products:
+                            for prod in products:
+                                img = _primary_image_for_product(prod)
+                                if not img:
+                                    continue
+                                mid = await send_whatsapp_image_cloud(
+                                    to_waid=from_waid, image_url=img, caption=_product_caption(prod)
+                                )
+                                if mid:
+                                    sent_count += 1
+                                    logging.info(f"[PRODUCT] Sent product message_id={mid} to {from_waid}")
+                                out_msgs.append(("image", _product_caption(prod), mid))
+                            if followup_text:
+                                await asyncio.sleep(1.0)
+                                mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
+                                out_msgs.append(("text", followup_text, mid))
+                        else:
+                            if reply_text:
+                                mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
+                                out_msgs.append(("text", reply_text, mid))
+                            if followup_text:
+                                mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
+                                out_msgs.append(("text", followup_text, mid))
+
+                        logging.info(f"============== out Messages :{out_msgs}=================")
+
+                        # Persist outbound
+                        for kind, txt, mid in out_msgs:
+                            meta = {"kind": kind, "channel": "cloud_api"}
+                            save_id   = mid
+                            save_text = txt
+
+                            if kind == "image" and isinstance(collected_entities, (dict, list)):
+                                meta["entities"] = collected_entities
+
+                            if kind == "entities":
+                                base    = mid or msg_id
+                                save_id = f"{base}:entities"
+                                if isinstance(txt, (dict, list)):
+                                    meta["entities"] = txt
+                                    save_text = json.dumps(txt, ensure_ascii=False)
+                                else:
+                                    save_text = str(txt)
+
+                            await append_transcript_message(
+                                db, chat_session,
+                                role="assistant", text=save_text,
+                                msg_id=save_id, direction="out", meta=meta,
+                            )
+
+                        await db.commit()
+                        return {
+                            "status": "ok",
+                            "sent_images": sent_count,
+                            "sent_followup": any(m[0] == "text" and m[1] == followup_text for m in out_msgs),
+                            "fallback": "none" if products else "text",
+                        }
+
+                    # 2) IMAGE
+                    elif mtype == "image" and "image" in msg:
+                        try:
+                            media_id  = msg["image"].get("id")
                             img_bytes = await download_media_bytes(media_id)
 
-                            # Tenant scope: search only within this tenant (or set to None for all)
-                            matches = visual_search_bytes_sync(
-                                img_bytes,
-                                tenant_id=tenant_id,
-                                top_k=20,
-                            )
-                            matches = group_matches_by_product(matches)
-                            # Build WhatsApp image messages (uses image_url + caption)
-                            matches = matches[:5]  
-                            msgs = format_matches_for_whatsapp_images(matches, limit=5)
+                            matches = visual_search_bytes_sync(img_bytes, tenant_id=tenant_id, top_k=20)
+                            matches = group_matches_by_product(matches)[:5]
+                            msgs    = format_matches_for_whatsapp_images(matches, limit=5)
 
                             out_msgs: list[tuple[str, str, str | None]] = []
                             sent_count = 0
@@ -937,19 +1070,14 @@ async def receive_cloud_webhook(request: Request):
                                         sent_count += 1
                                     out_msgs.append(("image", m["image"].get("caption", ""), mid))
                                 else:
-                                    # fallback text (e.g., no results)
                                     body = (m.get("text") or {}).get("body", "No visually similar items found.")
-                                    mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=body)
+                                    mid  = await send_whatsapp_reply_cloud(to_waid=from_waid, body=body)
                                     out_msgs.append(("text", body, mid))
 
-                            # Persist outbound replies
                             for kind, txt, mid in out_msgs:
                                 await append_transcript_message(
                                     db, chat_session,
-                                    role="assistant",
-                                    text=txt,
-                                    msg_id=mid,
-                                    direction="out",
+                                    role="assistant", text=txt, msg_id=mid, direction="out",
                                     meta={"kind": kind, "channel": "cloud_api"}
                                 )
 
@@ -961,152 +1089,128 @@ async def receive_cloud_webhook(request: Request):
                             await db.rollback()
                             mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body="Sorry, I couldn't read that image.")
                             await append_transcript_message(
-                                db, chat_session,
-                                role="assistant", text="(visual search error)", msg_id=mid,
-                                direction="out", meta={"kind": "text", "channel": "cloud_api"}
+                                db, chat_session, role="assistant", text="(visual search error)",
+                                msg_id=mid, direction="out", meta={"kind": "text", "channel": "cloud_api"}
                             )
                             await db.commit()
                             return {"status": "error", "mode": "visual_search_failed"}
-
-
-                    # Detect language
-                    SUPPORTED_LANGUAGES = ["gu-IN", "hi-IN", "en-IN", "en-US"]
-                    current_language = customer.preferred_language or "en-IN"
-                    if current_language not in SUPPORTED_LANGUAGES:
-                        detected = await detect_language(text_msg, "en-IN")
-                        current_language = detected[0] if isinstance(detected, tuple) else detected
-                        await update_customer_language(db, customer.id, current_language)
-
-                    # Tenant filters
-                    tenant_categories = await get_tenant_category_by_phone(business_number, db)
-                    tenant_fabric    = await get_tenant_fabric_by_phone(business_number, db)
-                    tenant_color     = await get_tenant_color_by_phone(business_number, db)
-                    tenant_occasion  = await get_tenant_occasion_by_phone(business_number, db)
-                    tenant_size  = await get_tenant_size_by_phone(business_number, db)
-                    tenant_type  = await get_tenant_type_by_phone(business_number, db)
-
-                    # --- AI pipeline
-                    raw_reply = None
-                    try:
-                        intent_type, entities, confidence = await detect_textile_intent_openai(
-                            text_msg, current_language,
-                            allowed_categories=tenant_categories,
-                            allowed_fabric=tenant_fabric,
-                            allowed_color=tenant_color,
-                            allowed_occasion=tenant_occasion,
-                            allowed_size=tenant_size,
-                            allowed_type=tenant_type,
-                        )
-                        if product_entities:
-                            entities = _merge_entities(entities, product_entities)   # override=False (fill only)
-                            logging.info(f"[ENTITIES] merged with product_entities (normal flow): {entities}")
-                        logging.info("="*20)
-                        logging.info(f"New ENtities Form the intent type ====== {entities}")
-                        logging.info("="*20)
-                        raw_reply = await analyze_message(
-                            text=text_msg,
-                            tenant_id=tenant_id,
-                            tenant_name=tenant_name,
-                            language=current_language,
-                            intent=intent_type,
-                            new_entities=entities,
-                            intent_confidence=confidence,
-                            mode="chat",
-                            session_key=f"{tenant_id}:whatsapp:wa:{from_waid}",
-                        )
-                        reply_text = raw_reply.get("reply_text") if isinstance(raw_reply, dict) else str(raw_reply)
-                        collected_entities = raw_reply.get("collected_entities") if isinstance(raw_reply, dict) else str(raw_reply)
-                    except Exception:
-                        logging.exception("[CLOUD] AI pipeline failed")
-                        reply_text = "Sorry, I'm having trouble. I'll get back to you shortly."
-
-                    print("reply=", reply_text)
-
-                                    # --- Safely extract followup + media/products
-                    raw_obj = raw_reply if isinstance(raw_reply, dict) else {}
-                    followup_text = (raw_obj.get("followup_reply") or "").strip() or None
-                    print("Followup_Question = ",followup_text)
-                    products      = (raw_obj.get("pinecone_data") or [])[:5]  # max 5
-                    # media_urls  = raw_obj.get("media") or []  # (unused here)
-
-                    sent_count = 0
-                    out_msgs: list[tuple[str, str, str | None]] = []
-
-                    # If we have products: send each image with caption, then one follow-up
-                    if products:
-                        for prod in products:
-                            img = _primary_image_for_product(prod)
-                            if not img:
-                                continue
-                                
-                            # NEW: log product details cleanly
-                            # details = _product_log_dict(prod)
-                            # details["image_url"] = img
-                            # logging.info(f"[PRODUCT] Sending product to {from_waid}: {json.dumps(details, ensure_ascii=False)}")
-
-                            mid = await send_whatsapp_image_cloud(
-                                to_waid=from_waid,
-                                image_url=img,
-                                caption=_product_caption(prod)
-                            )
-                            if mid:
-                                sent_count += 1
-                                logging.info(f"[PRODUCT] Sent product message_id={mid} to {from_waid}")
-                            
-                            out_msgs.append(("image", _product_caption(prod), mid))
-
-                        if followup_text:
-                            await asyncio.sleep(1.0)
-                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
-                            out_msgs.append(("text", followup_text, mid))
-                    else:
-                        if reply_text:
-                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
-                            out_msgs.append(("text", reply_text, mid))
-                        if followup_text:
-                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
-                            out_msgs.append(("text", followup_text, mid))
                     
-                    logging.info(f"============== out Messages :{out_msgs}=================")
-                    # --- Persist all outbound messages BEFORE returning
-                    for kind, txt, mid in out_msgs:
-                        meta = {"kind": kind, "channel": "cloud_api"}
-                        save_id = mid
-                        save_text = txt
-
-                        # If this is the image we sent, also attach entities in meta
-                        if kind == "image":
-                            if isinstance(collected_entities, (dict, list)):
-                                meta["entities"] = collected_entities
-
-                        # If this is our synthetic "entities" record, give it a unique id and store JSON
-                        if kind == "entities":
-                            base = mid or msg_id  # fall back to inbound id if needed
-                            save_id = f"{base}:entities"
-                            # store entities as compact JSON in text, and also inside meta
-                            if isinstance(txt, (dict, list)):
-                                meta["entities"] = txt
-                                save_text = json.dumps(txt, ensure_ascii=False)
-                            else:
-                                save_text = str(txt)
-
+                
+                    # 2.5) VIDEO (feature not available yet)
+                    elif mtype == "video" and "video" in msg:
+                        # Reply with under-development notice
+                        VIDEO_UNAVAILABLE_MSG = (
+                        "🎥 Video understanding is under development right now. "
+                        "Please send a clear photo or text so I can help."
+                        )
+                        mid = await send_whatsapp_reply_cloud(
+                            to_waid=from_waid,
+                            body=VIDEO_UNAVAILABLE_MSG
+                        )
                         await append_transcript_message(
                             db, chat_session,
-                            role="assistant",
-                            text=save_text,
-                            msg_id=save_id,
-                            direction="out",
-                            meta=meta,
+                            role="assistant", text=VIDEO_UNAVAILABLE_MSG,
+                            msg_id=mid, direction="out",
+                            meta={"kind": "text", "channel": "cloud_api", "feature": "video", "status": "unavailable"}
                         )
+                        await db.commit()
+                        return {"status": "ok", "mode": "video_unavailable"}
 
-                    await db.commit()
 
-                    return {
-                        "status": "ok",
-                        "sent_images": sent_count,
-                        "sent_followup": any(m[0] == "text" and m[1] == followup_text for m in out_msgs),
-                        "fallback": "none" if products else "text"
-                    }
+                    # 3) DOCUMENT
+                    elif mtype == "document" and "document" in msg:
+                        doc      = msg["document"]
+                        mime     = (doc.get("mime_type") or "").lower()
+                        media_id = doc.get("id")
+
+                        # If the document is actually a video file, say it's under development
+                        if media_id and mime.startswith("video/"):
+                            mid = await send_whatsapp_reply_cloud(
+                                to_waid=from_waid,
+                                body=VIDEO_UNAVAILABLE_MSG
+                            )
+                            await append_transcript_message(
+                                db, chat_session,
+                                role="assistant", text=VIDEO_UNAVAILABLE_MSG,
+                                msg_id=mid, direction="out",
+                                meta={"kind": "text", "channel": "cloud_api", "feature": "video", "status": "unavailable", "doc_mime": mime}
+                            )
+                            await db.commit()
+                            return {"status": "ok", "mode": "doc_video_unavailable"}
+
+
+                        # If the document is actually an image file, treat it like an image (visual search)
+                        if media_id and mime.startswith("image/"):
+                            try:
+                                img_bytes = await download_media_bytes(media_id)
+
+                                matches = visual_search_bytes_sync(img_bytes, tenant_id=tenant_id, top_k=20)
+                                matches = group_matches_by_product(matches)[:5]
+                                msgs    = format_matches_for_whatsapp_images(matches, limit=5)
+
+                                out_msgs: list[tuple[str, str, str | None]] = []
+                                sent_count = 0
+
+                                for m in msgs:
+                                    if m.get("type") == "image":
+                                        mid = await send_whatsapp_image_cloud(
+                                            to_waid=from_waid,
+                                            image_url=m["image"]["link"],
+                                            caption=m["image"].get("caption", "")
+                                        )
+                                        if mid:
+                                            sent_count += 1
+                                        out_msgs.append(("image", m["image"].get("caption", ""), mid))
+                                    else:
+                                        body = (m.get("text") or {}).get("body", "No visually similar items found.")
+                                        mid  = await send_whatsapp_reply_cloud(to_waid=from_waid, body=body)
+                                        out_msgs.append(("text", body, mid))
+
+                                for kind, txt, mid in out_msgs:
+                                    await append_transcript_message(
+                                        db, chat_session,
+                                        role="assistant", text=txt, msg_id=mid, direction="out",
+                                        meta={"kind": kind, "channel": "cloud_api"}
+                                    )
+
+                                await db.commit()
+                                return {"status": "ok", "mode": "visual_search_doc_image", "sent_images": sent_count}
+
+                            except Exception:
+                                logging.exception("[CLOUD] Visual search (document->image) failed")
+                                await db.rollback()
+                                mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body="Sorry, I couldn't read that file.")
+                                await append_transcript_message(
+                                    db, chat_session, role="assistant", text="(document visual search error)",
+                                    msg_id=mid, direction="out", meta={"kind": "text", "channel": "cloud_api"}
+                                )
+                                await db.commit()
+                                return {"status": "error", "mode": "doc_visual_search_failed"}
+
+                        # Non-image docs: simple acknowledgement (you can extend with OCR/PDF later)
+                        ack_text = "Got your file. I’ll take a look and get back to you."
+                        mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=ack_text)
+                        await append_transcript_message(
+                            db, chat_session,
+                            role="assistant", text=ack_text, msg_id=mid, direction="out",
+                            meta={"kind": "text", "channel": "cloud_api", "doc_mime": mime}
+                        )
+                        await db.commit()
+                        return {"status": "ok", "mode": "document_ack"}
+
+                    # Fallback (unknown type)
+                    else:
+                        mid = await send_whatsapp_reply_cloud(
+                            to_waid=from_waid,
+                            body="Sorry, I can only read text, images, or files for now."
+                        )
+                        await append_transcript_message(
+                            db, chat_session,
+                            role="assistant", text="(unsupported message type)", msg_id=mid, direction="out",
+                            meta={"kind": "text", "channel": "cloud_api", "mtype": mtype}
+                        )
+                        await db.commit()
+                        return {"status": "ok", "mode": "unsupported"}
 
                 except Exception:
                     logging.exception("[CLOUD] Webhook DB flow failed; rolling back")
@@ -1114,5 +1218,7 @@ async def receive_cloud_webhook(request: Request):
                     return {"status": "error"}
                 finally:
                     break
+            # ---------------------- END Normal Flow ----------------------
+
 
     return {"status": "ok"}
