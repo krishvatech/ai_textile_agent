@@ -216,14 +216,3 @@ function handleInitialRoute(){
   });
 })();
 
-
-/* Init page */
-window.addEventListener('DOMContentLoaded', ()=>{
-  initTenant();
-  renderKpis();
-  renderCustomers();
-  renderProducts();
-  renderOrders();
-  renderSessions();
-  handleInitialRoute();
-});
