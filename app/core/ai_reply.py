@@ -1218,13 +1218,37 @@ async def analyze_message(
                     candidate = candidate.replace(year=today.year + 1)
                 d = candidate
             raw_new_entities[k] = d.isoformat()
+    # --- gender guard helpers ---
+    def _explicit_gender_cue(txt: str) -> bool:
+        if not txt:
+            return False
+        # add/trim synonyms as needed
+        return bool(re.search(
+            r"\b(men|gents|boys|male|for him|ladies|women|girls|female|for her|unisex|kids)\b",
+            txt, re.I
+        ))
+
     clean_new_entities = filter_non_empty_entities(raw_new_entities)
     cat_now = (clean_new_entities.get("category") or acc_entities.get("category"))
-    if cat_now and not clean_new_entities.get("type"):
+
+    if cat_now:
         async with SessionLocal() as db:
-            t = await db_type_for_category(db, tenant_id, cat_now)
-        if t:
-            clean_new_entities["type"] = t
+            dominant = await db_type_for_category(db, tenant_id, cat_now)  # e.g., "women" for Kurta Sets
+        user_has_gender_cue = _explicit_gender_cue(text or "")
+
+        incoming_type = (clean_new_entities.get("type") or "").strip().lower()
+
+        # If user did NOT explicitly say a gender, always prefer the DB-dominant type
+        if dominant and not user_has_gender_cue:
+            if incoming_type and incoming_type != dominant:
+                logging.info(f"[GENDER] Overriding LLM type '{incoming_type}' -> '{dominant}' for category '{cat_now}' (no explicit cue).")
+            clean_new_entities["type"] = dominant
+            clean_new_entities["type_locked"] = True
+        else:
+            # user explicitly asked for men/women/... → respect it, and lock
+            if incoming_type:
+                clean_new_entities["type_locked"] = True
+        logging.info(f"[GENDER] cat={cat_now} incoming={incoming_type or None} dominant={dominant} cue={user_has_gender_cue} final={clean_new_entities.get('type')} locked={clean_new_entities.get('type_locked')}")
     new_cat = (new_entities or {}).get("category")
     if new_cat:
         prev_cat = acc_entities.get("category")
