@@ -1,0 +1,51 @@
+/* THEME TOKENS — tie all colors to theme-scoped vars */
+:root{ --radius: 14px; }
+/* Dark */
+:root[data-bs-theme="dark"]{
+  --bg1:#0b0f19; --bg2:#131a29;
+  --surface:rgba(255,255,255,.04);
+  --border:rgba(255,255,255,.08);
+  --text:#e7edf6;
+  --muted:#9aa4b2;
+  --accent:#7c5cff; --accent2:#16c1d4;
+  --card:#0f1423;
+}
+/* Light */
+:root[data-bs-theme="light"]{
+  --bg1:#f6f7fb; --bg2:#eef1f8;
+  --surface:#ffffffcc;
+  --border:#e7eaf3;
+  --text:#0c1020;
+  --muted:#5c6473;
+  --accent:#6b4dff; --accent2:#0fb6c9;
+  --card:#ffffff;
+}
+
+html,body{height:100%;}
+body{
+  font-family:Poppins,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
+  color:var(--text);    
+  background:
+    radial-gradient(1200px 800px at 10% -10%, color-mix(in oklab, var(--accent) 25%, transparent), transparent 60%),
+    linear-gradient(120deg, var(--bg1), var(--bg2));
+}
+
+.glass{background:var(--surface); border:1px solid var(--border); backdrop-filter: blur(10px); border-radius:var(--radius);}
+.gradient-text{background: linear-gradient(90deg,var(--accent),#b06cff,var(--accent2)); -webkit-background-clip:text; background-clip:text; color:transparent;}
+.hero-line{height:3px; background: linear-gradient(90deg,transparent, var(--accent), transparent); filter: drop-shadow(0 0 8px color-mix(in oklab, var(--accent) 65%, transparent)); animation: slide 3s linear infinite;}
+@keyframes slide{0%{background-position:-200px 0;}100%{background-position:200px 0;}}
+
+.metric{position:relative; overflow:hidden;}
+.metric .pulse{position:absolute; inset:auto -30% -40% auto; width:200px; height:200px; background:radial-gradient(closest-side, color-mix(in oklab, var(--accent) 18%, transparent), transparent 70%); filter:blur(20px); animation: float 6s ease-in-out infinite;}
+@keyframes float{50%{transform:translateY(-6px);} 100%{transform:translateY(0);}}
+
+.topbar{backdrop-filter: blur(12px); border-bottom:1px solid var(--border);}
+.sidebar{width:270px; min-height:100vh; position:sticky; top:0;}
+.sidebar .nav-link{color:var(--muted);}
+.sidebar .nav-link.active, .sidebar .nav-link:hover{color:var(--text); background:var(--surface);}
+
+.table>thead th{color:var(--muted); font-weight:600; border-bottom-color:var(--border);}
+.table tbody tr:hover{background:color-mix(in oklab, var(--surface) 60%, transparent);}
+
+.chip{background:var(--surface); border:1px solid var(--border); padding:.35rem .6rem; border-radius:999px; font-size:.75rem;}
+.card-img-top{border-top-left-radius:var(--radius); border-top-right-radius:var(--radius);}

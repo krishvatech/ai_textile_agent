@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Dashboard{% endblock %}</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    :root{
+      --bg1:#0b0f19; --bg2:#131a29; --surface:rgba(255,255,255,.05); --border:rgba(255,255,255,.1)
+    }
+    body{ background: linear-gradient(120deg,var(--bg1),var(--bg2)); }
+    .sidebar{
+      width: 240px; min-height: 100vh; background: var(--surface); border-right:1px solid var(--border);
+      position: sticky; top:0; padding: 20px;
+    }
+    .sidebar a{ display:block; padding:10px 12px; border-radius:10px; text-decoration:none; color:#cfd8e3; }
+    .sidebar a.active, .sidebar a:hover { background:#2a3350; color:#fff; }
+  </style>
+</head>
+<body>
+  <div class="d-flex">
+    <aside class="sidebar">
+      <h5 class="mb-3">AI Textile Agent</h5>
+      <nav>
+        <a href="/dashboard" class="{% block nav_dash %}{% endblock %}">Dashboard</a>
+        <a href="/dashboard/customer" class="{% block nav_cust %}{% endblock %}">Customers</a>
+        <a href="/dashboard/product" class="{% block nav_prod %}{% endblock %}">Products</a>
+        <form action="/logout" method="post" class="m-0">
+        <button class="btn btn-sm btn-outline-danger"><i class="bi bi-box-arrow-right"></i> Logout</button>
+      </form>
+      </nav>
+    </aside>
+    <main class="flex-grow-1 p-4">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,37 @@
+{% extends "_dashboard_base.html" %}
+{% block title %}Chat — Customer #{{ customer_id }}{% endblock %}
+{% block nav_cust %}active{% endblock %}
+{% block content %}
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h3 class="mb-0">Chat History</h3>
+    <a class="btn btn-outline-light" href="/dashboard/customer/{{ customer_id }}">Back to Customer</a>
+  </div>
+
+  {% if session %}
+    <div class="mb-3 small text-secondary">
+      Session #{{ session.id }} · Started {{ session.started_at }} {% if session.ended_at %}· Ended {{ session.ended_at }}{% endif %}
+    </div>
+  {% endif %}
+
+  {% if messages and messages|length %}
+    <div class="vstack gap-3">
+      {% for m in messages %}
+        <div class="p-3 rounded-3" style="background:var(--surface); border:1px solid var(--border)">
+          <div class="d-flex justify-content-between">
+            <div>
+              <b>{{ m.role|title }}</b>
+              <span class="badge bg-secondary ms-2">{{ m.direction or '-' }}</span>
+            </div>
+            <div class="small text-secondary">{{ m.ts or '' }}</div>
+          </div>
+          <div class="mt-2">{{ m.text }}</div>
+          {% if m.meta and m.meta.reply_to %}
+            <div class="small text-secondary mt-1">↩ Reply to: {{ m.meta.reply_to }}</div>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="text-secondary">No chat messages found.</div>
+  {% endif %}
+{% endblock %}

@@ -1,0 +1,46 @@
+{% extends "_dashboard_base.html" %}
+{% block title %}Customer #{{ customer.id }}{% endblock %}
+{% block nav_cust %}active{% endblock %}
+{% block content %}
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h3 class="mb-0">{{ customer.name }} <span class="text-secondary">(#{{ customer.id }})</span></h3>
+    <div class="d-flex gap-2">
+      <a class="btn btn-outline-light" href="/dashboard/chat/{{ customer.id }}">View Chat History</a>
+      <a class="btn btn-light" href="/dashboard/orders/{{ customer.id }}">View Orders</a>
+    </div>
+  </div>
+  <div class="row g-3">
+    <div class="col-md-6">
+      <div class="p-3 rounded-3" style="background:var(--surface); border:1px solid var(--border)">
+        <div><b>Phone:</b> {{ customer.phone }}</div>
+        <div><b>Email:</b> {{ customer.email }}</div>
+        <div><b>Language:</b> {{ customer.preferred_language }}</div>
+        <div><b>Loyalty Points:</b> {{ customer.loyalty_points }}</div>
+        <div><b>Joined:</b> {{ customer.created_at.strftime("%d %b %Y %H:%M") if customer.created_at else "-" }}</div>
+      </div>
+    </div>
+  </div>
+
+  <h5 class="mt-4">Recent Orders</h5>
+  <div class="table-responsive">
+    <table class="table table-dark table-sm align-middle">
+      <thead><tr>
+        <th>ID</th><th>Type</th><th>Status</th><th>Item</th><th>Price</th><th>Created</th>
+      </tr></thead>
+      <tbody>
+      {% for o in orders %}
+        <tr>
+          <td>{{ o.id }}</td>
+          <td>{{ o.order_type }}</td>
+          <td>{{ o.status }}</td>
+          <td>{{ o.variant }}</td>
+          <td>₹{{ '%.0f'|format(o.price) }}</td>
+          <td>{{ o.created_at.strftime("%d %b %Y") if o.created_at else "-" }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6" class="text-secondary">No orders yet.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

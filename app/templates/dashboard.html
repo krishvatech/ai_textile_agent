@@ -1,0 +1,20 @@
+{% extends "_dashboard_base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block nav_dash %}active{% endblock %}
+{% block content %}
+  <h3 class="mb-4">Welcome</h3>
+  <div class="row g-3">
+    <div class="col-md-4">
+      <div class="p-4 rounded-3" style="background:var(--surface); border:1px solid var(--border)">
+        <div class="small text-secondary">Customers</div>
+        <div class="fs-3 fw-bold">{{ customers_count }}</div>
+      </div>
+    </div>
+    <div class="col-md-4">
+      <div class="p-4 rounded-3" style="background:var(--surface); border:1px solid var(--border)">
+        <div class="small text-secondary">Product Variants</div>
+        <div class="fs-3 fw-bold">{{ products_count }}</div>
+      </div>
+    </div>
+  </div>
+{% endblock %}

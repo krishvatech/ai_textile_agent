@@ -1,0 +1,27 @@
+{% extends "_dashboard_base.html" %}
+{% block title %}Products{% endblock %}
+{% block nav_prod %}active{% endblock %}
+{% block content %}
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h3>Product Variants</h3>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-dark table-hover align-middle">
+      <thead><tr>
+        <th>Variant ID</th><th>Product</th><th>Attributes</th><th>Price</th><th>Stock</th><th>Rental</th>
+      </tr></thead>
+      <tbody>
+      {% for p in products %}
+        <tr>
+          <td>{{ p.variant_id }}</td>
+          <td>{{ p.product }}</td>
+          <td>{{ p.attrs }}</td>
+          <td>₹{{ '%.0f'|format(p.price) }}</td>
+          <td>{{ p.stock }}</td>
+          <td>{{ "Yes" if p.is_rental else "No" }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

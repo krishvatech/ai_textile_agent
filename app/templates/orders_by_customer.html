@@ -1,0 +1,31 @@
+{% extends "_dashboard_base.html" %}
+{% block title %}Orders — Customer #{{ customer_id }}{% endblock %}
+{% block nav_cust %}active{% endblock %}
+{% block content %}
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h3 class="mb-0">Orders</h3>
+    <a class="btn btn-outline-light" href="/dashboard/customer/{{ customer_id }}">Back to Customer</a>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-dark table-hover align-middle">
+      <thead><tr>
+        <th>ID</th><th>Type</th><th>Status</th><th>Item</th><th>Price</th><th>Created</th>
+      </tr></thead>
+      <tbody>
+      {% for o in orders %}
+        <tr>
+          <td>{{ o.id }}</td>
+          <td>{{ o.order_type }}</td>
+          <td>{{ o.status }}</td>
+          <td>{{ o.variant }}</td>
+          <td>₹{{ '%.0f'|format(o.price) }}</td>
+          <td>{{ o.created_at.strftime("%d %b %Y %H:%M") if o.created_at else "-" }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6" class="text-secondary">No orders yet.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}
