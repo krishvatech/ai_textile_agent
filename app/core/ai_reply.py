@@ -1264,6 +1264,10 @@ async def analyze_message(
         intent_type = "availability_check"
     # --- greeting
     if intent_type == "greeting":
+        # 🧹 HARD RESET: wipe everything we've collected for this session
+        session_entities[sk] = {}
+        last_main_intent_by_session.pop(sk, None)
+        acc_entities = {}  # keep in-sync with memory
         nm = None
         try:
             nm = (new_entities or {}).get("user_name") or (new_entities or {}).get("name")
@@ -1272,6 +1276,9 @@ async def analyze_message(
         nm = (nm or "").strip()
         reply = f"Hello {nm},\nHow can I assist you today?" if nm else "Hello! How can I assist you today?"
         history.append({"role": "assistant", "content": reply})
+         # Persist the cleared state
+        session_memory[sk] = history         # (ok to keep history)
+        session_entities[sk] = acc_entities  # {} after reset
         _commit()
         return {
             "input_text": text,
