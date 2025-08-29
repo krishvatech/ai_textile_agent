@@ -17,6 +17,7 @@ from app.core.chat_persistence import (
     append_transcript_message,
 )
 from app.services.wa_media import download_media_bytes
+from app.services.wa_media import get_media_url_and_meta
 from app.services.visual_search import visual_search_bytes_sync, format_matches_for_whatsapp_images,group_matches_by_product
 from app.core.product_pick_ import (
     resolve_product_from_caption_async,
@@ -761,7 +762,32 @@ async def receive_cloud_webhook(request: Request):
                     logging.info(f"========{from_waid}")
                     logging.info("=" * 100)
                     chat_session = await get_or_open_active_session(db, customer_id=customer.id)
-                    phone_norm = _normalize_waid_phone(from_waid)  # "+9197…"
+                    phone_norm = _normalize_waid_phone(from_waid)
+
+                    # Build inbound text/meta (include image URL if user swiped with an image)
+                    inbound_meta = {"raw": data, "channel": "cloud_api", "reply_to": replied_message_id}
+                    inbound_text = text_msg
+
+                    if mtype == "image" and "image" in msg:
+                        media_id = msg["image"].get("id")
+                        if media_id:
+                            try:
+                                media_meta = await get_media_url_and_meta(media_id)  # {url, mime_type, sha256, ...}
+                                inbound_meta["image"] = {
+                                    "id": media_id,
+                                    "mime_type": media_meta.get("mime_type"),
+                                    "sha256": media_meta.get("sha256"),
+                                    "url": media_meta.get("url"),
+                                }
+                                inbound_text = media_meta.get("url") or inbound_text
+                            except Exception:
+                                logging.exception("[CLOUD][SWIPE] Failed to fetch inbound image url")
+
+                    await append_transcript_message(
+                        db, chat_session,
+                        role="user", text=inbound_text, msg_id=msg_id, direction="in",
+                        meta=inbound_meta,
+                    )
                     transcript = await get_transcript_by_phone(phone_norm, db)
                     messages = _normalize_messages(transcript)
 
@@ -1049,13 +1075,51 @@ async def receive_cloud_webhook(request: Request):
 
                     chat_session = await get_or_open_active_session(db, customer_id=customer.id)
 
-                    # Always store inbound first
+                    # Build inbound text/meta with image URL when applicable
+                    inbound_meta = {"raw": data, "channel": "cloud_api", "reply_to": None}
+                    inbound_text = text_msg
+
+                    if mtype == "image" and "image" in msg:
+                        media_id = msg["image"].get("id")
+                        if media_id:
+                            try:
+                                media_meta = await get_media_url_and_meta(media_id)  # {url, mime_type, sha256, ...}
+                                inbound_meta["image"] = {
+                                    "id": media_id,
+                                    "mime_type": media_meta.get("mime_type"),
+                                    "sha256": media_meta.get("sha256"),
+                                    "url": media_meta.get("url"),
+                                }
+                                # make the transcript clickable in your dashboard
+                                inbound_text = media_meta.get("url") or inbound_text
+                            except Exception:
+                                logging.exception("[CLOUD] Failed to fetch inbound image url")
+
+                    # (optional) if user sent an image as a 'document'
+                    elif mtype == "document" and "document" in msg:
+                        mime = (msg["document"].get("mime_type") or "").lower()
+                        media_id = msg["document"].get("id")
+                        if media_id and mime.startswith("image/"):
+                            try:
+                                media_meta = await get_media_url_and_meta(media_id)
+                                inbound_meta["image"] = {
+                                    "id": media_id,
+                                    "mime_type": media_meta.get("mime_type"),
+                                    "sha256": media_meta.get("sha256"),
+                                    "url": media_meta.get("url"),
+                                }
+                                inbound_text = media_meta.get("url") or inbound_text
+                            except Exception:
+                                logging.exception("[CLOUD] Failed to fetch inbound doc-image url")
+
+                    # Store inbound (now with link for images)
                     await append_transcript_message(
                         db, chat_session,
-                        role="user", text=text_msg,
+                        role="user", text=inbound_text,
                         msg_id=msg_id, direction="in",
-                        meta={"raw": data, "channel": "cloud_api", "reply_to": None},
+                        meta=inbound_meta,
                     )
+
 
                     # ------------------------ PRIORITIZED TYPE DISPATCH ------------------------
                     # 1) TEXT
