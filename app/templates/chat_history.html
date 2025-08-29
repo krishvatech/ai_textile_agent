@@ -14,38 +14,51 @@
       Session #{{ session.id }} · Started {{ session.started_at }}{% if session.ended_at %} · Ended {{ session.ended_at }}{% endif %}
     </div>
   {% endif %}
+
   <div class="chat-box glass">
-  <div id="chatScroll" class="chat-thread">
-    {% if messages and messages|length %}
-      {% for m in messages %}
-        {% set is_in = (m.direction == 'in') %}
-        {% set same_sender = (not loop.first and loop.previtem.role == m.role and loop.previtem.direction == m.direction) %}
+    <div id="chatScroll" class="chat-thread">
+      {% if messages and messages|length %}
+        {% for m in messages %}
+          {% set is_in = (m.direction == 'in') %}
+          {% set same_sender = (not loop.first and loop.previtem.role == m.role and loop.previtem.direction == m.direction) %}
 
-        <div class="chat-row {{ 'in' if is_in else 'out' }}">
-          {% if not same_sender %}
-            <!-- show avatar only at start of group -->
-            <div class="avatar {{ 'avatar-us' if is_in else 'avatar-bot' }}">
-              {{ 'US' if is_in else 'BO' }}
-            </div>
-          {% else %}
-            <div class="avatar-spacer"></div>
-          {% endif %}
-
-          <div class="bubble-group">
-            <div class="bubble">{{ m.text }}</div>
-            {% set next_sender = (not loop.last and loop.nextitem.role == m.role and loop.nextitem.direction == m.direction) %}
-            {% if loop.last or not next_sender %}
-              <!-- metadata only at end of group -->
-              <div class="meta">
-                <span>{{ 'User' if is_in else 'Assistant' }}</span>
-                {% if m.ts %}<span class="ts">{{ m.ts }}</span>{% endif %}
+          <div class="chat-row {{ 'in' if is_in else 'out' }}">
+            {% if not same_sender %}
+              <div class="avatar {{ 'avatar-us' if is_in else 'avatar-bot' }}">
+                {{ 'US' if is_in else 'BO' }}
               </div>
+            {% else %}
+              <div class="avatar-spacer"></div>
             {% endif %}
+
+            <div class="bubble-group">
+              {% set has_img = m.meta and (m.meta.image_url or (m.meta.image and m.meta.image.url)) %}
+              {% set imgurl = (m.meta.image_url if has_img else None) or (m.meta.image.url if has_img and m.meta.image else None) %}
+
+              <div class="bubble {{ 'photo' if has_img else '' }}">
+                <div class="bubble-inner {{ 'has-img' if has_img else '' }}">
+                  {% if has_img %}
+                    <img src="{{ imgurl }}" alt="shared image" class="msg-img" loading="lazy" referrerpolicy="no-referrer" />
+                  {% endif %}
+                  {% if m.text %}
+                    <div class="caption">{{ m.text | replace('\n','<br>') | urlize | safe }}</div>
+                  {% endif %}
+                </div>
+              </div>
+
+              {% set next_sender = (not loop.last and loop.nextitem.role == m.role and loop.nextitem.direction == m.direction) %}
+              {% if loop.last or not next_sender %}
+                <div class="meta">
+                  <span>{{ 'User' if is_in else 'Assistant' }}</span>
+                  {% if m.ts %}<span class="ts">{{ m.ts }}</span>{% endif %}
+                </div>
+              {% endif %}
+            </div>
           </div>
-        </div>
-      {% endfor %}
-    {% else %}
-      <div class="text-secondary">No chat messages found.</div>
-    {% endif %}
+        {% endfor %}
+      {% else %}
+        <div class="text-secondary">No chat messages found.</div>
+      {% endif %}
+    </div>
   </div>
 {% endblock %}
