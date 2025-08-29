@@ -3,6 +3,12 @@ from typing import Optional, Dict, Any, List
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Customer, ChatSession
+from zoneinfo import ZoneInfo
+IST = ZoneInfo("Asia/Kolkata")
+
+def now_ist_naive() -> datetime:
+    # If your DB columns are DateTime without timezone=True, pass a naive value.
+    return datetime.now(IST).replace(tzinfo=None)
 
 async def get_or_create_customer(
     db: AsyncSession,
@@ -63,14 +69,19 @@ async def get_or_open_active_session(db: AsyncSession, customer_id: int) -> Chat
     stmt = (
         select(ChatSession)
         .where(ChatSession.customer_id == customer_id)
-        .where(ChatSession.ended_at.is_(None))
         .order_by(desc(ChatSession.started_at))
         .limit(1)
     )
     result = await db.execute(stmt)
     session = result.scalars().first()
     if not session:
-        session = ChatSession(customer_id=customer_id, started_at=datetime.utcnow(), transcript=[])
+        now = now_ist_naive()
+        session = ChatSession(
+            customer_id=customer_id,
+            started_at=now,
+            ended_at=now,           # set on first create
+            transcript=[]
+        )
         db.add(session)
         await db.flush()
     return session
@@ -104,5 +115,13 @@ async def append_transcript_message(
 
     transcript.append(entry)
     chat_session.transcript = transcript
+
+    # ── NEW: if inbound user message, update ended_at in IST ──
+    if direction == "in" and role == "user":
+        now = now_ist_naive()
+        if not getattr(chat_session, "started_at", None):
+            chat_session.started_at = now
+        chat_session.ended_at = now
+
     db.add(chat_session)
     await db.flush()
