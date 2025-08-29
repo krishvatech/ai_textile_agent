@@ -1784,9 +1784,14 @@ async def analyze_message(
                         candidate = candidate.replace(year=today.year + 1)
                     start_date = candidate
 
-        if start_date:
+        if (start_date is not None) and (end_date is None):
+            # Single-date turn → keep start, clear end (we’ll ask for it)
             acc_entities["start_date"] = start_date.isoformat()
             acc_entities.pop("end_date", None)
+        elif (start_date is not None) and (end_date is not None):
+            # Full range is known this turn → persist both
+            acc_entities["start_date"] = start_date.isoformat()
+            acc_entities["end_date"]   = end_date.isoformat()
         # Case C: explicit range this turn (or two different dates)
         elif (turn_start is not None and turn_end is not None) and (turn_has_both_distinct or has_range_tokens):
             # Parse both into date objects
