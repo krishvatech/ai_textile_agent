@@ -621,6 +621,24 @@ def _visual_followup_text(lang: str = "en-IN") -> str:
     return m.get(lang, m["en-IN"])
 
 
+# ---- helper: normalize out_msgs tuples ----
+def _iter_out_msgs_with_meta(out_msgs):
+    """
+    Accepts tuples of either:
+      ("text", caption, msg_id)
+      ("image", caption, msg_id)
+      ("image", caption, msg_id, image_url)   # preferred for images
+    and always yields (kind, text, msg_id, image_url_or_None).
+    """
+    for item in out_msgs:
+        if len(item) == 4:
+            kind, txt, mid, img_url = item
+        else:
+            kind, txt, mid = item
+            img_url = None
+        yield kind, txt, mid, img_url
+
+
 
 @router.post("/webhook")
 async def receive_cloud_webhook(request: Request):
@@ -916,7 +934,7 @@ async def receive_cloud_webhook(request: Request):
                                 sent_count += 1
                                 logging.info(f"[PRODUCT] Sent product message_id={mid} to {from_waid}")
 
-                            out_msgs.append(("image", _product_caption(prod), mid))
+                            out_msgs.append(("image", _product_caption(prod), mid, img))
 
                         if followup_text:
                             logging.info(f"[SWIPE] Sending follow-up: {followup_text!r}")
@@ -933,14 +951,43 @@ async def receive_cloud_webhook(request: Request):
 
                     logging.info(f"============== out Messages :{out_msgs}=================")
 
-                    # --- Persist all outbound messages BEFORE returning
-                    for kind, txt, mid in out_msgs:
+                    # Persist outbound  (now stores meta.image_url for images)
+                    for item in out_msgs:
+                        # support both 3-tuple: (kind, txt, mid) and 4-tuple: (kind, txt, mid, image_url)
+                        if isinstance(item, (list, tuple)) and len(item) == 4:
+                            kind, txt, mid, img_url = item
+                        else:
+                            kind, txt, mid = item
+                            img_url = None
+
                         meta = {"kind": kind, "channel": "cloud_api"}
-                        # keep entities only on images
-                        if kind == "image" and isinstance(collected_entities, (dict, list)):
-                            meta["entities"] = collected_entities
-                        await append_transcript_message(db, chat_session, role="assistant",
-                                                        text=txt, msg_id=mid, direction="out", meta=meta)
+                        save_id   = mid
+                        save_text = txt
+
+                        if kind == "image":
+                            if img_url:
+                                meta["image_url"] = img_url
+                            if isinstance(collected_entities, (dict, list)):
+                                meta["entities"] = collected_entities
+
+                        if kind == "entities":
+                            base    = mid or msg_id
+                            save_id = f"{base}:entities"
+                            if isinstance(txt, (dict, list)):
+                                meta["entities"] = txt
+                                save_text = json.dumps(txt, ensure_ascii=False)
+                            else:
+                                save_text = str(txt)
+
+                        await append_transcript_message(
+                            db, chat_session,
+                            role="assistant",
+                            text=save_text,
+                            msg_id=save_id,
+                            direction="out",
+                            meta=meta,
+                        )
+
 
                     await db.commit()
 
@@ -1100,7 +1147,7 @@ async def receive_cloud_webhook(request: Request):
                                 if mid:
                                     sent_count += 1
                                     logging.info(f"[PRODUCT] Sent product message_id={mid} to {from_waid}")
-                                out_msgs.append(("image", _product_caption(prod), mid))
+                                out_msgs.append(("image", _product_caption(prod), mid, img))
                             if followup_text:
                                 await asyncio.sleep(1.0)
                                 mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
@@ -1116,13 +1163,24 @@ async def receive_cloud_webhook(request: Request):
                         logging.info(f"============== out Messages :{out_msgs}=================")
 
                         # Persist outbound
-                        for kind, txt, mid in out_msgs:
+                        # Persist outbound  (now stores meta.image_url for images)
+                        for item in out_msgs:
+                            # support both 3-tuple: (kind, txt, mid) and 4-tuple: (kind, txt, mid, image_url)
+                            if isinstance(item, (list, tuple)) and len(item) == 4:
+                                kind, txt, mid, img_url = item
+                            else:
+                                kind, txt, mid = item
+                                img_url = None
+
                             meta = {"kind": kind, "channel": "cloud_api"}
                             save_id   = mid
                             save_text = txt
 
-                            if kind == "image" and isinstance(collected_entities, (dict, list)):
-                                meta["entities"] = collected_entities
+                            if kind == "image":
+                                if img_url:
+                                    meta["image_url"] = img_url
+                                if isinstance(collected_entities, (dict, list)):
+                                    meta["entities"] = collected_entities
 
                             if kind == "entities":
                                 base    = mid or msg_id
@@ -1135,9 +1193,13 @@ async def receive_cloud_webhook(request: Request):
 
                             await append_transcript_message(
                                 db, chat_session,
-                                role="assistant", text=save_text,
-                                msg_id=save_id, direction="out", meta=meta,
+                                role="assistant",
+                                text=save_text,
+                                msg_id=save_id,
+                                direction="out",
+                                meta=meta,
                             )
+
 
                         await db.commit()
                         return {
@@ -1174,28 +1236,40 @@ async def receive_cloud_webhook(request: Request):
                                 if mid:
                                     sent_count += 1
                                     logging.info(f"[PRODUCT] Sent product message_id={mid} to {from_waid}")
-                                out_msgs.append(("image", cap, mid))
+                                out_msgs.append(("image", cap, mid, img))
 
                             # If nothing sent, give one short fallback
                             if sent_count == 0:
                                 body = "Sorry, I couldn’t find visually similar items."
                                 mid  = await send_whatsapp_reply_cloud(to_waid=from_waid, body=body)
-                                out_msgs.append(("text", body, mid))
+                                out_msgs.append(("image", cap, mid, img))
                             else:
                                 # Add a follow-up question in user’s saved language
                                 current_language = (customer.preferred_language or "en-IN")
                                 ftxt = _visual_followup_text(current_language)
                                 await asyncio.sleep(0.2)
                                 mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=ftxt)
-                                out_msgs.append(("text", ftxt, mid))
+                                out_msgs.append(("image", cap, mid, img))
 
 
-                            for kind, txt, mid in out_msgs:
+                            for kind, txt, mid, img_url in _iter_out_msgs_with_meta(out_msgs):
+                                meta = {"kind": kind, "channel": "cloud_api"}
+                                if img_url:
+                                    meta["image_url"] = img_url
+
+                                # (optional) you already add entities for images in one place — keep that:
+                                # if kind == "image" and isinstance(collected_entities, (dict, list)):
+                                #     meta["entities"] = collected_entities
+
                                 await append_transcript_message(
                                     db, chat_session,
-                                    role="assistant", text=txt, msg_id=mid, direction="out",
-                                    meta={"kind": kind, "channel": "cloud_api"}
+                                    role="assistant",
+                                    text=txt,
+                                    msg_id=mid,
+                                    direction="out",
+                                    meta=meta,
                                 )
+
 
                             await db.commit()
                             return {"status": "ok", "mode": "visual_search", "sent_images": sent_count}
@@ -1282,7 +1356,7 @@ async def receive_cloud_webhook(request: Request):
                                     )
                                     if mid:
                                         sent_count += 1
-                                    out_msgs.append(("image", cap, mid))
+                                    out_msgs.append(("image", cap, mid, img))
 
                                 if sent_count == 0:
                                     body = "Sorry, I couldn’t find visually similar items."
@@ -1293,15 +1367,27 @@ async def receive_cloud_webhook(request: Request):
                                     ftxt = _visual_followup_text(current_language)
                                     await asyncio.sleep(0.2)
                                     mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=ftxt)
-                                    out_msgs.append(("text", ftxt, mid))
+                                    out_msgs.append(("image", cap, mid, img))
 
 
-                                for kind, txt, mid in out_msgs:
+                                for kind, txt, mid, img_url in _iter_out_msgs_with_meta(out_msgs):
+                                    meta = {"kind": kind, "channel": "cloud_api"}
+                                    if img_url:
+                                        meta["image_url"] = img_url
+
+                                    # (optional) you already add entities for images in one place — keep that:
+                                    # if kind == "image" and isinstance(collected_entities, (dict, list)):
+                                    #     meta["entities"] = collected_entities
+
                                     await append_transcript_message(
                                         db, chat_session,
-                                        role="assistant", text=txt, msg_id=mid, direction="out",
-                                        meta={"kind": kind, "channel": "cloud_api"}
+                                        role="assistant",
+                                        text=txt,
+                                        msg_id=mid,
+                                        direction="out",
+                                        meta=meta,
                                     )
+
 
                                 await db.commit()
                                 return {"status": "ok", "mode": "visual_search_doc_image", "sent_images": sent_count}
