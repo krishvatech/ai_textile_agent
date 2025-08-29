@@ -702,6 +702,15 @@ async def receive_cloud_webhook(request: Request):
         mtype = msg.get("type")
         text_msg = msg.get("text", {}).get("body", "").strip() if mtype == "text" else f"[{mtype} message]"
 
+        # --- HD image handshake guard: ignore the temporary "unsupported" event (code 131051)
+        errs = msg.get("errors") or []
+        if mtype == "unsupported":
+            codes = {e.get("code") for e in errs if isinstance(e, dict)}
+            if 131051 in codes:
+                logging.info("[CLOUD] Ignoring temporary 'unsupported' (131051) — HD image handshake.")
+                continue  # do NOT persist or reply to this stub; the real image event follows
+
+
         
         replied_message_id = None
         context_obj = msg.get("context")
@@ -1313,8 +1322,12 @@ async def receive_cloud_webhook(request: Request):
                         await db.commit()
                         return {"status": "ok", "mode": "document_ack"}
 
-                    # Fallback (unknown type)
+                    # Fallback (unknown type) — suppress for transient HD handshake too
                     else:
+                        if mtype == "unsupported" and any((e or {}).get("code") == 131051 for e in (msg.get("errors") or [])):
+                            logging.info("[CLOUD] Suppressing fallback for transient 'unsupported' (131051).")
+                            await db.commit()
+                            return {"status": "ignored_unsupported"}
                         mid = await send_whatsapp_reply_cloud(
                             to_waid=from_waid,
                             body="Sorry, I can only read text, images, or files for now."
