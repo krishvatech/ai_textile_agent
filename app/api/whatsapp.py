@@ -1181,6 +1181,7 @@ async def receive_cloud_webhook(request: Request):
                                 # Add a follow-up question in user’s saved language
                                 current_language = (customer.preferred_language or "en-IN")
                                 ftxt = _visual_followup_text(current_language)
+                                await asyncio.sleep(0.2)
                                 mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=ftxt)
                                 out_msgs.append(("text", ftxt, mid))
 
@@ -1286,6 +1287,7 @@ async def receive_cloud_webhook(request: Request):
                                 else:
                                     current_language = (customer.preferred_language or "en-IN")
                                     ftxt = _visual_followup_text(current_language)
+                                    await asyncio.sleep(0.2)
                                     mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=ftxt)
                                     out_msgs.append(("text", ftxt, mid))
 
