@@ -2203,8 +2203,6 @@ async def analyze_message(
         try:
             if acc_entities.get("is_rental") is True:
                 rid = await _create_rental_if_needed(acc_entities)
-                if rid:
-                    reply += f" | Rental ID: #{rid}"
         except Exception as _e:
             # keep flow resilient; don’t crash user chat if insert fails
             logging.exception("Rental insert failed in confirmation: %s", _e)
