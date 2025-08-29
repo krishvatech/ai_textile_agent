@@ -2252,9 +2252,19 @@ async def analyze_message(
         s = _fmt(acc_entities.get("start_date"))
         e = _fmt(acc_entities.get("end_date"))
         # show dates only for rental and only if both exist
-        date_part = f" | {s} to {e}" if (acc_entities.get("is_rental") and s and e) else ""
+        date_part = f"  {s} to {e}" if (acc_entities.get("is_rental") and s and e) else ""
+        def make_summary_reply(name, qty, rb, date_part=None) -> str:
+            parts = [
+                "✅ Thanks for confirming!",
+                f"• Product: {name}",
+                f"• Quantity: {qty}",
+                f"• Type: {rb}",
+            ]
+            if date_part:
+                parts.append(f"• *Dates:* {date_part}")
+            return "\n".join(parts)
 
-        reply = f"Thanks for confirming. Summary: {name} | qty {qty} | {rb}{date_part}."
+        reply = make_summary_reply(name, qty, rb, date_part)
         # mark confirmed so future 'yes' replies don’t trigger more prompts
         acc_entities["order_confirmed"] = True
 
