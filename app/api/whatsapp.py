@@ -892,7 +892,7 @@ async def receive_cloud_webhook(request: Request):
                     # --- Safely extract followup + media/products
                     raw_obj = raw_reply if isinstance(raw_reply, dict) else {}
                     followup_text = (raw_obj.get("followup_reply") or "").strip() or None
-                    print("Followup_Question = ", followup_text)
+                    logging.info(f"[SWIPE] Followup_Question = {followup_text!r}")
                     products = (raw_obj.get("pinecone_data") or [])[:5]  # max 5
 
                     sent_count = 0
@@ -918,6 +918,7 @@ async def receive_cloud_webhook(request: Request):
                             out_msgs.append(("image", _product_caption(prod), mid))
 
                         if followup_text:
+                            logging.info(f"[SWIPE] Sending follow-up: {followup_text!r}")
                             await asyncio.sleep(1.0)
                             mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
                             out_msgs.append(("text", followup_text, mid))
@@ -1080,6 +1081,7 @@ async def receive_cloud_webhook(request: Request):
                         # --- Outbound (products + followup + text)
                         raw_obj       = raw_reply if isinstance(raw_reply, dict) else {}
                         followup_text = (raw_obj.get("followup_reply") or "").strip() or None
+                        print("Followup_Question =", followup_text)  # 👈 add this
                         products      = (raw_obj.get("pinecone_data") or [])[:5]
 
                         sent_count = 0

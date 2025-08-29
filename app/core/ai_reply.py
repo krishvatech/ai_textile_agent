@@ -1624,9 +1624,33 @@ async def analyze_message(
         def _is_missing(v): 
             return v in (None, "", [], {})
 
+        # NEW: Ask size first for sized categories (skip Saree because it's Freesize by rule)
+        cat = (acc_entities.get("category") or "").strip().lower()
+        if (acc_entities.get("is_rental") is True) and _is_missing(acc_entities.get("size")) and cat not in {"saree"}:
+            ask_sz = await FollowUP_Question(
+                "availability_check",
+                acc_entities,
+                language,
+                session_history=history,
+                only_fields=["size"],
+                max_fields=1
+            )
+            history.append({"role": "assistant", "content": ask_sz}); _commit()
+            last_main_intent_by_session[sk] = "availability_check"
+            return {
+                "input_text": text,
+                "language": language,
+                "intent_type": "availability_check",
+                "history": history,
+                "collected_entities": acc_entities,
+                "reply": ask_sz,
+                "reply_text": ask_sz
+            }
+
+        # Existing: then ask for quantity
         if (acc_entities.get("is_rental") is True) and _is_missing(acc_entities.get("quantity")):
             ask_q = await FollowUP_Question(
-                "availability_check",   # changed
+                "availability_check",
                 acc_entities,
                 language,
                 session_history=history,
@@ -1634,11 +1658,11 @@ async def analyze_message(
                 max_fields=1
             )
             history.append({"role": "assistant", "content": ask_q}); _commit()
-            last_main_intent_by_session[sk] = "availability_check"  # added
+            last_main_intent_by_session[sk] = "availability_check"
             return {
                 "input_text": text,
                 "language": language,
-                "intent_type": "availability_check",  # changed
+                "intent_type": "availability_check",
                 "history": history,
                 "collected_entities": acc_entities,
                 "reply": ask_q,
@@ -2237,6 +2261,25 @@ async def analyze_message(
             # we can still drive the rental-date flow.
             in_rental_flow = (is_rental_flag is True) or bool(acc_entities.get("product_variant_id"))
 
+        cat = (acc_entities.get("category") or "").strip().lower()
+        if in_rental_flow and _is_missing(acc_entities.get("size")) and cat not in {"saree"}:
+            ask_sz = await FollowUP_Question(
+                "availability_check",
+                acc_entities,
+                language,
+                session_history=history,
+                only_fields=["size"],
+                max_fields=1
+            )
+            history.append({"role": "assistant", "content": ask_sz}); _commit()
+            last_main_intent_by_session[sk] = "availability_check"
+            return { 
+                "input_text": text, "language": language, "intent_type": "availability_check",
+                "history": history, "collected_entities": acc_entities,
+                "reply": ask_sz, "reply_text": ask_sz
+            }
+
+        # then quantity (unchanged)
         if in_rental_flow and _is_missing(acc_entities.get("quantity")):
             ask_q = await FollowUP_Question(
                 "availability_check",           # was "product_search"
