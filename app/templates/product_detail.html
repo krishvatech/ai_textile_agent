@@ -1,0 +1,69 @@
+{% extends "_dashboard_base.html" %}
+{% block title %}Product — {{ product.name }}{% endblock %}
+{% block nav_prod %}active{% endblock %}
+{% block content %}
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+      <h3 class="mb-1">{{ product.name }}</h3>
+      <div class="text-muted small">Product ID: {{ product.id }}</div>
+    </div>
+    <a class="btn btn-outline-secondary" href="/dashboard/product">← Back to Products</a>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table-products w-100">
+      <thead>
+        <tr>
+          <th>Variant ID</th>
+          <th>Color</th>
+          <th>Size</th>
+          <th>Fabric</th>
+          <th>Price</th>
+          <th>Rental Price</th>
+          <th>Available Stock</th>
+          <th>Is Rental</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if variants|length == 0 %}
+          <tr>
+            <td colspan="8" class="empty-cell">
+              <div class="empty-state">
+                <div class="icon"><i class="bi bi-inbox"></i></div>
+                <div class="title">No variants yet</div>
+                <div class="subtitle">Add variants for this product to see them here.</div>
+              </div>
+            </td>
+          </tr>
+        {% else %}
+          {% for v in variants %}
+            <tr>
+              <td>{{ v.variant_id }}</td>
+              <td>{{ v.color }}</td>
+              <td>{{ v.size }}</td>
+              <td>{{ v.fabric }}</td>
+              <td>
+                {% if v.price is not none and v.price|float > 0 %}
+                  ₹{{ '%.0f'|format(v.price) }}
+                {% else %}-{% endif %}
+              </td>
+              <td>
+                {% if v.rental_price is not none and v.rental_price|float > 0 %}
+                  ₹{{ '%.0f'|format(v.rental_price) }}
+                {% else %}-{% endif %}
+              </td>
+              <td>
+                {% if v.available_stock > 0 %}
+                  <span class="chip-stock chip-in">In Stock ({{ v.available_stock }})</span>
+                {% else %}
+                  <span class="chip-stock chip-out">Out of Stock</span>
+                {% endif %}
+              </td>
+              <td>{{ 'Yes' if v.is_rental else 'No' }}</td>
+            </tr>
+          {% endfor %}
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

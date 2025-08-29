@@ -1,6 +1,7 @@
 {% extends "_dashboard_base.html" %}
 {% block title %}Chat — Customer #{{ customer_id }}{% endblock %}
 {% block nav_cust %}active{% endblock %}
+
 {% block content %}
   <div class="d-flex justify-content-between align-items-center mb-3">
     <h3 class="mb-0">Chat with Customer #{{ customer_id }}</h3>
@@ -19,10 +20,13 @@
     <div id="chatScroll" class="chat-thread">
       {% if messages and messages|length %}
         {% for m in messages %}
+          {# --- per-message DOM id used for jumping --- #}
+          {% set dom_id = 'msg-' ~ m.msg_id|replace(':','-')|replace('.','-') %}
+
           {% set is_in = (m.direction == 'in') %}
           {% set same_sender = (not loop.first and loop.previtem.role == m.role and loop.previtem.direction == m.direction) %}
 
-          <div class="chat-row {{ 'in' if is_in else 'out' }}">
+          <div id="{{ dom_id }}" class="chat-row {{ 'in' if is_in else 'out' }}">
             {% if not same_sender %}
               <div class="avatar {{ 'avatar-us' if is_in else 'avatar-bot' }}">
                 {{ 'US' if is_in else 'BO' }}
@@ -36,12 +40,42 @@
               {% set imgurl = (m.meta.image_url if has_img else None) or (m.meta.image.url if has_img and m.meta.image else None) %}
 
               <div class="bubble {{ 'photo' if has_img else '' }}">
+                {# ---------- Reply preview (tap to jump) ---------- #}
+                {% if m.meta and m.meta.reply_to %}
+                  {% set replied = (messages | selectattr("msg_id","equalto", m.meta.reply_to) | list) %}
+                  {% if replied and replied[0] %}
+                    {% set r = replied[0] %}
+                    {% set r_id = 'msg-' ~ r.msg_id|replace(':','-')|replace('.','-') %}
+                    <a href="#{{ r_id }}" class="reply-preview" data-target="{{ r_id }}">
+                      <div class="rp-author">{{ 'You' if r.direction == 'in' else 'Assistant' }}</div>
+                      <div class="rp-row">
+                        {% if r.meta and (r.meta.image_url or (r.meta.image and r.meta.image.url)) %}
+                          <img class="rp-thumb" src="{{ r.meta.image_url or r.meta.image.url }}" alt="preview">
+                        {% endif %}
+                        <div class="rp-text">
+                          {{ (r.text or '')[:120] }}{% if r.text and r.text|length > 120 %}…{% endif %}
+                        </div>
+                      </div>
+                    </a>
+                  {% endif %}
+                {% endif %}
+
+                {# ---------- Actual message content ---------- #}
                 <div class="bubble-inner {{ 'has-img' if has_img else '' }}">
                   {% if has_img %}
                     <img src="{{ imgurl }}" alt="shared image" class="msg-img" loading="lazy" referrerpolicy="no-referrer" />
                   {% endif %}
+
                   {% if m.text %}
-                    <div class="caption">{{ m.text | replace('\n','<br>') | urlize | safe }}</div>
+                    <div class="caption">
+                      {{ m.text
+                         | replace('\\n','\n') 
+                         | replace('&lt;br&gt;','\n') 
+                         | replace('<br>','\n')    
+                         | urlize(40, true)
+                         | safe                    
+                      }}
+                    </div>
                   {% endif %}
                 </div>
               </div>
@@ -61,4 +95,39 @@
       {% endif %}
     </div>
   </div>
+
+  {# ---------- Smooth scroll + highlight on reply-preview click ---------- #}
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      const thread = document.getElementById('chatScroll');
+
+      function scrollToMessage(target) {
+        if (!target) return;
+        // Prefer smooth scroll inside chat thread container if it exists
+        if (thread && thread.contains(target)) {
+          const top = target.offsetTop - thread.offsetTop - 60; // adjust if you change paddings
+          thread.scrollTo({ top, behavior: 'smooth' });
+        } else {
+          target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        // flash highlight
+        target.classList.add('ping');
+        setTimeout(() => target.classList.remove('ping'), 1600);
+      }
+
+      document.addEventListener('click', function (e) {
+        const link = e.target.closest('a.reply-preview');
+        if (!link) return;
+
+        const id = link.getAttribute('data-target') || (link.hash ? link.hash.slice(1) : null);
+        if (!id) return;
+        const target = document.getElementById(id);
+        if (!target) return;
+
+        e.preventDefault();
+        scrollToMessage(target);
+        history.replaceState(null, '', `#${id}`); // optional: keep hash
+      });
+    });
+  </script>
 {% endblock %}

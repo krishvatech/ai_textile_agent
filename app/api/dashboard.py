@@ -31,27 +31,129 @@ def get_tenant_name(tenant_id: int) -> str:
     finally:
         close_db_connection(conn, cur)
 
-
 @router.get("/", response_class=HTMLResponse, name="dashboard_home")
 async def dashboard_home(request: Request):
     guard = require_auth(request)
-    if isinstance(guard, RedirectResponse): return guard
+    if isinstance(guard, RedirectResponse): 
+        return guard
     tenant_id = guard
 
     conn, cur = get_db_connection()
-    cur.execute("SELECT COUNT(*) FROM customers WHERE tenant_id = %s", (tenant_id,))
-    result = cur.fetchone()
-    customers_count = result[0] if result is not None else 0
 
+    # --- KPIs ---
+    # Customers
+    cur.execute("SELECT COUNT(*) FROM customers WHERE tenant_id = %s", (tenant_id,))
+    customers_count = (cur.fetchone() or [0])[0]
+
+    # Products (product-level, not variants)
+    cur.execute("SELECT COUNT(*) FROM products WHERE tenant_id = %s", (tenant_id,))
+    products_count = (cur.fetchone() or [0])[0]
+
+    # Products that have at least one rental variant
     cur.execute("""
-        SELECT COUNT(*) 
-        FROM product_variants pv 
-        JOIN products p ON p.id = pv.product_id
-        WHERE p.tenant_id = %s
+        SELECT COUNT(DISTINCT p.id)
+        FROM products p
+        JOIN product_variants pv ON pv.product_id = p.id
+        WHERE p.tenant_id = %s AND COALESCE(pv.is_rental,false) = true
     """, (tenant_id,))
-    result = cur.fetchone()
-    products_count = result[0] if result is not None else 0
+    rental_products_count = (cur.fetchone() or [0])[0]
+
+    # Products that have at least one selling (non-rental) variant
+    cur.execute("""
+        SELECT COUNT(DISTINCT p.id)
+        FROM products p
+        JOIN product_variants pv ON pv.product_id = p.id
+        WHERE p.tenant_id = %s AND COALESCE(pv.is_rental,false) = false
+    """, (tenant_id,))
+    selling_products_count = (cur.fetchone() or [0])[0]
+
+    # Orders (selling) and Rentals (separate table)
+    cur.execute("SELECT COUNT(*) FROM orders   WHERE tenant_id = %s", (tenant_id,))
+    orders_count = (cur.fetchone() or [0])[0]
+
+    cur.execute("SELECT COUNT(*) FROM rentals  WHERE tenant_id = %s", (tenant_id,))
+    rentals_count = (cur.fetchone() or [0])[0]
+
+    # --- Charts ---
+    # Monthly series for selling orders
+    cur.execute("""
+        SELECT DATE_TRUNC('month', start_date) AS mth, COUNT(*)
+        FROM orders
+        WHERE tenant_id = %s
+        GROUP BY mth
+        ORDER BY mth
+    """, (tenant_id,))
+    sell_rows = cur.fetchall() or []
+
+    # Monthly series for rentals
+    cur.execute("""
+        SELECT DATE_TRUNC('month', rental_start_date) AS mth, COUNT(*)
+        FROM rentals
+        WHERE tenant_id = %s
+        GROUP BY mth
+        ORDER BY mth
+    """, (tenant_id,))
+    rent_rows = cur.fetchall() or []
+
+    # Top 5 by selling orders (count)
+    cur.execute("""
+        SELECT p.name, COUNT(*) AS cnt
+        FROM orders o
+        JOIN product_variants pv ON pv.id = o.product_variant_id
+        JOIN products p ON p.id = pv.product_id
+        WHERE o.tenant_id = %s
+        GROUP BY p.name
+        ORDER BY cnt DESC
+        LIMIT 5
+    """, (tenant_id,))
+    top_sell_rows = cur.fetchall() or []
+
+    # Top 5 by rentals (count)
+    cur.execute("""
+        SELECT p.name, COUNT(*) AS cnt
+        FROM rentals r
+        JOIN product_variants pv ON pv.id = r.product_variant_id
+        JOIN products p ON p.id = pv.product_id
+        WHERE r.tenant_id = %s
+        GROUP BY p.name
+        ORDER BY cnt DESC
+        LIMIT 5
+    """, (tenant_id,))
+    top_rent_rows = cur.fetchall() or []
+
     close_db_connection(conn, cur)
+
+    # Merge months → labels + two datasets
+    from collections import OrderedDict
+    merged = OrderedDict()
+    for m, c in sell_rows:
+        merged[m] = {"sell": c, "rent": 0}
+    for m, c in rent_rows:
+        merged.setdefault(m, {"sell": 0, "rent": 0})
+        merged[m]["rent"] += c
+
+    labels = [m.strftime("%b %Y") for m in merged.keys()]
+    sell_series = [v["sell"] for v in merged.values()]
+    rent_series = [v["rent"] for v in merged.values()]
+
+    # Merge top lists → same set of product labels with both counts
+    from collections import defaultdict
+    top_map = defaultdict(lambda: {"sell": 0, "rent": 0})
+    for name, cnt in top_sell_rows:
+        top_map[name]["sell"] = cnt
+    for name, cnt in top_rent_rows:
+        top_map[name]["rent"] = cnt
+
+    # Sort by combined count desc and take top 5
+    merged_top = sorted(
+        top_map.items(),
+        key=lambda kv: (kv[1]["sell"] + kv[1]["rent"]),
+        reverse=True
+    )[:5]
+
+    top_labels = [name for name, _ in merged_top]
+    top_sell   = [vals["sell"] for _, vals in merged_top]
+    top_rent   = [vals["rent"] for _, vals in merged_top]
 
     tenant_name = request.session.get("tenant_name") or get_tenant_name(tenant_id)
 
@@ -61,10 +163,26 @@ async def dashboard_home(request: Request):
             "request": request,
             "tenant_id": tenant_id,
             "tenant_name": tenant_name,
+
+            # KPI cards
             "customers_count": customers_count,
             "products_count": products_count,
+            "rental_products_count": rental_products_count,
+            "selling_products_count": selling_products_count,
+            "orders_count": orders_count,     # selling orders
+            "rentals_count": rentals_count,   # rentals table
+
+            # Charts (already JSON-serializable)
+            "chart_labels": labels,
+            "chart_sell": sell_series,
+            "chart_rent": rent_series,
+
+            "top_labels": top_labels,
+            "top_sell": top_sell,
+            "top_rent": top_rent,
         },
     )
+
 
 # ---------- Customers ----------
 @router.get("/customer", response_class=HTMLResponse)
@@ -164,31 +282,138 @@ async def products_list(request: Request):
     if isinstance(guard, RedirectResponse): return guard
     tenant_id = guard
 
+    # filter on the LIST page
+    t = (request.query_params.get("type") or "").lower()
+    if t not in ("", "all", "buy", "rent"):
+        t = ""
+    current_type = "all" if t in ("", "all") else t
+
     conn, cur = get_db_connection()
-    cur.execute("""
-        SELECT pv.id, p.name, pv.color, pv.size, pv.fabric, pv.price, pv.available_stock, pv.is_rental
-        FROM product_variants pv
-        JOIN products p ON p.id = pv.product_id
-        WHERE p.tenant_id = %s
-        ORDER BY p.name ASC
-        LIMIT 300
-    """, (tenant_id,))
-    rows = cur.fetchall()
-    close_db_connection(conn, cur)
+    try:
+        having = ""
+        if current_type == "buy":
+            having = "HAVING COALESCE(SUM(CASE WHEN pv.is_rental = FALSE THEN 1 END), 0) > 0"
+        elif current_type == "rent":
+            having = "HAVING COALESCE(SUM(CASE WHEN pv.is_rental = TRUE  THEN 1 END), 0) > 0"
+
+        q = f"""
+            SELECT p.id,
+                   p.name,
+                   COUNT(pv.id) AS variant_count,
+                   COALESCE(SUM(CASE WHEN pv.is_rental THEN 1 ELSE 0 END), 0)  AS rental_count,
+                   COALESCE(SUM(CASE WHEN NOT pv.is_rental THEN 1 ELSE 0 END), 0) AS buy_count
+            FROM products p
+            LEFT JOIN product_variants pv ON pv.product_id = p.id
+            WHERE p.tenant_id = %s
+            GROUP BY p.id, p.name
+            {having}
+            ORDER BY p.name ASC
+            LIMIT 300
+        """
+        cur.execute(q, (tenant_id,))
+        rows = cur.fetchall()
+    finally:
+        close_db_connection(conn, cur)
 
     products = [
         {
-            "variant_id": r[0], "product": r[1],
-            "attrs": f"{r[2]}/{r[3]}/{r[4]}",
-            "price": r[5], "stock": r[6], "is_rental": bool(r[7])
+            "product_id": r[0],
+            "product": r[1],
+            "variant_count": r[2] or 0,
+            "rental_count": r[3] or 0,
+            "buy_count": r[4] or 0,
         } for r in rows
     ]
 
     tenant_name = request.session.get("tenant_name") or get_tenant_name(tenant_id)
-
     return templates.TemplateResponse(
         "product_list.html",
-        {"request": request, "tenant_id": tenant_id, "tenant_name": tenant_name, "products": products},
+        {
+            "request": request,
+            "tenant_id": tenant_id,
+            "tenant_name": tenant_name,
+            "products": products,
+            "current_type": current_type,   # <-- for tabs highlight
+        },
+    )
+
+@router.get("/product/{product_id}", response_class=HTMLResponse, name="product_detail")
+async def product_detail(request: Request, product_id: int):
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    tenant_id = guard
+
+    # read filter
+    t = (request.query_params.get("type") or "").lower()
+    if t not in ("", "all", "buy", "rent"):
+        t = ""
+    current_type = "all" if t in ("", "all") else t
+
+    conn, cur = get_db_connection()
+    try:
+        # Ensure the product belongs to this tenant and fetch product name
+        cur.execute("""
+            SELECT id, name
+            FROM products
+            WHERE id = %s AND tenant_id = %s
+            LIMIT 1
+        """, (product_id, tenant_id))
+        prod = cur.fetchone()
+        if not prod:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        product = {"id": prod[0], "name": prod[1]}
+
+        where = "WHERE pv.product_id = %s"
+        params = [product_id]
+        if current_type == "rent":
+            where += " AND pv.is_rental = TRUE"
+        elif current_type == "buy":
+            where += " AND pv.is_rental = FALSE"
+
+        # Get all variants for this product
+        cur.execute(f"""
+            SELECT pv.id, pv.color, pv.size, pv.fabric,
+                   pv.price, pv.rental_price, pv.available_stock, pv.is_rental
+            FROM product_variants pv
+            {where}
+            ORDER BY pv.color, pv.size, pv.fabric
+        """, tuple(params))
+        # cur.execute("""
+        #     SELECT id, color, size, fabric, price, available_stock, is_rental
+        #     FROM product_variants
+        #     WHERE product_id = %s
+        #     ORDER BY color, size, fabric
+        # """, (product_id,))
+        rows = cur.fetchall()
+    finally:
+        close_db_connection(conn, cur)
+
+    variants = [
+        {
+            "variant_id": r[0],
+            "color": r[1],
+            "size": r[2],
+            "fabric": r[3],
+            "price": r[4],
+            "rental_price": r[5],
+            "available_stock": r[6],
+            "is_rental": bool(r[7]),
+        } for r in rows
+    ]
+
+    tenant_name = request.session.get("tenant_name") or get_tenant_name(tenant_id)
+    return templates.TemplateResponse(
+        "product_detail.html",
+        {
+            "request": request,
+            "tenant_id": tenant_id,
+            "tenant_name": tenant_name,
+            "product": product,
+            "variants": variants,
+            "current_type": current_type,
+        },
     )
 
 # --- Chat history page ---

@@ -3,44 +3,88 @@
 {% block nav_prod %}active{% endblock %}
 {% block content %}
   <div class="d-flex justify-content-between align-items-center mb-3">
-    <h3>Product Variants</h3>
+    <h3 class="mb-0">Products</h3>
   </div>
+
+  <!-- Category selector -->
+  <div class="mb-3">
+    <div class="category-tabs">
+      <!-- <a class="seg {{ 'is-active' if current_type=='all' else '' }}"
+        href="/dashboard/product">
+        <i class="bi bi-grid-3x3-gap"></i> All
+      </a> -->
+      <a class="seg {{ 'is-active' if current_type=='buy' else '' }}"
+        href="/dashboard/product?type=buy">
+        <i class="bi bi-bag"></i> Buy
+      </a>
+      <a class="seg {{ 'is-active' if current_type=='rent' else '' }}"
+        href="/dashboard/product?type=rent">
+        <i class="bi bi-calendar2-week"></i> Rent
+      </a>
+    </div>
+  </div>
+
   <div class="table-responsive">
-  <table class="table-products w-100">
-    <thead>
-      <tr>
-        <th>ID</th>
-        <th>Product</th>
-        <th>Attributes</th>
-        <th>Price</th>
-        <th>Stock</th>
-        <th>Rental</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for p in products %}
-      <tr>
-        <td><strong>#{{ p.variant_id }}</strong></td>
-        <td>{{ p.product }}</td>
-        <td>{{ p.attrs }}</td>
-        <td>₹{{ '%.0f'|format(p.price) }}</td>
-        <td>
-          {% if p.stock > 0 %}
-            <span class="chip-stock chip-in">In Stock ({{ p.stock }})</span>
+    <table class="table-products w-100">
+      <thead>
+        <tr>
+          <th style="width:120px;">Product ID</th>
+          <th>Product</th>
+          <th style="width:220px;">Counts</th>
+          <th style="width:140px;"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if products|length == 0 %}
+            <tr>
+              <td class="empty-cell" colspan="4">
+                <div class="empty-state">
+                  <div class="icon"><i class="bi bi-inbox"></i></div>
+                  <div class="title">
+                    {% if current_type=='rent' %}No rental products found
+                    {% elif current_type=='buy' %}No buy products found
+                    {% else %}No products found{% endif %}
+                  </div>
+                  <div class="subtitle">
+                    {% if current_type=='rent' %}
+                      This tenant doesn’t have products available for rent yet.
+                    {% elif current_type=='buy' %}
+                      This tenant doesn’t have products available to buy yet.
+                    {% else %}
+                      No products have been added yet.
+                    {% endif %}
+                  </div>
+                  <div class="actions">
+                    {% if current_type!='all' %}
+                      <a class="btn-lite" href="/dashboard/product">Show All</a>
+                    {% endif %}
+                    {% if current_type!='buy' %}
+                      <a class="btn-lite" href="/dashboard/product?type=buy">Buy</a>
+                    {% endif %}
+                    {% if current_type!='rent' %}
+                      <a class="btn-lite" href="/dashboard/product?type=rent">Rent</a>
+                    {% endif %}
+                  </div>
+                </div>
+              </td>
+            </tr>
           {% else %}
-            <span class="chip-stock chip-out">Out of Stock</span>
-          {% endif %}
-        </td>
-        <td>
-          {% if p.is_rental %}
-            <span class="chip-stock chip-rental">Available</span>
-          {% else %}
-            <span class="chip-stock chip-norental">No</span>
-          {% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
+          {% for p in products %}
+            <tr>
+              <td><strong>#{{ p.product_id }}</strong></td>
+              <td>{{ p.product }}</td>
+              <td>
+                <span class="badge bg-secondary me-1">All {{ p.variant_count }}</span>
+                <span class="badge bg-success me-1">Buy {{ p.buy_count }}</span>
+                <span class="badge bg-info">Rent {{ p.rental_count }}</span>
+              </td>
+              <td class="text-end">
+                <a class="btn btn-ghost" href="/dashboard/product/{{ p.product_id }}">View</a>
+              </td>
+            </tr>
+          {% endfor %}
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
 {% endblock %}

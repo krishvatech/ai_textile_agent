@@ -1,20 +1,184 @@
 {% extends "_dashboard_base.html" %}
 {% block title %}Dashboard{% endblock %}
 {% block nav_dash %}active{% endblock %}
+
 {% block content %}
-  <h3 class="mb-4">Welcome</h3>
-  <div class="row g-3">
-    <div class="col-md-4">
-      <div class="p-4 rounded-3" style="background:var(--surface); border:1px solid var(--border)">
-        <div class="small text-secondary">Customers</div>
-        <div class="fs-3 fw-bold">{{ customers_count }}</div>
-      </div>
-    </div>
-    <div class="col-md-4">
-      <div class="p-4 rounded-3" style="background:var(--surface); border:1px solid var(--border)">
-        <div class="small text-secondary">Product Variants</div>
-        <div class="fs-3 fw-bold">{{ products_count }}</div>
+<!-- Chart.js (load once) -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<!-- Page styles for consistent chart sizing -->
+<style>
+  .chart-card { height: 340px; }
+  .chart-card canvas { width: 100% !important; height: 100% !important; }
+</style>
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h3 class="mb-0">Welcome{% if tenant_name %}, {{ tenant_name }}{% endif %}</h3>
+</div>
+
+<!-- KPI ROW (6-up on xl) -->
+<div class="row g-3">
+  <div class="col-6 col-md-4 col-xl-2">
+    <div class="glass p-4 rounded-3 metric">
+      <div class="pulse"></div>
+      <div class="d-flex align-items-center justify-content-between">
+        <div>
+          <div class="small text-secondary">Total Customers</div>
+          <div class="fs-2 fw-bold">{{ customers_count or 0 }}</div>
+        </div>
+        <i class="bi bi-people fs-3 opacity-75"></i>
       </div>
     </div>
   </div>
+
+  <div class="col-6 col-md-4 col-xl-2">
+    <div class="glass p-4 rounded-3 metric">
+      <div class="pulse"></div>
+      <div class="d-flex align-items-center justify-content-between">
+        <div>
+          <div class="small text-secondary">Total Products</div>
+          <div class="fs-2 fw-bold">{{ products_count or 0 }}</div>
+        </div>
+        <i class="bi bi-box-seam fs-3 opacity-75"></i>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-6 col-md-4 col-xl-2">
+    <div class="glass p-4 rounded-3 metric">
+      <div class="pulse"></div>
+      <div class="d-flex align-items-center justify-content-between">
+        <div>
+          <div class="small text-secondary">Rental Products</div>
+          <div class="fs-2 fw-bold">{{ rental_products_count or 0 }}</div>
+        </div>
+        <i class="bi bi-bag-check fs-3 opacity-75"></i>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-6 col-md-4 col-xl-2">
+    <div class="glass p-4 rounded-3 metric">
+      <div class="pulse"></div>
+      <div class="d-flex align-items-center justify-content-between">
+        <div>
+          <div class="small text-secondary">Selling Products</div>
+          <div class="fs-2 fw-bold">{{ selling_products_count or 0 }}</div>
+        </div>
+        <i class="bi bi-bag fs-3 opacity-75"></i>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-6 col-md-4 col-xl-2">
+    <div class="glass p-4 rounded-3 metric">
+      <div class="pulse"></div>
+      <div class="d-flex align-items-center justify-content-between">
+        <div>
+          <div class="small text-secondary">Total Rentals</div>
+          <div class="fs-2 fw-bold">{{ rentals_count or 0 }}</div>
+        </div>
+        <i class="bi bi-calendar2-check fs-3 opacity-75"></i>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-6 col-md-4 col-xl-2">
+    <div class="glass p-4 rounded-3 metric">
+      <div class="pulse"></div>
+      <div class="d-flex align-items-center justify-content-between">
+        <div>
+          <div class="small text-secondary">Total Orders</div>
+          <div class="fs-2 fw-bold">{{ orders_count or 0 }}</div>
+        </div>
+        <i class="bi bi-receipt fs-3 opacity-75"></i>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ANALYTICS ROW -->
+<div class="row g-3 mt-4">
+  <div class="col-lg-8">
+    <div class="glass p-3 rounded-3 chart-card">
+      <h6 class="mb-3">Orders vs Rentals — Monthly</h6>
+      <canvas id="ordersLineChart"></canvas>
+    </div>
+  </div>
+  <div class="col-lg-4">
+    <div class="glass p-3 rounded-3 chart-card">
+      <h6 class="mb-3">Share (All-time)</h6>
+      <canvas id="shareDonut"></canvas>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ===== Server-provided data =====
+  const labels   = {{ chart_labels | tojson }};
+  const sellData = {{ chart_sell   | tojson }};
+  const rentData = {{ chart_rent   | tojson }};
+  const totals   = {
+    sell: {{ orders_count  | default(0) }},
+    rent: {{ rentals_count | default(0) }},
+  };
+
+  // ===== Shades of Blue palette =====
+  const c1 = '#3b82f6'; // Bright blue for Selling
+  const c2 = '#60a5fa'; // Lighter sky blue for Rentals
+  const c3 = '#1e40af'; // Dark slate blue fallback / neutral
+
+  window.addEventListener('load', () => {
+    // LINE: Selling vs Rentals over months (no fill, legend inside)
+    new Chart(document.getElementById('ordersLineChart'), {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Selling Orders', data: sellData, borderColor: c1, borderWidth: 2, pointRadius: 3, tension: 0.3, fill: false },
+          { label: 'Rentals',        data: rentData, borderColor: c2, borderWidth: 2, pointRadius: 3, tension: 0.3, fill: false }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        layout: { padding: { bottom: 28 } },                  // reserve space for legend
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: {
+            display: true,
+            position: 'bottom',
+            labels: { boxWidth: 10, boxHeight: 10, padding: 12, font: { size: 11 } }
+          }
+        },
+        scales: { y: { beginAtZero: true } }
+      }
+    });
+
+    // DOUGHNUT: Overall share (legend inside)
+    new Chart(document.getElementById('shareDonut'), {
+      type: 'doughnut',
+      data: {
+        labels: ['Rentals', 'Selling'],
+        datasets: [{
+          data: [totals.rent, totals.sell],
+          backgroundColor: [c2, c1],
+          borderWidth: 0
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: '60%',
+        layout: { padding: { bottom: 28 } },                  // reserve space for legend
+        plugins: {
+          legend: {
+            position: 'bottom',
+            labels: { boxWidth: 10, boxHeight: 10, padding: 12, font: { size: 11 } }
+          }
+        }
+      }
+    });
+  });
+</script>
 {% endblock %}
