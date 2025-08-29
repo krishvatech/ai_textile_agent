@@ -1184,6 +1184,30 @@ async def analyze_message(
             only_day = min(only_day, last_day)
             raw_new_entities["end_date"] = date(y, m, only_day).isoformat()
             intent_type = intent_type or "availability_check"
+    # --- Force sensible year if the USER didn't type a year (avoid stale 2024 from NER)
+    msg_has_year = bool(re.search(r"\b(19|20)\d{2}\b", text or ""))
+
+    if not msg_has_year:
+        today = datetime.now(IST).date()
+        for k in ("start_date", "end_date"):
+            v = raw_new_entities.get(k)
+            if not v:
+                continue
+            d = _parse_as_date(v)
+            if not d:
+                continue
+            if not _has_month(text or ""):
+                # Month not typed → keep current month, current year; cap the day safely
+                y, m = today.year, today.month
+                last = calendar.monthrange(y, m)[1]
+                d = date(y, m, min(d.day, last))
+            else:
+                # Month typed → snap only the year; if still past, bump to next year
+                candidate = d.replace(year=today.year)
+                if candidate < today:
+                    candidate = candidate.replace(year=today.year + 1)
+                d = candidate
+            raw_new_entities[k] = d.isoformat()
     clean_new_entities = filter_non_empty_entities(raw_new_entities)
     cat_now = (clean_new_entities.get("category") or acc_entities.get("category"))
     if cat_now and not clean_new_entities.get("type"):
@@ -1741,6 +1765,27 @@ async def analyze_message(
                 acc_entities.pop("start_date", None)
 
             # critical: wipe any accidental single-day 'end_date' coming from NER/merge
+            acc_entities.pop("end_date", None)
+        elif prev_start and prev_end and turn_is_single and (turn_start or turn_end) and not has_range_tokens:
+            start_date = _parse_as_date(turn_start or turn_end)
+            end_date = None
+
+            if start_date and not msg_has_year:
+                today = datetime.now(IST).date()
+                if not _has_month(msg):
+                    # Month not typed → snap to current month/year (cap day)
+                    y, m = today.year, today.month
+                    last = calendar.monthrange(y, m)[1]
+                    start_date = date(y, m, min(start_date.day, last))
+                else:
+                    # Month typed → keep month/day; snap year (bump if still past)
+                    candidate = start_date.replace(year=today.year)
+                    if candidate < today:
+                        candidate = candidate.replace(year=today.year + 1)
+                    start_date = candidate
+
+        if start_date:
+            acc_entities["start_date"] = start_date.isoformat()
             acc_entities.pop("end_date", None)
         # Case C: explicit range this turn (or two different dates)
         elif (turn_start is not None and turn_end is not None) and (turn_has_both_distinct or has_range_tokens):
