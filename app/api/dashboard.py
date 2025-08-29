@@ -75,7 +75,7 @@ async def customers_list(request: Request):
 
     conn, cur = get_db_connection()
     cur.execute("""
-        SELECT id, name, phone, email, created_at
+        SELECT id, whatsapp_id, name, preferred_language, phone, email, created_at, is_active, loyalty_points
         FROM customers
         WHERE tenant_id = %s
         ORDER BY created_at DESC
@@ -85,7 +85,17 @@ async def customers_list(request: Request):
     close_db_connection(conn, cur)
 
     customers = [
-        {"id": r[0], "name": r[1] or "(no name)", "phone": r[2] or "-", "email": r[3] or "-", "created_at": r[4]}
+        {
+            "id": r[0],
+            "whatsapp_id": r[1] or "-",
+            "name": (r[2] or "(no name)"),
+            "preferred_language": r[3] or "—",
+            "phone": r[4] or "—",
+            "email": r[5] or "—",
+            "created_at": r[6],
+            "is_active": bool(r[7]) if r[7] is not None else False,
+            "loyalty_points": r[8] or 0,
+        }
         for r in rows
     ]
     tenant_name = request.session.get("tenant_name") or get_tenant_name(tenant_id)

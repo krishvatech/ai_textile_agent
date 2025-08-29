@@ -290,3 +290,100 @@ main{
 .chat-thread .meta + .chat-row{
   margin-top: 10px;
 }
+
+/* Fancy product table */
+.table-products {
+  border-collapse: separate;
+  border-spacing: 0 10px;       /* row spacing */
+}
+
+.table-products thead th {
+  background: var(--glass);
+  color: var(--accent);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  border: none;
+  padding: 12px;
+  font-size: .85rem;
+}
+
+.table-products tbody tr {
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: 0 3px 10px rgba(0,0,0,.15);
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+
+.table-products tbody tr:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 6px 16px rgba(0,0,0,.25);
+}
+
+.table-products td {
+  padding: 14px 16px;
+  border: none;
+  vertical-align: middle;
+  font-size: .92rem;
+}
+
+/* First + last cell rounded */
+.table-products tbody tr td:first-child {
+  border-top-left-radius: var(--radius);
+  border-bottom-left-radius: var(--radius);
+}
+.table-products tbody tr td:last-child {
+  border-top-right-radius: var(--radius);
+  border-bottom-right-radius: var(--radius);
+}
+
+/* Status chips */
+.chip-stock {
+  display:inline-block; padding:4px 10px;
+  border-radius:999px; font-size:.75rem; font-weight:500;
+}
+.chip-in { background: rgba(15,200,120,.15); color:#0ec67c; }
+.chip-out{ background: rgba(255,80,80,.15); color:#ff5050; }
+.chip-rental{ background: rgba(108,99,255,.18); color:var(--brand); }
+.chip-norental{ background: rgba(200,200,200,.12); color:var(--muted); }
+/* Fancy people table */
+.table-people{ border-collapse: separate; border-spacing: 0 10px; width:100%; }
+.table-people thead th{
+  background: var(--glass);
+  color: var(--accent);
+  font-weight: 600; letter-spacing:.05em; text-transform: uppercase;
+  border:0; padding:12px; font-size:.82rem;
+}
+  
+.table-people tbody tr{
+  background: var(--surface); border-radius: var(--radius);
+  box-shadow: 0 3px 10px rgba(0,0,0,.15);
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+.table-people tbody tr:hover{ transform: translateY(-3px); box-shadow: 0 6px 16px rgba(0,0,0,.25); }
+.table-people td{ border:0; padding:14px 16px; vertical-align: middle; font-size:.95rem; }
+.table-people tbody tr td:first-child{ border-top-left-radius: var(--radius); border-bottom-left-radius: var(--radius); }
+.table-people tbody tr td:last-child { border-top-right-radius: var(--radius); border-bottom-right-radius: var(--radius); }
+
+/* Avatar + name cell */
+.person{
+  display:flex; align-items:center; gap:12px;
+}
+.person .avatar{
+  width:36px; height:36px; border-radius:50%; display:grid; place-items:center;
+  color:#fff; font-weight:700; font-size:.9rem;
+  background: radial-gradient(120% 120% at 20% 20%, #7c5cff, #3a3f56);
+  box-shadow: 0 2px 6px rgba(0,0,0,.25);
+}
+
+/* chips + action buttons */
+.btn-ghost{
+  background: rgba(255,255,255,.06);
+  border:1px solid var(--border);
+  padding:.35rem .6rem; font-size:.8rem; border-radius:999px;
+}
+.btn-ghost:hover{ background: var(--brand-soft); border-color: color-mix(in oklab, var(--accent) 40%, var(--border)); }
+
+/* tiny helper */
+.muted{ color: var(--muted); font-size:.85rem; }
+.copyable{ cursor:pointer; border-bottom:1px dashed rgba(255,255,255,.25); }
