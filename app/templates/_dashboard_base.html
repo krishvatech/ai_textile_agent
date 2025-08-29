@@ -3,37 +3,80 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <title>{% block title %}Dashboard{% endblock %}</title>
+
+  <!-- Bootstrap + Icons -->
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-  <style>
-    :root{
-      --bg1:#0b0f19; --bg2:#131a29; --surface:rgba(255,255,255,.05); --border:rgba(255,255,255,.1)
-    }
-    body{ background: linear-gradient(120deg,var(--bg1),var(--bg2)); }
-    .sidebar{
-      width: 240px; min-height: 100vh; background: var(--surface); border-right:1px solid var(--border);
-      position: sticky; top:0; padding: 20px;
-    }
-    .sidebar a{ display:block; padding:10px 12px; border-radius:10px; text-decoration:none; color:#cfd8e3; }
-    .sidebar a.active, .sidebar a:hover { background:#2a3350; color:#fff; }
-  </style>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+
+  <!-- Your dashboard stylesheet -->
+  <link href="/static/css/dashboard.css" rel="stylesheet">
 </head>
 <body>
-  <div class="d-flex">
-    <aside class="sidebar">
-      <h5 class="mb-3">AI Textile Agent</h5>
-      <nav>
-        <a href="/dashboard" class="{% block nav_dash %}{% endblock %}">Dashboard</a>
-        <a href="/dashboard/customer" class="{% block nav_cust %}{% endblock %}">Customers</a>
-        <a href="/dashboard/product" class="{% block nav_prod %}{% endblock %}">Products</a>
+  <!-- top bar -->
+  <header class="topbar glass px-3">
+    <div class="topbar-inner container-fluid">
+      <!-- left: brand + tenant -->
+      <div class="d-flex align-items-center gap-3">
+        <button class="btn btn-outline-light btn-sm d-md-none" id="sidebarToggle" aria-label="Toggle sidebar">
+          <i class="bi bi-list"></i>
+        </button>
+        <a class="navbar-brand text-white text-decoration-none fw-semibold" href="/dashboard">
+          <i class="bi bi-threads me-1"></i> Ecommerce Agent
+        </a>
+        <span class="text-secondary small d-none d-sm-inline" id="sbTenantName">
+          {{ tenant_name }}
+        </span>
+      </div>
+
+      <!-- right: actions -->
+      <div class="d-flex align-items-center gap-2">
+        <button id="themeToggle" class="btn btn-sm btn-outline-light" title="Toggle theme">
+          <i id="themeIcon" class="bi bi-moon-stars"></i>
+        </button>
+
+        <!-- logout -->
         <form action="/logout" method="post" class="m-0">
-        <button class="btn btn-sm btn-outline-danger"><i class="bi bi-box-arrow-right"></i> Logout</button>
-      </form>
+          <button class="btn btn-sm btn-danger d-flex align-items-center gap-2">
+            <i class="bi bi-box-arrow-right"></i>
+            <span class="d-none d-sm-inline">Logout</span>
+          </button>
+        </form>
+      </div>
+    </div>
+  </header>
+
+  <div class="layout d-flex">
+    <!-- sidebar -->
+    <aside class="sidebar glass p-3" id="sidebar">
+      <nav id="sidebarNav" class="nav flex-column gap-1">
+        <div class="nav-title text-uppercase small text-secondary px-2">Overview</div>
+        <a class="nav-link d-flex align-items-center gap-2 {% block nav_dash %}{% endblock %}" href="/dashboard">
+          <i class="bi bi-speedometer2"></i><span>Dashboard</span>
+        </a>
+
+        <div class="nav-title text-uppercase small text-secondary px-2 mt-3">Manage</div>
+        <a class="nav-link d-flex align-items-center gap-2 {% block nav_cust %}{% endblock %}" href="/dashboard/customer">
+          <i class="bi bi-people"></i><span>Customers</span>
+        </a>
+        <a class="nav-link d-flex align-items-center gap-2 {% block nav_prod %}{% endblock %}" href="/dashboard/product">
+          <i class="bi bi-box-seam"></i><span>Products</span>
+        </a>
       </nav>
     </aside>
+
+    <!-- page -->
     <main class="flex-grow-1 p-4">
       {% block content %}{% endblock %}
     </main>
   </div>
+
+  <!-- Bootstrap bundle -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <!-- Your dashboard script -->
+  <script src="/static/js/dashboard.js"></script>
 </body>
 </html>

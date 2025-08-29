@@ -3,35 +3,49 @@
 {% block nav_cust %}active{% endblock %}
 {% block content %}
   <div class="d-flex justify-content-between align-items-center mb-3">
-    <h3 class="mb-0">Chat History</h3>
-    <a class="btn btn-outline-light" href="/dashboard/customer/{{ customer_id }}">Back to Customer</a>
+    <h3 class="mb-0">Chat with Customer #{{ customer_id }}</h3>
+    <a class="btn btn-outline-light" href="/dashboard/customer/{{ customer_id }}">
+      <i class="bi bi-arrow-left-short"></i> Back
+    </a>
   </div>
 
   {% if session %}
-    <div class="mb-3 small text-secondary">
-      Session #{{ session.id }} · Started {{ session.started_at }} {% if session.ended_at %}· Ended {{ session.ended_at }}{% endif %}
+    <div class="mb-2 small text-secondary">
+      Session #{{ session.id }} · Started {{ session.started_at }}{% if session.ended_at %} · Ended {{ session.ended_at }}{% endif %}
     </div>
   {% endif %}
-
-  {% if messages and messages|length %}
-    <div class="vstack gap-3">
+  <div class="chat-box glass">
+  <div id="chatScroll" class="chat-thread">
+    {% if messages and messages|length %}
       {% for m in messages %}
-        <div class="p-3 rounded-3" style="background:var(--surface); border:1px solid var(--border)">
-          <div class="d-flex justify-content-between">
-            <div>
-              <b>{{ m.role|title }}</b>
-              <span class="badge bg-secondary ms-2">{{ m.direction or '-' }}</span>
+        {% set is_in = (m.direction == 'in') %}
+        {% set same_sender = (not loop.first and loop.previtem.role == m.role and loop.previtem.direction == m.direction) %}
+
+        <div class="chat-row {{ 'in' if is_in else 'out' }}">
+          {% if not same_sender %}
+            <!-- show avatar only at start of group -->
+            <div class="avatar {{ 'avatar-us' if is_in else 'avatar-bot' }}">
+              {{ 'US' if is_in else 'BO' }}
             </div>
-            <div class="small text-secondary">{{ m.ts or '' }}</div>
-          </div>
-          <div class="mt-2">{{ m.text }}</div>
-          {% if m.meta and m.meta.reply_to %}
-            <div class="small text-secondary mt-1">↩ Reply to: {{ m.meta.reply_to }}</div>
+          {% else %}
+            <div class="avatar-spacer"></div>
           {% endif %}
+
+          <div class="bubble-group">
+            <div class="bubble">{{ m.text }}</div>
+            {% set next_sender = (not loop.last and loop.nextitem.role == m.role and loop.nextitem.direction == m.direction) %}
+            {% if loop.last or not next_sender %}
+              <!-- metadata only at end of group -->
+              <div class="meta">
+                <span>{{ 'User' if is_in else 'Assistant' }}</span>
+                {% if m.ts %}<span class="ts">{{ m.ts }}</span>{% endif %}
+              </div>
+            {% endif %}
+          </div>
         </div>
       {% endfor %}
-    </div>
-  {% else %}
-    <div class="text-secondary">No chat messages found.</div>
-  {% endif %}
+    {% else %}
+      <div class="text-secondary">No chat messages found.</div>
+    {% endif %}
+  </div>
 {% endblock %}

@@ -46,10 +46,13 @@ async def login(
 
     # success → set session
     request.session["tenant_id"] = tenant.id
+    request.session["tenant_name"] = tenant.name
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
 @router.post("/logout")
 async def logout(request: Request):
     request.session.clear()
-    return RedirectResponse(url="/login", status_code=303)
+    resp = RedirectResponse("/login", status_code=303)
+    resp.delete_cookie("txa_session")
+    return _no_store(resp)

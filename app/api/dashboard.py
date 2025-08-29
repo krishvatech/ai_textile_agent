@@ -10,21 +10,39 @@ from app.db.db_connection import get_db_connection, close_db_connection  # <-- u
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 
-def require_auth(request: Request) -> int:
-    tenant_id = request.session.get("tenant_id")
-    if not tenant_id:
-        # redirect back to login, then bounce to dashboard after auth
-        raise RedirectResponse("/login?next=/dashboard", status_code=303)
-    return int(tenant_id)
+def _no_store(resp: HTMLResponse) -> HTMLResponse:
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
+def require_auth(request: Request) -> int | RedirectResponse:
+    tid = request.session.get("tenant_id")
+    if not tid:
+        next_path = request.url.path or "/dashboard/"
+        return RedirectResponse(url=f"/login?next={next_path}", status_code=303)
+    return int(tid)
+
+def get_tenant_name(tenant_id: int) -> str:
+    conn, cur = get_db_connection()
+    try:
+        cur.execute("SELECT name FROM tenants WHERE id = %s LIMIT 1", (tenant_id,))
+        row = cur.fetchone()
+        return (row[0] if row else "Unknown").strip() if row and row[0] else "Unknown"
+    finally:
+        close_db_connection(conn, cur)
+
 
 @router.get("/", response_class=HTMLResponse, name="dashboard_home")
 async def dashboard_home(request: Request):
-    tenant_id = require_auth(request)
-    # You can compute small metrics here (counts) if you want
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse): return guard
+    tenant_id = guard
+
     conn, cur = get_db_connection()
     cur.execute("SELECT COUNT(*) FROM customers WHERE tenant_id = %s", (tenant_id,))
     result = cur.fetchone()
     customers_count = result[0] if result is not None else 0
+
     cur.execute("""
         SELECT COUNT(*) 
         FROM product_variants pv 
@@ -35,15 +53,25 @@ async def dashboard_home(request: Request):
     products_count = result[0] if result is not None else 0
     close_db_connection(conn, cur)
 
+    tenant_name = request.session.get("tenant_name") or get_tenant_name(tenant_id)
+
     return templates.TemplateResponse(
         "dashboard.html",
-        {"request": request, "tenant_id": tenant_id, "customers_count": customers_count, "products_count": products_count},
+        {
+            "request": request,
+            "tenant_id": tenant_id,
+            "tenant_name": tenant_name,
+            "customers_count": customers_count,
+            "products_count": products_count,
+        },
     )
 
 # ---------- Customers ----------
 @router.get("/customer", response_class=HTMLResponse)
 async def customers_list(request: Request):
-    tenant_id = require_auth(request)
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse): return guard
+    tenant_id = guard
 
     conn, cur = get_db_connection()
     cur.execute("""
@@ -60,14 +88,18 @@ async def customers_list(request: Request):
         {"id": r[0], "name": r[1] or "(no name)", "phone": r[2] or "-", "email": r[3] or "-", "created_at": r[4]}
         for r in rows
     ]
+    tenant_name = request.session.get("tenant_name") or get_tenant_name(tenant_id)
+
     return templates.TemplateResponse(
         "customer_list.html",
-        {"request": request, "tenant_id": tenant_id, "customers": customers},
+        {"request": request, "tenant_id": tenant_id, "tenant_name": tenant_name, "customers": customers},
     )
 
 @router.get("/customer/{customer_id}", response_class=HTMLResponse)
 async def customer_detail(request: Request, customer_id: int):
-    tenant_id = require_auth(request)
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse): return guard
+    tenant_id = guard
 
     conn, cur = get_db_connection()
     cur.execute("""
@@ -108,15 +140,19 @@ async def customer_detail(request: Request, customer_id: int):
         } for r in orders
     ]
 
+    tenant_name = request.session.get("tenant_name") or get_tenant_name(tenant_id)
+
     return templates.TemplateResponse(
         "customer_detail.html",
-        {"request": request, "tenant_id": tenant_id, "customer": customer, "orders": order_items},
+        {"request": request, "tenant_id": tenant_id, "tenant_name": tenant_name, "customer": customer, "orders": order_items},
     )
 
 # ---------- Products ----------
 @router.get("/product", response_class=HTMLResponse)
 async def products_list(request: Request):
-    tenant_id = require_auth(request)
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse): return guard
+    tenant_id = guard
 
     conn, cur = get_db_connection()
     cur.execute("""
@@ -138,15 +174,19 @@ async def products_list(request: Request):
         } for r in rows
     ]
 
+    tenant_name = request.session.get("tenant_name") or get_tenant_name(tenant_id)
+
     return templates.TemplateResponse(
         "product_list.html",
-        {"request": request, "tenant_id": tenant_id, "products": products},
+        {"request": request, "tenant_id": tenant_id, "tenant_name": tenant_name, "products": products},
     )
 
 # --- Chat history page ---
 @router.get("/chat/{customer_id}", response_class=HTMLResponse)
 async def chat_history(request: Request, customer_id: int):
-    tenant_id = require_auth(request)
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse): return guard
+    tenant_id = guard
     if isinstance(tenant_id, RedirectResponse):
         return tenant_id
 
@@ -173,15 +213,19 @@ async def chat_history(request: Request, customer_id: int):
         # transcript = json.loads(row[3]) if isinstance(row[3], str) else row[3]
         messages = transcript or []
 
+    tenant_name = request.session.get("tenant_name") or get_tenant_name(tenant_id)
+
     return templates.TemplateResponse(
         "chat_history.html",
-        {"request": request, "tenant_id": tenant_id, "customer_id": customer_id, "session": session, "messages": messages},
+        {"request": request, "tenant_id": tenant_id, "tenant_name": tenant_name, "customer_id": customer_id, "session": session, "messages": messages},
     )
 
 # --- Orders page (by customer) ---
 @router.get("/orders/{customer_id}", response_class=HTMLResponse)
 async def orders_by_customer(request: Request, customer_id: int):
-    tenant_id = require_auth(request)
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse): return guard
+    tenant_id = guard
     if isinstance(tenant_id, RedirectResponse):
         return tenant_id
 
@@ -210,8 +254,9 @@ async def orders_by_customer(request: Request, customer_id: int):
         }
         for r in (rows or [])
     ]
+    tenant_name = request.session.get("tenant_name") or get_tenant_name(tenant_id)
 
     return templates.TemplateResponse(
         "orders_by_customer.html",
-        {"request": request, "tenant_id": tenant_id, "customer_id": customer_id, "orders": orders},
+        {"request": request, "tenant_id": tenant_id, "tenant_name": tenant_name, "customer_id": customer_id, "orders": orders},
     )

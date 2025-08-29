@@ -68,3 +68,16 @@ window.addEventListener('pageshow', function (e) {
       location.reload();
     }
   });
+
+  (function lockBackOnLogin(){
+  if (!/^\/login\/?$/.test(location.pathname)) return;
+  const u = new URL(location.href);
+  const next = u.searchParams.get('next') || '/dashboard/';
+  history.replaceState({lock:true}, "", `/login?next=${encodeURIComponent(next)}`);
+  history.pushState({lock:true}, "", `/login?next=${encodeURIComponent(next)}`);
+  window.addEventListener('popstate', () => {
+    // Always stay on /login when logged out
+    location.replace(`/login?next=${encodeURIComponent(next)}`);
+  });
+  window.addEventListener('pageshow', e => { if (e.persisted) location.reload(); });
+})();
