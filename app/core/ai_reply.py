@@ -20,6 +20,7 @@ import json
 import re
 import calendar
 import httpx
+from app.db.models import Rental, ProductVariant, RentalStatus
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from datetime import date, datetime, timedelta, timezone
@@ -115,7 +116,58 @@ def _past_date_msg(s: date, e: Optional[date], language: str) -> str:
             return f"આ તારીખ ભૂતકાળમાં છે ({s.strftime('%d %b %Y')}). કૃપા કરીને ભવિષ્યની તારીખ આપો."
         return f"That date is in the past ({s.strftime('%d %b %Y')}). Please share a future date."
 
+async def _create_rental_if_needed(acc_entities: Dict[str, Any]) -> Optional[int]:
+    """
+    Creates a Rental row if we have everything we need and haven't created one already.
+    Returns rental_id (int) or None.
+    """
+    # prevent duplicates on repeated "yes"
+    if acc_entities.get("rental_id"):
+        return acc_entities["rental_id"]
 
+    # must be a rental confirmation with concrete variant + dates
+    if not acc_entities.get("is_rental"):
+        return None
+    vid = acc_entities.get("product_variant_id")
+    s   = acc_entities.get("start_date")
+    e   = acc_entities.get("end_date")
+    if not (vid and s and e):
+        return None
+
+    # parse to date -> datetime (00:00)
+    s_date = _parse_as_date(s)
+    e_date = _parse_as_date(e)
+    if not (s_date and e_date):
+        return None
+    s_dt = datetime.combine(s_date, datetime.min.time())
+    e_dt = datetime.combine(e_date, datetime.min.time())
+
+    # work out rental_price: prefer entity, else variant.rental_price
+    price = acc_entities.get("rental_price")
+    async with SessionLocal() as db:
+        if price in (None, "", [], {}):
+            try:
+                pv = await db.get(ProductVariant, int(vid))
+                if pv and pv.rental_price is not None:
+                    price = float(pv.rental_price)
+            except Exception:
+                price = None
+        if price is None:
+            price = 0.0  # last-resort fallback
+
+        rental = Rental(
+            product_variant_id=int(vid),
+            rental_start_date=s_dt,
+            rental_end_date=e_dt,
+            rental_price=float(price),
+            status=RentalStatus.active,
+        )
+        db.add(rental)
+        await db.commit()
+        await db.refresh(rental)
+
+        acc_entities["rental_id"] = rental.id
+        return rental.id
 # =============== Website inquiry ===========
 
 # --- price + formatting helpers ---
@@ -1564,12 +1616,40 @@ async def analyze_message(
 
         # --- Define helper functions first ---
         def _p(x):
+            """Robust date parse:
+            1) Trust strict ISO (YYYY-MM-DD) so 2024-09-01 stays 1 Sep 2024.
+            2) Otherwise, natural parse:
+               - If it starts with a 4-digit year, use yearfirst=True.
+               - Else prefer dayfirst=True (India)."""
             if x in (None, "", [], {}):
                 return None
             s = str(x).strip()
+
+            # 1) Strict ISO first
             try:
-                # handle things like "3-sep", "30 august", "02/09"
-                return dateparser.parse(s, dayfirst=True, yearfirst=False, fuzzy=True).date()
+                return date.fromisoformat(s)
+            except Exception:
+                pass
+
+            # allow 2024/09/01 or 2024.09.01 as ISO-ish
+            try:
+                s_isoish = re.sub(r"[./]", "-", s)
+                if re.match(r"^\d{4}-\d{2}-\d{2}$", s_isoish):
+                    return date.fromisoformat(s_isoish)
+            except Exception:
+                pass
+
+            # 2) Natural parse with sensible flags
+            try:
+                starts_with_year = bool(re.match(r"^\s*\d{4}\D", s))
+                dt = dateparser.parse(
+                    s,
+                    dayfirst=not starts_with_year,   # "1/9" → dayfirst; "2024-09-01" → yearfirst
+                    yearfirst=starts_with_year,
+                    fuzzy=True,
+                    default=datetime.now(IST)
+                )
+                return dt.date() if dt else None
             except Exception:
                 return None
 
@@ -1776,19 +1856,6 @@ async def analyze_message(
             _has_year(prev_start_raw) or _has_year(prev_end_raw) or
             _has_year(turn_start_raw) or _has_year(turn_end_raw)
         )
-
-        if start_date and not any_year_specified:
-            today = _date.today()
-            # single-date past OR range that ends in past
-            if (end_date and end_date < today) or (not end_date and start_date < today):
-                msg = _past_date_msg(start_date, end_date, language)
-                history.append({"role": "assistant", "content": msg}); _commit()
-                return {
-                    "input_text": text, "language": language, "intent_type": intent_type,
-                    "history": history, "collected_entities": acc_entities,
-                    "reply": msg, "reply_text": msg
-                }
-
         typed_range_this_turn = bool(turn_has_both_distinct or (turn_start and turn_end and has_range_tokens))
         if start_date and not any_year_specified and not typed_range_this_turn:
             today = _date.today()
@@ -2060,9 +2127,17 @@ async def analyze_message(
         date_part = f" | {s} to {e}" if (acc_entities.get("is_rental") and s and e) else ""
 
         reply = f"Thanks for confirming. Summary: {name} | qty {qty} | {rb}{date_part}."
-
         # mark confirmed so future 'yes' replies don’t trigger more prompts
         acc_entities["order_confirmed"] = True
+
+        try:
+            if acc_entities.get("is_rental") is True:
+                rid = await _create_rental_if_needed(acc_entities)
+                if rid:
+                    reply += f" | Rental ID: #{rid}"
+        except Exception as _e:
+            # keep flow resilient; don’t crash user chat if insert fails
+            logging.exception("Rental insert failed in confirmation: %s", _e)
 
         history.append({"role": "assistant", "content": reply})
         session_memory[sk] = history
