@@ -1960,17 +1960,30 @@ async def analyze_message(
                 "reply": err, "reply_text": err,
             }
 
-        # --- 9) reply + confirmation follow-up
-        avail_line = (
-            f"✅ Available {start_date.strftime('%d %b %Y')} to {end_date.strftime('%d %b %Y')}."
-            if available else
-            f"❌ Not available {start_date.strftime('%d %b %Y')} to {end_date.strftime('%d %b %Y')}."
-        )
-        confirm_q = await FollowUP_Question(
-            intent_type, acc_entities, language, session_history=history,
-            only_fields=["confirmation"], max_fields=1
-        )
-        final_reply = f"{avail_line}".strip()
+        # --- 9) reply + next-step (confirm only if available; else ask new dates)
+        lr = (language or "en-IN").split("-")[0].lower()
+
+        if available:
+            avail_line = (
+                f"✅ Available {start_date.strftime('%d %b %Y')} to {end_date.strftime('%d %b %Y')}."
+            )
+            followup_line = await FollowUP_Question(
+                intent_type, acc_entities, language, session_history=history,
+                only_fields=["confirmation"], max_fields=1
+            )
+        else:
+            avail_line = (
+                f"❌ Not available {start_date.strftime('%d %b %Y')} to {end_date.strftime('%d %b %Y')}."
+            )
+            # Localized ask for another date range (do NOT ask for confirmation)
+            if lr == "hi":
+                followup_line = "कृपया कोई दूसरा तारीख़ रेंज साझा करें."
+            elif lr == "gu":
+                followup_line = "કૃપા કરીને બીજી તારીખો શેર કરો."
+            else:
+                followup_line = "Please share another date range."
+
+        final_reply = avail_line.strip()
 
         history.append({"role": "assistant", "content": final_reply}); _commit()
         payload = {
@@ -1981,7 +1994,7 @@ async def analyze_message(
             "collected_entities": acc_entities,
             "reply": final_reply,
             "reply_text": final_reply,
-            "followup_reply": confirm_q
+            "followup_reply": followup_line
         }
         if mode == "call":
             payload["answer"] = final_reply
