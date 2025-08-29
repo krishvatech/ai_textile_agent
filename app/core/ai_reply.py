@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from dateutil import parser as dateparser
 from app.core.central_system_prompt import Textile_Prompt 
 from sqlalchemy import text as sql_text  # Import if not already present
-from sqlalchemy import select  # ✅
+from sqlalchemy import select,update
 from app.db.session import SessionLocal
 from app.core.rental_utils import is_variant_available
 from app.core.product_search import pinecone_fetch_records
@@ -170,6 +170,23 @@ async def _create_rental_if_needed(acc_entities: Dict[str, Any]) -> Optional[int
 
         acc_entities["rental_id"] = rental.id
         return rental.id
+async def auto_mark_returns(db: AsyncSession) -> int:
+    """
+    Mark all ACTIVE rentals as RETURNED once the end date has fully passed
+    (cutoff = today's midnight in IST). Works with naive DB DateTime columns.
+    Returns number of rows updated.
+    """
+    # midnight today (IST) → rentals strictly before this are considered complete
+    cutoff_ist_midnight = datetime.combine(datetime.now(IST).date(), datetime.min.time()).replace(tzinfo=None)
+
+    result = await db.execute(
+        update(Rental)
+        .where(Rental.status == RentalStatus.active)
+        .where(Rental.rental_end_date < cutoff_ist_midnight)
+        .values(status=RentalStatus.returned)
+    )
+    await db.commit()
+    return result.rowcount or 0
 # =============== Website inquiry ===========
 
 # --- price + formatting helpers ---
@@ -1161,6 +1178,13 @@ async def analyze_message(
         pass
     last_main_intent = last_main_intent_by_session.get(sk, None)
     prev_entities = dict(acc_entities)  # <--- ADD THIS LINE
+    try:
+        async with SessionLocal() as _db:
+            changed = await auto_mark_returns(_db)
+            if changed:
+                logging.info(f"Auto-marked {changed} rentals as returned.")
+    except Exception as e:
+        logging.warning(f"auto_mark_returns failed: {e}")
     # --- Clean and merge new entities into memory (critical!) ---
     raw_new_entities = new_entities or {}
     if not raw_new_entities.get("start_date") and not raw_new_entities.get("end_date"):
