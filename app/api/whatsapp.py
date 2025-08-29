@@ -733,14 +733,27 @@ async def receive_cloud_webhook(request: Request):
                     logging.info("=" * 100)
                     logging.info(f"========{from_waid}")
                     logging.info("=" * 100)
-
-                    transcript = await get_transcript_by_phone(from_waid, db)
+                    chat_session = await get_or_open_active_session(db, customer_id=customer.id)
+                    phone_norm = _normalize_waid_phone(from_waid)  # "+9197…"
+                    transcript = await get_transcript_by_phone(phone_norm, db)
                     messages = _normalize_messages(transcript)
+
+                    # NEW: persist inbound swipe message with reply_to = the image being replied to
+                    await append_transcript_message(
+                        db, chat_session,
+                        role="user", text=text_msg, msg_id=msg_id, direction="in",
+                        meta={"raw": data, "channel": "cloud_api", "reply_to": replied_message_id},
+                    )
 
                     # 1) Pick the right caption (image caption if reply was to an image; else previous assistant image)
                     caption = find_assistant_image_caption_by_msg_id(messages, replied_message_id)
                     if not caption:
-                        caption = find_prev_assistant_image_caption(messages, replied_message_id)
+                        await send_whatsapp_reply_cloud(
+                            to_waid=from_waid,
+                            body="Sorry—couldn’t link your reply to a product. Please reply directly to the product image you like."
+                        )
+                        await db.commit()
+                        return {"status": "ok"}
 
                     logging.info("=" * 20)
                     logging.info(f"=========Caption used for resolve======== {caption}")
@@ -912,21 +925,11 @@ async def receive_cloud_webhook(request: Request):
                     # --- Persist all outbound messages BEFORE returning
                     for kind, txt, mid in out_msgs:
                         meta = {"kind": kind, "channel": "cloud_api"}
-                        save_id = mid
-                        save_text = txt
-
-                        # If this is the image we sent, also attach entities in meta
-                        if kind == "image":
-                            if isinstance(collected_entities, (dict, list)):
-                                meta["entities"] = collected_entities
-                            await append_transcript_message(
-                                db, chat_session,
-                                role="assistant",
-                                text=save_text,
-                                msg_id=save_id,
-                                direction="out",
-                                meta=meta,
-                            )
+                        # keep entities only on images
+                        if kind == "image" and isinstance(collected_entities, (dict, list)):
+                            meta["entities"] = collected_entities
+                        await append_transcript_message(db, chat_session, role="assistant",
+                                                        text=txt, msg_id=mid, direction="out", meta=meta)
 
                     await db.commit()
 
@@ -970,8 +973,10 @@ async def receive_cloud_webhook(request: Request):
                     logging.info(f"========{from_waid}")
 
                     # Pull transcript and derive product context (for logs + intent merge)
-                    transcript = await get_transcript_by_phone(from_waid, db)
+                    phone_norm = _normalize_waid_phone(from_waid)
+                    transcript = await get_transcript_by_phone(phone_norm, db)
                     messages   = _normalize_messages(transcript)
+
 
                     # Use last assistant message as the "reply_id" context when user isn't swiping
                     last_assistant = next((m for m in reversed(messages)
