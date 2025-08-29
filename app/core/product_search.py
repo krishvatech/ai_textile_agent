@@ -123,6 +123,9 @@ def build_filters_from_entities(tenant_id: int, ents: dict) -> dict:
             # letter sizes like S/M/L/XL/XXL/... -> use smart_capitalize to keep XL, 3XL, etc.
             f["size"] = {"$eq": smart_capitalize(str(sval))}
 
+    if ents.get("type"):
+        f["type"] = {"$eq": _title_keep_spaces(ents["type"])}
+
     # Color and fabric (more flexible)
     if ents.get("color"):
         f["color"] = {"$eq": _title_keep_spaces(ents["color"])}

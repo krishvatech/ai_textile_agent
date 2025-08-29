@@ -51,6 +51,7 @@ class Tenant(Base):
     customers = relationship("Customer", back_populates="tenant", cascade="all, delete-orphan")
     orders = relationship("Order", back_populates="tenant", cascade="all, delete-orphan")
     users = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
+    rentals = relationship("Rental", back_populates="tenant", cascade="all, delete-orphan")
 class User(Base):
     """User (admin, staff) for a tenant/shop. Superadmin is platform-level."""
     __tablename__ = "users"
@@ -83,6 +84,7 @@ class Customer(Base):
     tenant = relationship("Tenant", back_populates="customers")
     orders = relationship("Order", back_populates="customer")
     feedbacks = relationship("Feedback", back_populates="customer", cascade="all, delete-orphan")
+    rentals = relationship("Rental", back_populates="customer", cascade="all, delete-orphan")
     chat_sessions = relationship("ChatSession", back_populates="customer", cascade="all, delete-orphan")
     __table_args__ = (Index('idx_customers_tenant_id', "tenant_id"),)
 class Product(Base):
@@ -161,6 +163,8 @@ class Rental(Base):
     """
     __tablename__ = "rentals"
     id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True, index=True)
     product_variant_id = Column(Integer, ForeignKey("product_variants.id"), nullable=False, index=True)
     rental_start_date = Column(DateTime, nullable=False)
     rental_end_date = Column(DateTime, nullable=False)
@@ -170,6 +174,9 @@ class Rental(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     # Relationships
     product_variant = relationship("ProductVariant", back_populates="rentals")
+    tenant = relationship("Tenant", back_populates="rentals")
+    customer = relationship("Customer", back_populates="rentals")
+    
 class Order(Base):
     """
     Customer order for a buy or rental of a product variant.

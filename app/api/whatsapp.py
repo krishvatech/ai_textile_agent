@@ -862,9 +862,10 @@ async def receive_cloud_webhook(request: Request):
                             text=text_msg,
                             tenant_id=tenant_id,
                             tenant_name=tenant_name,
+                            customer_id=customer.id,  # ← NEW
                             language=current_language,
                             intent=intent_type,
-                            new_entities=entities,   # ← this now includes name/fabric/occasion
+                            new_entities=entities,
                             intent_confidence=confidence,
                             mode="chat",
                             session_key=f"{tenant_id}:whatsapp:wa:{from_waid}",
@@ -1054,6 +1055,7 @@ async def receive_cloud_webhook(request: Request):
                                 text=text_msg,
                                 tenant_id=tenant_id,
                                 tenant_name=tenant_name,
+                                customer_id=customer.id,  # ← NEW
                                 language=current_language,
                                 intent=intent_type,
                                 new_entities=entities,

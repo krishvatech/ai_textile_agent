@@ -156,6 +156,8 @@ async def _create_rental_if_needed(acc_entities: Dict[str, Any]) -> Optional[int
             price = 0.0  # last-resort fallback
 
         rental = Rental(
+            tenant_id=int(acc_entities.get("tenant_id")) if acc_entities.get("tenant_id") is not None else None,
+            customer_id=int(acc_entities.get("customer_id")) if acc_entities.get("customer_id") is not None else None,
             product_variant_id=int(vid),
             rental_start_date=s_dt,
             rental_end_date=e_dt,
@@ -1121,6 +1123,7 @@ async def analyze_message(
     text: str,
     tenant_id: int,
     tenant_name: str,
+    customer_id: int | None = None,   # ← NEW
     language: str = "en-US",
     intent: str | None = None,
     new_entities: dict | None = None,
@@ -1149,6 +1152,13 @@ async def analyze_message(
     # Load state
     history = session_memory.get(sk, [])
     acc_entities = session_entities.get(sk, {})   # use {} not None
+    try:
+        if tenant_id and not acc_entities.get("tenant_id"):
+            acc_entities["tenant_id"] = int(tenant_id)
+        if customer_id and not acc_entities.get("customer_id"):
+            acc_entities["customer_id"] = int(customer_id)
+    except Exception:
+        pass
     last_main_intent = last_main_intent_by_session.get(sk, None)
     prev_entities = dict(acc_entities)  # <--- ADD THIS LINE
     # --- Clean and merge new entities into memory (critical!) ---
