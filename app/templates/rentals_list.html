@@ -1,0 +1,169 @@
+{% extends "_dashboard_base.html" %}
+{% block title %}Rentals{% endblock %}
+{% block nav_rentals %}active{% endblock %}
+{% block content %}
+
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h3 class="mb-0">Rentals</h3>
+  </div>
+
+  <!-- Tabs: client-side status filter (no reload) -->
+  <div class="mb-3">
+    <div class="category-tabs" id="jsRentalTabs">
+      <a class="seg is-active" data-filter="all"       href="#all"><i class="bi bi-grid-3x3-gap"></i> All</a>
+      <a class="seg"          data-filter="active"    href="#active"><i class="bi bi-lightning-charge"></i> Active</a>
+      <a class="seg"          data-filter="returned"  href="#returned"><i class="bi bi-arrow-90deg-left"></i> Returned</a>
+      <a class="seg"          data-filter="cancelled" href="#cancelled"><i class="bi bi-x-circle"></i> Cancelled</a>
+    </div>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table-rentals w-100">
+      <thead>
+        <tr>
+          <th style="width:110px;">Rental ID</th>
+          <th>Customer</th>
+          <th>Product</th>
+          <th style="width:130px;">Price</th>
+          <th style="width:130px;">Status</th>
+          <th style="width:280px;">Period</th>
+          <th style="width:120px;">Created</th>
+          <!-- <th style="width:110px;" class="text-end">Actions</th> -->
+        </tr>
+      </thead>
+      <tbody>
+        {% if rentals|length == 0 %}
+          <tr>
+            <td class="empty-cell" colspan="8">
+              <div class="empty-state">
+                <div class="icon"><i class="bi bi-inbox"></i></div>
+                <div class="title">No rentals found</div>
+                <div class="subtitle">New rental bookings will appear here.</div>
+              </div>
+            </td>
+          </tr>
+        {% else %}
+          {% for r in rentals %}
+            {% set initials = (r.customer_name or '').strip().split() %}
+            {% set initials = (initials[0][0] ~ (initials[1][0] if initials|length>1 else '')).upper() if r.customer_name else 'U' %}
+            {# Normalize enum-like strings such as 'RentalStatus.active' -> 'active' #}
+            {% set status_key = (r.status|string)|lower|replace('rentalstatus.', '') %}
+            <tr data-status="{{ status_key }}" data-filtered="1">
+              <td><strong>#{{ r.id }}</strong></td>
+
+              <td>
+                <div class="person">
+                  <div class="avatar">{{ initials }}</div>
+                  <div>
+                    <div>{{ r.customer_name or "—" }}</div>
+                    <div class="muted">{{ r.customer_phone or "—" }}</div>
+                  </div>
+                </div>
+              </td>
+
+              <td>
+                {{ r.product_name or "—" }}
+                {% if r.product_category %}
+                  <span class="muted d-block">Category: {{ r.product_category }}</span>
+                {% endif %}
+              </td>
+
+              <td>₹ {{ '%.2f'|format(r.rental_price or 0) }}</td>
+
+              <td><span class="chip">{{ (r.status or "—")|capitalize }}</span></td>
+
+              <td>
+                <span class="muted">From</span>
+                {{ r.start_date.strftime("%d %b %Y") if r.start_date else "—" }}
+                <span class="muted">to</span>
+                {{ r.end_date.strftime("%d %b %Y") if r.end_date else "—" }}
+              </td>
+
+              <td>{{ r.created_at.strftime("%d %b %Y") if r.created_at else "—" }}</td>
+
+              <!-- <td class="text-end">
+                <a class="btn btn-ghost" href="/dashboard/rental/{{ r.id }}">View</a>
+              </td> -->
+            </tr>
+          {% endfor %}
+
+          <!-- Empty-state row shown only when a tab filter yields 0 matches -->
+          <tr class="js-empty" style="display:none;">
+            <td class="empty-cell" colspan="8">
+              <div class="empty-state">
+                <div class="icon"><i class="bi bi-inbox"></i></div>
+                <div class="title">No rentals match this filter</div>
+                <div class="subtitle">Try switching tabs.</div>
+              </div>
+            </td>
+          </tr>
+        {% endif %}
+      </tbody>
+    </table>
+
+    <!-- Pager (binds to .table-rentals via data-table) -->
+    <nav class="table-pager"
+     id="rentalsPager"
+     data-table=".table-rentals"
+     data-autohide="0"
+     aria-label="Rentals pagination">
+      <button class="tp-btn tp-first"  type="button">«</button>
+      <button class="tp-btn tp-prev"   type="button">‹</button>
+      <span class="tp-info">Page <b class="tp-page">1</b> / <span class="tp-pages">1</span></span>
+      <button class="tp-btn tp-next"   type="button">›</button>
+      <button class="tp-btn tp-last"   type="button">»</button>
+      <span class="tp-gap"></span>
+      <label class="tp-size">Rows:
+        <select class="tp-page-size">
+          <option>10</option><option selected>20</option><option>30</option><option>50</option>
+        </select>
+      </label>
+    </nav>
+  </div>
+
+  <!-- Page-scoped JS: status tabs + repaginate -->
+  <script>
+    (function rentalsFilter(){
+      const tabs  = document.getElementById('jsRentalTabs');
+      const tbody = document.querySelector('.table-rentals tbody');
+      const pager = document.getElementById('rentalsPager');
+      if (!tabs || !tbody) return;
+
+      function visibleCount(){
+        return Array.from(tbody.querySelectorAll('tr'))
+          .filter(tr => !tr.classList.contains('js-empty') && (tr.dataset.filtered ?? "1") !== "0").length;
+      }
+      function toggleEmptyRow(show){
+        const er = tbody.querySelector('.js-empty');
+        if (er) er.style.display = show ? '' : 'none';
+      }
+      function apply(mode){
+        // Update active tab UI
+        tabs.querySelectorAll('.seg').forEach(a => a.classList.toggle('is-active', a.dataset.filter === mode));
+
+        // Mark rows as filtered in/out
+        const rows = Array.from(tbody.querySelectorAll('tr')).filter(tr => !tr.classList.contains('js-empty'));
+        rows.forEach(tr => {
+          const st = (tr.dataset.status || '').toLowerCase();
+          tr.dataset.filtered = (mode === 'all' || st === mode) ? '1' : '0';
+        });
+
+        // Empty-state if no visible rows
+        toggleEmptyRow(visibleCount() === 0);
+
+        // Tell paginator to recalc the filtered set
+        if (pager && typeof pager._repaginate === 'function') pager._repaginate();
+      }
+
+      tabs.addEventListener('click', (e)=>{
+        const a = e.target.closest('.seg'); if (!a) return;
+        e.preventDefault();
+        apply(a.dataset.filter || 'all');
+      });
+
+      // Default view
+      apply('all');
+    })();
+  </script>
+
+{% endblock %}

@@ -1,0 +1,133 @@
+{% extends "_dashboard_base.html" %}
+{% block title %}Orders{% endblock %}
+{% block nav_orders %}active{% endblock %}
+{% block content %}
+
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h3 class="mb-0">Orders</h3>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table-people table-rentals">
+      <thead>
+        <tr>
+          <th >Order ID</th>
+          <th>Customer</th>
+          <th>Product Name</th>
+          <th >Amount</th>
+          <th >Payment</th>
+          <th >Status</th>
+          <th >Placed</th>
+          <!-- <th  class="text-end">Actions</th> -->
+        </tr>
+      </thead>
+      <tbody>
+        {% if orders|length == 0 %}
+          <tr>
+            <td class="empty-cell" colspan="9">
+              <div class="empty-state">
+                <div class="icon"><i class="bi bi-inbox"></i></div>
+                <div class="title">No orders yet</div>
+                <div class="subtitle">When customers place orders, they’ll appear here.</div>
+              </div>
+            </td>
+          </tr>
+        {% else %}
+          {% for o in orders %}
+            {% set initials = (o.customer_name or '').strip().split() %}
+            {% set initials = (initials[0][0] ~ (initials[1][0] if initials|length>1 else '')).upper() if o.customer_name else 'U' %}
+            <tr data-type="{{ 'rental' if o.is_rental else 'purchase' }}" data-filtered="1">
+              <td><strong>#{{ o.id }}</strong></td>
+              <td>
+                <div class="person">
+                  <div class="avatar">{{ initials }}</div>
+                  <div>
+                    <div>{{ o.customer_name or "—" }}</div>
+                    <div class="muted">{{ o.customer_phone or "—" }}</div>
+                  </div>
+                </div>
+              </td>
+              <td>
+                <div>
+                    <div>{{ o.product_name or "—" }}</div>
+                    <div class="muted">{{ o.product_category or "—" }}</div>
+                  </div>
+              </td>
+              <td>₹ {{ '%.2f'|format(o.amount or 0) }}</td>
+              <td><span class="chip">{{ (o.payment_status or "—")|capitalize }}</span></td>
+              <td><span class="chip">{{ (o.status or "—")|capitalize }}</span></td>
+              <td>{{ o.created_at.strftime("%d %b %Y") if o.created_at else "—" }}</td>
+              <!-- <td class="text-end">
+                <a class="btn btn-ghost" href="/dashboard/order/{{ o.id }}">View</a>
+              </td> -->
+            </tr>
+          {% endfor %}
+          <!-- Shown when a filter yields 0 matches -->
+          <tr class="js-empty" style="display:none;">
+            <td class="empty-cell" colspan="9">
+              <div class="empty-state">
+                <div class="icon"><i class="bi bi-inbox"></i></div>
+                <div class="title">No orders match this filter</div>
+                <div class="subtitle">Try switching tabs.</div>
+              </div>
+            </td>
+          </tr>
+        {% endif %}
+      </tbody>
+    </table>
+
+    <!-- Pager -->
+    <nav class="table-pager"
+     id="rentalsPager"
+     data-table=".table-rentals"
+     data-autohide="0"
+     aria-label="Rentals pagination">
+      <button class="tp-btn tp-first"  type="button">«</button>
+      <button class="tp-btn tp-prev"   type="button">‹</button>
+      <span class="tp-info">Page <b class="tp-page">1</b> / <span class="tp-pages">1</span></span>
+      <button class="tp-btn tp-next"   type="button">›</button>
+      <button class="tp-btn tp-last"   type="button">»</button>
+      <span class="tp-gap"></span>
+      <label class="tp-size">Rows:
+        <select class="tp-page-size">
+          <option>10</option><option selected>20</option><option>30</option><option>50</option>
+        </select>
+      </label>
+    </nav>
+  </div>
+
+  <!-- Filter + repaginate -->
+  <script>
+    (function ordersFilter(){
+      const tabs  = document.getElementById('jsOrderTabs');
+      const tbody = document.querySelector('.table-orders tbody');
+      const pager = document.getElementById('ordersPager');
+      if (!tabs || !tbody) return;
+
+      function visibleCount(){
+        return Array.from(tbody.querySelectorAll('tr'))
+          .filter(tr => !tr.classList.contains('js-empty') && (tr.dataset.filtered ?? "1") !== "0").length;
+      }
+      function toggleEmptyRow(show){
+        const er = tbody.querySelector('.js-empty');
+        if (er) er.style.display = show ? '' : 'none';
+      }
+      function apply(mode){
+        tabs.querySelectorAll('.seg').forEach(a => a.classList.toggle('is-active', a.dataset.filter === mode));
+        const rows = Array.from(tbody.querySelectorAll('tr')).filter(tr => !tr.classList.contains('js-empty'));
+        rows.forEach(tr => {
+          const keep = (mode === 'all') ? true : (tr.dataset.type === mode);
+          tr.dataset.filtered = keep ? '1' : '0';
+        });
+        toggleEmptyRow(visibleCount() === 0);
+        if (pager && typeof pager._repaginate === 'function') pager._repaginate();
+      }
+      tabs.addEventListener('click', (e)=>{
+        const a = e.target.closest('.seg'); if (!a) return;
+        e.preventDefault(); apply(a.dataset.filter || 'all');
+      });
+      apply('all');
+    })();
+  </script>
+
+{% endblock %}

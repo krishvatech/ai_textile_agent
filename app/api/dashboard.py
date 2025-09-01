@@ -3,7 +3,6 @@ from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from typing import List, Dict, Any
-
 from app.db.db_connection import get_db_connection, close_db_connection  # <-- uses your psycopg2 helper
 # if your project already has a SQLAlchemy session, you can swap to that later
 
@@ -95,32 +94,6 @@ async def dashboard_home(request: Request):
     """, (tenant_id,))
     rent_rows = cur.fetchall() or []
 
-    # Top 5 by selling orders (count)
-    cur.execute("""
-        SELECT p.name, COUNT(*) AS cnt
-        FROM orders o
-        JOIN product_variants pv ON pv.id = o.product_variant_id
-        JOIN products p ON p.id = pv.product_id
-        WHERE o.tenant_id = %s
-        GROUP BY p.name
-        ORDER BY cnt DESC
-        LIMIT 5
-    """, (tenant_id,))
-    top_sell_rows = cur.fetchall() or []
-
-    # Top 5 by rentals (count)
-    cur.execute("""
-        SELECT p.name, COUNT(*) AS cnt
-        FROM rentals r
-        JOIN product_variants pv ON pv.id = r.product_variant_id
-        JOIN products p ON p.id = pv.product_id
-        WHERE r.tenant_id = %s
-        GROUP BY p.name
-        ORDER BY cnt DESC
-        LIMIT 5
-    """, (tenant_id,))
-    top_rent_rows = cur.fetchall() or []
-
     close_db_connection(conn, cur)
 
     # Merge months → labels + two datasets
@@ -136,24 +109,6 @@ async def dashboard_home(request: Request):
     sell_series = [v["sell"] for v in merged.values()]
     rent_series = [v["rent"] for v in merged.values()]
 
-    # Merge top lists → same set of product labels with both counts
-    from collections import defaultdict
-    top_map = defaultdict(lambda: {"sell": 0, "rent": 0})
-    for name, cnt in top_sell_rows:
-        top_map[name]["sell"] = cnt
-    for name, cnt in top_rent_rows:
-        top_map[name]["rent"] = cnt
-
-    # Sort by combined count desc and take top 5
-    merged_top = sorted(
-        top_map.items(),
-        key=lambda kv: (kv[1]["sell"] + kv[1]["rent"]),
-        reverse=True
-    )[:5]
-
-    top_labels = [name for name, _ in merged_top]
-    top_sell   = [vals["sell"] for _, vals in merged_top]
-    top_rent   = [vals["rent"] for _, vals in merged_top]
 
     tenant_name = request.session.get("tenant_name") or get_tenant_name(tenant_id)
 
@@ -176,10 +131,6 @@ async def dashboard_home(request: Request):
             "chart_labels": labels,
             "chart_sell": sell_series,
             "chart_rent": rent_series,
-
-            "top_labels": top_labels,
-            "top_sell": top_sell,
-            "top_rent": top_rent,
         },
     )
 
@@ -226,82 +177,126 @@ async def customers_list(request: Request):
 @router.get("/customer/{customer_id}", response_class=HTMLResponse)
 async def customer_detail(request: Request, customer_id: int):
     guard = require_auth(request)
-    if isinstance(guard, RedirectResponse): return guard
+    if isinstance(guard, RedirectResponse):
+        return guard
     tenant_id = guard
 
     conn, cur = get_db_connection()
-    cur.execute("""
-        SELECT id, name, phone, email, preferred_language, loyalty_points, created_at
-        FROM customers
-        WHERE id = %s AND tenant_id = %s
-        LIMIT 1
-    """, (customer_id, tenant_id))
-    row = cur.fetchone()
-    if not row:
+    try:
+        # ---- Customer row
+        cur.execute("""
+            SELECT id, name, phone, email, preferred_language, loyalty_points, created_at
+            FROM customers
+            WHERE id = %s AND tenant_id = %s
+            LIMIT 1
+        """, (customer_id, tenant_id))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Customer not found")
+
+        customer = {
+            "id": row[0],
+            "name": row[1] or "(no name)",
+            "phone": row[2] or "-",
+            "email": row[3] or "-",
+            "preferred_language": row[4] or "-",
+            "loyalty_points": row[5] or 0,
+            "created_at": row[6],
+        }
+
+        # ---- Recent Orders (last 10)
+        cur.execute("""
+            SELECT o.id, o.order_type, o.status, o.price, o.created_at,
+                   pv.color, pv.size, pv.fabric, p.name
+            FROM orders o
+            JOIN product_variants pv ON pv.id = o.product_variant_id
+            JOIN products p         ON p.id = pv.product_id
+            WHERE o.customer_id = %s AND o.tenant_id = %s
+            ORDER BY o.created_at DESC
+            LIMIT 10
+        """, (customer_id, tenant_id))
+        orders_rows = cur.fetchall() or []
+
+        orders = [{
+            "id": r[0],
+            "order_type": r[1],
+            "status": r[2],
+            "price": r[3],
+            "created_at": r[4],
+            "variant": f"{r[8]} — {r[5]}/{r[6]}/{r[7]}",
+        } for r in orders_rows]
+
+        # ---- Recent Rentals (last 10)
+        cur.execute("""
+            SELECT r.id, r.status, r.rental_price, r.rental_start_date, r.rental_end_date, r.created_at,
+                   pv.color, pv.size, pv.fabric, p.name
+            FROM rentals r
+            JOIN product_variants pv ON pv.id = r.product_variant_id
+            JOIN products p         ON p.id = pv.product_id
+            WHERE r.customer_id = %s AND r.tenant_id = %s
+            ORDER BY r.created_at DESC
+            LIMIT 10
+        """, (customer_id, tenant_id))
+        rentals_rows = cur.fetchall() or []
+
+        rentals = [{
+            "id": r[0],
+            "status": r[1],
+            "rental_price": r[2],
+            "start_date": r[3],
+            "end_date": r[4],
+            "created_at": r[5],
+            "variant": f"{r[9]} — {r[6]}/{r[7]}/{r[8]}",
+        } for r in rentals_rows]
+
+    finally:
         close_db_connection(conn, cur)
-        raise HTTPException(status_code=404, detail="Customer not found")
-
-    customer = {
-        "id": row[0], "name": row[1] or "(no name)", "phone": row[2] or "-",
-        "email": row[3] or "-", "preferred_language": row[4] or "-",
-        "loyalty_points": row[5] or 0, "created_at": row[6]
-    }
-
-    # (optional) last 10 orders for this customer
-    cur.execute("""
-        SELECT o.id, o.order_type, o.status, o.price, o.created_at,
-               pv.color, pv.size, pv.fabric, p.name
-        FROM orders o
-        JOIN product_variants pv ON pv.id = o.product_variant_id
-        JOIN products p ON p.id = pv.product_id
-        WHERE o.customer_id = %s AND o.tenant_id = %s
-        ORDER BY o.created_at DESC
-        LIMIT 10
-    """, (customer_id, tenant_id))
-    orders = cur.fetchall()
-    close_db_connection(conn, cur)
-
-    order_items = [
-        {
-            "id": r[0], "order_type": r[1], "status": r[2], "price": r[3], "created_at": r[4],
-            "variant": f"{r[8]} — {r[5]}/{r[6]}/{r[7]}"
-        } for r in orders
-    ]
 
     tenant_name = request.session.get("tenant_name") or get_tenant_name(tenant_id)
-
     return templates.TemplateResponse(
         "customer_detail.html",
-        {"request": request, "tenant_id": tenant_id, "tenant_name": tenant_name, "customer": customer, "orders": order_items},
+        {
+            "request": request,
+            "tenant_id": tenant_id,
+            "tenant_name": tenant_name,
+            "customer": customer,
+            "orders": orders,
+            "rentals": rentals,
+        },
     )
+
 
 # ---------- Products ----------
 @router.get("/product", response_class=HTMLResponse)
 async def products_list(request: Request):
     guard = require_auth(request)
-    if isinstance(guard, RedirectResponse): return guard
+    if isinstance(guard, RedirectResponse): 
+        return guard
     tenant_id = guard
 
     # filter on the LIST page
     t = (request.query_params.get("type") or "").lower()
-    if t not in ("", "all", "buy", "rent"):
+    if t not in ("", "all", "sell", "rent"):
         t = ""
     current_type = "all" if t in ("", "all") else t
 
     conn, cur = get_db_connection()
     try:
         having = ""
-        if current_type == "buy":
+        if current_type == "sell":
             having = "HAVING COALESCE(SUM(CASE WHEN pv.is_rental = FALSE THEN 1 END), 0) > 0"
         elif current_type == "rent":
             having = "HAVING COALESCE(SUM(CASE WHEN pv.is_rental = TRUE  THEN 1 END), 0) > 0"
 
+        # representative image per product using any non-null variant image
         q = f"""
-            SELECT p.id,
-                   p.name,
-                   COUNT(pv.id) AS variant_count,
-                   COALESCE(SUM(CASE WHEN pv.is_rental THEN 1 ELSE 0 END), 0)  AS rental_count,
-                   COALESCE(SUM(CASE WHEN NOT pv.is_rental THEN 1 ELSE 0 END), 0) AS buy_count
+            SELECT 
+                p.id,
+                p.name,
+                COUNT(pv.id) AS variant_count,
+                COALESCE(SUM(CASE WHEN pv.is_rental THEN 1 ELSE 0 END), 0)      AS rental_count,
+                COALESCE(SUM(CASE WHEN NOT pv.is_rental THEN 1 ELSE 0 END), 0)  AS sell_count,
+                MAX(pv.image_url) FILTER (WHERE pv.image_url IS NOT NULL)        AS image_url
             FROM products p
             LEFT JOIN product_variants pv ON pv.product_id = p.id
             WHERE p.tenant_id = %s
@@ -321,7 +316,8 @@ async def products_list(request: Request):
             "product": r[1],
             "variant_count": r[2] or 0,
             "rental_count": r[3] or 0,
-            "buy_count": r[4] or 0,
+            "sell_count": r[4] or 0,
+            "image_url": r[5],   # <— new
         } for r in rows
     ]
 
@@ -333,9 +329,10 @@ async def products_list(request: Request):
             "tenant_id": tenant_id,
             "tenant_name": tenant_name,
             "products": products,
-            "current_type": current_type,   # <-- for tabs highlight
+            "current_type": current_type,
         },
     )
+
 
 @router.get("/product/{product_id}", response_class=HTMLResponse, name="product_detail")
 async def product_detail(request: Request, product_id: int):
@@ -346,7 +343,7 @@ async def product_detail(request: Request, product_id: int):
 
     # read filter
     t = (request.query_params.get("type") or "").lower()
-    if t not in ("", "all", "buy", "rent"):
+    if t not in ("", "all", "sell", "rent"):
         t = ""
     current_type = "all" if t in ("", "all") else t
 
@@ -369,7 +366,7 @@ async def product_detail(request: Request, product_id: int):
         params = [product_id]
         if current_type == "rent":
             where += " AND pv.is_rental = TRUE"
-        elif current_type == "buy":
+        elif current_type == "sell":
             where += " AND pv.is_rental = FALSE"
 
         # Get all variants for this product
@@ -455,43 +452,168 @@ async def chat_history(request: Request, customer_id: int):
         {"request": request, "tenant_id": tenant_id, "tenant_name": tenant_name, "customer_id": customer_id, "session": session, "messages": messages},
     )
 
-# --- Orders page (by customer) ---
-@router.get("/orders/{customer_id}", response_class=HTMLResponse)
-async def orders_by_customer(request: Request, customer_id: int):
+@router.get("/orders", response_class=HTMLResponse)
+async def orders_list(request: Request):
     guard = require_auth(request)
     if isinstance(guard, RedirectResponse): return guard
     tenant_id = guard
-    if isinstance(tenant_id, RedirectResponse):
-        return tenant_id
+    
+    conn, cur = get_db_connection()
+    try:
+        cur.execute(f"""
+            SELECT 
+                o.id,
+                o.order_number,
+                o.order_type,           -- 'purchase' | 'rental'
+                o.status,
+                o.payment_status,
+                o.price        AS amount,
+                o.discount,
+                o.start_date,
+                o.end_date,
+                o.created_at,
+
+                c.id           AS customer_id,
+                c.name         AS customer_name,
+                c.phone        AS customer_phone,
+                c.email        AS customer_email,
+
+                pv.id          AS variant_id,
+                pv.id::text    AS variant_label,   -- fallback label (no pv.sku in schema)
+
+                p.id           AS product_id,
+                p.name         AS product_name,
+                p.category     AS product_category
+            FROM orders o
+            JOIN customers        c  ON c.id  = o.customer_id
+            JOIN product_variants pv ON pv.id = o.product_variant_id
+            JOIN products         p  ON p.id  = pv.product_id
+            WHERE o.tenant_id = %s
+            ORDER BY o.created_at DESC
+            LIMIT 2000
+        """, (tenant_id,))
+        rows = cur.fetchall()
+    finally:
+        close_db_connection(conn, cur)
+
+    orders = [{
+        "id": r[0],
+        "order_number": r[1],
+        "order_type": r[2],
+        "status": r[3],
+        "payment_status": r[4],
+        "amount": r[5],
+        "discount": r[6],
+        "start_date": r[7],
+        "end_date": r[8],
+        "created_at": r[9],
+        "customer_id": r[10],
+        "customer_name": r[11],
+        "customer_phone": r[12],
+        "customer_email": r[13],
+        "variant_id": r[14],
+        "variant_label": r[15],     # <- was variant_sku; now safe fallback
+        "product_id": r[16],
+        "product_name": r[17],
+        "product_category": r[18],
+        "is_rental": (r[2] == "rental"),
+    } for r in rows]
+
+    tenant_name = request.session.get("tenant_name") or get_tenant_name(tenant_id)
+    return templates.TemplateResponse(
+        "orders_list.html",
+        {
+            "request": request,
+            "tenant_id": tenant_id,
+            "tenant_name": tenant_name,
+            "orders": orders,
+        },
+    )
+
+
+@router.get("/rentals", response_class=HTMLResponse)
+async def rentals_list(request: Request):
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse): return guard
+    tenant_id = guard
+
+    # optional status filter ?status=active|returned|cancelled|all
+    s = (request.query_params.get("status") or "").lower()
+    allowed = {"", "all", "active", "returned", "cancelled"}
+    if s not in allowed:
+        s = ""
+    current_status = "all" if s in ("", "all") else s
+
+    where_status = ""
+    params = [tenant_id]
+    if current_status != "all":
+        where_status = "AND r.status::text = %s"
+        params.append(current_status)
 
     conn, cur = get_db_connection()
-    cur.execute("""
-        SELECT o.id, o.order_type, o.status, o.price, o.created_at,
-               pv.color, pv.size, pv.fabric, p.name
-        FROM orders o
-        JOIN product_variants pv ON pv.id = o.product_variant_id
-        JOIN products p ON p.id = pv.product_id
-        WHERE o.customer_id = %s AND o.tenant_id = %s
-        ORDER BY o.created_at DESC
-        LIMIT 200
-    """, (customer_id, tenant_id))
-    rows = cur.fetchall()
-    close_db_connection(conn, cur)
+    try:
+        cur.execute(f"""
+            SELECT
+                r.id,
+                r.customer_id,
+                c.name       AS customer_name,
+                c.phone      AS customer_phone,
+                c.email      AS customer_email,
 
-    orders = [
-        {
-            "id": r[0],
-            "order_type": r[1],
-            "status": r[2],
-            "price": r[3],
-            "created_at": r[4],
-            "variant": f"{r[8]} — {r[5]}/{r[6]}/{r[7]}",
-        }
-        for r in (rows or [])
-    ]
+                pv.id        AS variant_id,
+                pv.id::text  AS variant_label,   -- fallback label (no pv.sku)
+                
+
+                p.id         AS product_id,
+                p.name       AS product_name,
+                p.category     AS product_category,
+                    
+                r.rental_start_date,
+                r.rental_end_date,
+                r.rental_price,
+                r.status,
+                r.created_at
+            FROM rentals r
+            JOIN customers        c  ON c.id  = r.customer_id
+            JOIN product_variants pv ON pv.id = r.product_variant_id
+            JOIN products         p  ON p.id  = pv.product_id
+            WHERE r.tenant_id = %s
+              {where_status}
+            ORDER BY r.created_at DESC
+            LIMIT 2000
+        """, tuple(params))
+        rows = cur.fetchall()
+    finally:
+        close_db_connection(conn, cur)
+
+    rentals = [{
+        "id": r[0],
+        "customer_id": r[1],
+        "customer_name": r[2],
+        "customer_phone": r[3],
+        "customer_email": r[4],
+        "variant_id": r[5],
+        "variant_label": r[6],      # <- was variant_sku; now safe fallback
+        "product_id": r[7],
+        "product_name": r[8],
+        "product_category": r[9],
+        "start_date": r[10],
+        "end_date": r[11],
+        "rental_price": r[12],
+        "status": r[13],
+        "created_at": r[14],
+    } for r in rows]
+
     tenant_name = request.session.get("tenant_name") or get_tenant_name(tenant_id)
-
     return templates.TemplateResponse(
-        "orders_by_customer.html",
-        {"request": request, "tenant_id": tenant_id, "tenant_name": tenant_name, "customer_id": customer_id, "orders": orders},
+        "rentals_list.html",
+        {
+            "request": request,
+            "tenant_id": tenant_id,
+            "tenant_name": tenant_name,
+            "rentals": rentals,
+            "current_status": current_status,
+        },
     )
+
+

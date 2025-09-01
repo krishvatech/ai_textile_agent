@@ -112,10 +112,9 @@
     </div>
   </div>
 </div>
-
 <script>
   // ===== Server-provided data =====
-  const labels   = {{ chart_labels | tojson }};
+  const labels   = {{ chart_labels | tojson }};  // e.g., ["Aug 2025","Sep 2025","Oct 2025"]
   const sellData = {{ chart_sell   | tojson }};
   const rentData = {{ chart_rent   | tojson }};
   const totals   = {
@@ -123,26 +122,40 @@
     rent: {{ rentals_count | default(0) }},
   };
 
-  // ===== Shades of Blue palette =====
-  const c1 = '#3b82f6'; // Bright blue for Selling
-  const c2 = '#60a5fa'; // Lighter sky blue for Rentals
-  const c3 = '#1e40af'; // Dark slate blue fallback / neutral
+  // ===== Colors =====
+  const c1 = '#3b82f6'; // Selling
+  const c2 = '#60a5fa'; // Rentals
+
+  // ===== Sort labels chronologically (Mon YYYY) and reorder series accordingly =====
+  const MONTHS = {Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:5,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11};
+
+  const sortIndex = labels
+    .map((l, i) => {
+      const [mon, year] = l.split(' ');
+      return { i, t: new Date(parseInt(year, 10), MONTHS[mon], 1) };
+    })
+    .sort((a, b) => a.t - b.t)
+    .map(x => x.i);
+
+  const labelsSorted = sortIndex.map(i => labels[i]);
+  const sellSorted   = sortIndex.map(i => sellData[i]);
+  const rentSorted   = sortIndex.map(i => rentData[i]);
 
   window.addEventListener('load', () => {
-    // LINE: Selling vs Rentals over months (no fill, legend inside)
+    // LINE: Selling vs Rentals (uses SORTED arrays)
     new Chart(document.getElementById('ordersLineChart'), {
       type: 'line',
       data: {
-        labels,
+        labels: labelsSorted,
         datasets: [
-          { label: 'Selling Orders', data: sellData, borderColor: c1, borderWidth: 2, pointRadius: 3, tension: 0.3, fill: false },
-          { label: 'Rentals',        data: rentData, borderColor: c2, borderWidth: 2, pointRadius: 3, tension: 0.3, fill: false }
+          { label: 'Selling Orders', data: sellSorted, borderColor: c1, borderWidth: 2, pointRadius: 3, tension: 0.3, fill: false },
+          { label: 'Rentals',        data: rentSorted, borderColor: c2, borderWidth: 2, pointRadius: 3, tension: 0.3, fill: false }
         ]
       },
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        layout: { padding: { bottom: 28 } },                  // reserve space for legend
+        layout: { padding: { bottom: 28 } },
         interaction: { mode: 'index', intersect: false },
         plugins: {
           legend: {
@@ -155,7 +168,7 @@
       }
     });
 
-    // DOUGHNUT: Overall share (legend inside)
+    // DOUGHNUT: Overall share (totals unaffected by sorting)
     new Chart(document.getElementById('shareDonut'), {
       type: 'doughnut',
       data: {
@@ -170,7 +183,7 @@
         responsive: true,
         maintainAspectRatio: false,
         cutout: '60%',
-        layout: { padding: { bottom: 28 } },                  // reserve space for legend
+        layout: { padding: { bottom: 28 } },
         plugins: {
           legend: {
             position: 'bottom',

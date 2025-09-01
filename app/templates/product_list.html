@@ -2,25 +2,27 @@
 {% block title %}Products{% endblock %}
 {% block nav_prod %}active{% endblock %}
 {% block content %}
+<style>
+  .prod-cell { display:flex; align-items:center; gap:.75rem; }
+  .prod-thumb {
+    height:100px; border-radius:10px; object-fit:cover;
+    background: var(--card); border:1px solid var(--border);
+  }
+  .prod-thumb.placeholder {
+    display:flex; align-items:center; justify-content:center; 
+    font-size:18px; color:var(--muted);
+  }
+</style>
   <div class="d-flex justify-content-between align-items-center mb-3">
     <h3 class="mb-0">Products</h3>
   </div>
 
-  <!-- Category selector -->
+  <!-- Tabs: JS-only filter (no navigation) -->
   <div class="mb-3">
-    <div class="category-tabs">
-      <!-- <a class="seg {{ 'is-active' if current_type=='all' else '' }}"
-        href="/dashboard/product">
-        <i class="bi bi-grid-3x3-gap"></i> All
-      </a> -->
-      <a class="seg {{ 'is-active' if current_type=='buy' else '' }}"
-        href="/dashboard/product?type=buy">
-        <i class="bi bi-bag"></i> Buy
-      </a>
-      <a class="seg {{ 'is-active' if current_type=='rent' else '' }}"
-        href="/dashboard/product?type=rent">
-        <i class="bi bi-calendar2-week"></i> Rent
-      </a>
+    <div class="category-tabs" id="jsProductTabs">
+      <a class="seg is-active" data-filter="all"  href="#"><i class="bi bi-grid-3x3-gap"></i> All</a>
+      <a class="seg"          data-filter="sell" href="#"><i class="bi bi-bag"></i> Sell</a>
+      <a class="seg"          data-filter="rent" href="#"><i class="bi bi-calendar2-week"></i> Rent</a>
     </div>
   </div>
 
@@ -28,63 +30,124 @@
     <table class="table-products w-100">
       <thead>
         <tr>
-          <th style="width:120px;">Product ID</th>
+          <th >Product ID</th>
           <th>Product</th>
-          <th style="width:220px;">Counts</th>
-          <th style="width:140px;"></th>
+          <th>Product Name</th>
+          <th >Counts</th>
+          <th></th>
         </tr>
       </thead>
       <tbody>
-        {% if products|length == 0 %}
-            <tr>
-              <td class="empty-cell" colspan="4">
-                <div class="empty-state">
-                  <div class="icon"><i class="bi bi-inbox"></i></div>
-                  <div class="title">
-                    {% if current_type=='rent' %}No rental products found
-                    {% elif current_type=='buy' %}No buy products found
-                    {% else %}No products found{% endif %}
-                  </div>
-                  <div class="subtitle">
-                    {% if current_type=='rent' %}
-                      This tenant doesn’t have products available for rent yet.
-                    {% elif current_type=='buy' %}
-                      This tenant doesn’t have products available to buy yet.
-                    {% else %}
-                      No products have been added yet.
-                    {% endif %}
-                  </div>
-                  <div class="actions">
-                    {% if current_type!='all' %}
-                      <a class="btn-lite" href="/dashboard/product">Show All</a>
-                    {% endif %}
-                    {% if current_type!='buy' %}
-                      <a class="btn-lite" href="/dashboard/product?type=buy">Buy</a>
-                    {% endif %}
-                    {% if current_type!='rent' %}
-                      <a class="btn-lite" href="/dashboard/product?type=rent">Rent</a>
-                    {% endif %}
-                  </div>
-                </div>
-              </td>
-            </tr>
-          {% else %}
-          {% for p in products %}
-            <tr>
-              <td><strong>#{{ p.product_id }}</strong></td>
-              <td>{{ p.product }}</td>
-              <td>
-                <span class="badge bg-secondary me-1">All {{ p.variant_count }}</span>
-                <span class="badge bg-success me-1">Buy {{ p.buy_count }}</span>
-                <span class="badge bg-info">Rent {{ p.rental_count }}</span>
-              </td>
-              <td class="text-end">
-                <a class="btn btn-ghost" href="/dashboard/product/{{ p.product_id }}">View</a>
-              </td>
-            </tr>
-          {% endfor %}
-        {% endif %}
-      </tbody>
+  {% if products|length == 0 %}
+    <!-- unchanged empty state -->
+  {% else %}
+    {% for p in products %}
+      <tr
+        data-has-sell="{{ 1 if p.sell_count>0 else 0 }}"
+        data-has-rent="{{ 1 if p.rental_count>0 else 0 }}"
+      >
+        <td><strong>#{{ p.product_id }}</strong></td>
+
+        <!-- Product cell with image -->
+        <td>
+          <div class="prod-cell">
+            {% if p.image_url %}
+              <img src="{{ p.image_url }}" alt="{{ p.product }}" 
+                   class="prod-thumb" loading="lazy" decoding="async">
+            {% else %}
+              <div class="prod-thumb placeholder"><i class="bi bi-image"></i></div>
+            {% endif %}
+            
+          </div>
+        </td>
+        <td><div>{{ p.product }}</div></td>
+        <td>
+          <span class="badge bg-secondary me-1 badge-sell">Sell {{ p.sell_count }}</span>
+          <span class="badge bg-success   me-1 badge-rent">Rent {{ p.rental_count }}</span>
+        </td>
+        <td class="text-end">
+          <a class="btn btn-ghost" href="/dashboard/product/{{ p.product_id }}">View</a>
+        </td>
+      </tr>
+    {% endfor %}
+
+    <!-- existing hidden empty row ... -->
+  {% endif %}
+</tbody>
     </table>
+
+    <!-- Client-side pager (binds to table via data-table) -->
+    <nav class="table-pager" id="productsPager" data-table=".table-products" aria-label="Products pagination">
+      <button class="tp-btn tp-first"  type="button">«</button>
+      <button class="tp-btn tp-prev"   type="button">‹</button>
+      <span class="tp-info">Page <b class="tp-page">1</b> / <span class="tp-pages">1</span></span>
+      <button class="tp-btn tp-next"   type="button">›</button>
+      <button class="tp-btn tp-last"   type="button">»</button>
+      <span class="tp-gap"></span>
+      <label class="tp-size">Rows:
+        <select class="tp-page-size">
+          <option>10</option><option selected>20</option><option>30</option><option>50</option>
+        </select>
+      </label>
+    </nav>
   </div>
+
+  <!-- Page-scoped JS to wire the filter and keep pager in sync -->
+  <script>
+  (function productsFilter(){
+    const tabs  = document.getElementById('jsProductTabs');
+    const table = document.querySelector('.table-products');
+    const tbody = table?.querySelector('tbody');
+    const pager = document.getElementById('productsPager');
+    if (!tabs || !table || !tbody) return;
+
+    function visibleRowCount(){
+      return Array.from(tbody.querySelectorAll('tr'))
+        .filter(tr => !tr.classList.contains('js-empty') && (tr.dataset.filtered ?? "1") !== "0").length;
+    }
+
+    function toggleEmptyRow(show){
+      const er = tbody.querySelector('.js-empty');
+      if (er) er.style.display = show ? '' : 'none';
+    }
+
+    function apply(mode){
+      // tab active state
+      tabs.querySelectorAll('.seg').forEach(a => a.classList.toggle('is-active', a.dataset.filter === mode));
+
+      // mark rows as kept/filtered (DO NOT change display here)
+      const rows = Array.from(tbody.querySelectorAll('tr')).filter(tr => !tr.classList.contains('js-empty'));
+      rows.forEach(tr => {
+        const sell = tr.dataset.hasSell === '1';
+        const rent = tr.dataset.hasRent === '1';
+        let keep = true;
+        if (mode === 'sell') keep = sell;
+        else if (mode === 'rent') keep = rent;
+        tr.dataset.filtered = keep ? '1' : '0';
+      });
+
+      // toggle badges per mode (visual only)
+      table.querySelectorAll('.badge-sell').forEach(el => el.style.display = (mode === 'rent') ? 'none' : '');
+      table.querySelectorAll('.badge-rent').forEach(el => el.style.display = (mode === 'sell') ? 'none' : '');
+
+      // empty state if nothing visible
+      toggleEmptyRow(visibleRowCount() === 0);
+
+      // ask paginator to re-count & repaint current page
+      if (pager && typeof pager._repaginate === 'function') pager._repaginate();
+    }
+
+    tabs.addEventListener('click', (e) => {
+      const a = e.target.closest('.seg');
+      if (!a) return;
+      e.preventDefault();
+      apply(a.dataset.filter || 'all');
+    });
+
+    // default mode
+    apply('all');
+  })();
+</script>
+
+
 {% endblock %}

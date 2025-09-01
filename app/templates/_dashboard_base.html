@@ -65,7 +65,15 @@
         <a class="nav-link d-flex align-items-center gap-2 {% block nav_prod %}{% endblock %}" href="/dashboard/product">
           <i class="bi bi-box-seam"></i><span>Products</span>
         </a>
-      </nav>
+        <!-- NEW: Orders -->
+        <a class="nav-link d-flex align-items-center gap-2 {% block nav_orders %}{% endblock %}" href="/dashboard/orders">
+          <i class="bi bi-receipt"></i><span>Orders</span>
+        </a>
+        <!-- NEW: Rentals -->
+        <a class="nav-link d-flex align-items-center gap-2 {% block nav_rentals %}{% endblock %}" href="/dashboard/rentals">
+          <i class="bi bi-calendar2-week"></i><span>Rentals</span>
+        </a>
+</nav>
     </aside>
 
     <!-- page -->
