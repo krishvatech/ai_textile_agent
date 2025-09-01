@@ -67,7 +67,7 @@
                   {% endif %}
 
                   {% if m.text %}
-                    <div class="caption">
+                    <div class="{{ 'caption' if m.direction == 'out' else '' }}">
                       {{ m.text
                          | replace('\\n','\n') 
                          | replace('&lt;br&gt;','\n') 
