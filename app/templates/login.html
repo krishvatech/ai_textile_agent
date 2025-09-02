@@ -16,7 +16,7 @@
   <!-- Bootstrap Icons -->
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet" />
   <!-- Your CSS -->
-  <link rel="stylesheet" href="{{ request.url_for('static', path='css/login.css') }}">
+  <link rel="stylesheet" href="{{ request.app.url_path_for('static', path='css/login.css') }}">
 </head>
 <body>
   <!-- Animated blobs background -->
@@ -90,6 +90,6 @@
   <!-- Bootstrap JS -->
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <!-- Your JS -->
-  <script defer src="{{ request.url_for('static', path='js/login.js') }}"></script>
+  <script defer src="{{ request.app.url_path_for('static', path='js/login.js') }}"></script>
 </body>
 </html>
