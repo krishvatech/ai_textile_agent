@@ -13,7 +13,7 @@ app.add_middleware(
     SessionMiddleware,
     secret_key=os.getenv("SESSION_SECRET", "KRISHVATECH@22"),
     same_site="lax",
-    https_only=False,  # True in production
+    https_only=True,  # True in production
     session_cookie="txa_session",
 )
 
