@@ -40,9 +40,7 @@ logging.info("Conversation language remains as")
 
 WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
-# PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 META_APP_SECRET = os.getenv("META_APP_SECRET")
-# CLOUD_SENDER_NUMBER = os.getenv("CLOUD_SENDER_NUMBER")
 
 router = APIRouter()
 
@@ -714,6 +712,10 @@ async def receive_cloud_webhook(request: Request):
                 # business_number = (CLOUD_SENDER_NUMBER or meta.get("display_phone_number", "")).replace("+", "").replace(" ", "")
                 business_number = _normalize_business_number(meta.get("display_phone_number"))
                 outbound_pnid = meta.get("phone_number_id")
+                logging.info("=%"*100)
+                logging.info(f"[CLOUD] Busieness Number : {business_number}")
+                logging.info("=%"*100)
+                logging.info(f"[CLOUD] Phone Number ID : {outbound_pnid}")
                 # If display_phone_number is missing, fetch it via phone_number_id
                 if not business_number:
                     pnid = meta.get("phone_number_id")
