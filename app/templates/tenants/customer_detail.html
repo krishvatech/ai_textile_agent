@@ -1,0 +1,114 @@
+{% extends "_dashboard_base.html" %}
+{% block title %}Customer #{{ customer.id }}{% endblock %}
+{% block nav_cust %}active{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h3 class="mb-0">{{ customer.name }} <span class="text-secondary">(#{{ customer.id }})</span></h3>
+  <div class="d-flex gap-2">
+    <a class="btn btn-light" href="/dashboard/chat/{{ customer.id }}">View Chat History</a>
+    <a class="btn btn-outline-light" href="/dashboard/customer"><i class="bi bi-arrow-left-short"></i> Back</a>
+  </div>
+</div>
+
+<div class="row g-3">
+  <div class="col-md-6">
+    <div class="p-3 rounded-3" style="background:var(--surface); border:1px solid var(--border)">
+      <div><b>Phone:</b> {{ customer.phone }}</div>
+      <div><b>Email:</b> {{ customer.email }}</div>
+      <div><b>Language:</b> {{ customer.preferred_language }}</div>
+      <div><b>Loyalty Points:</b> {{ customer.loyalty_points }}</div>
+      <div><b>Joined:</b> {{ customer.created_at.strftime("%d %b %Y %H:%M") if customer.created_at else "-" }}</div>
+    </div>
+  </div>
+</div>
+
+<h5 class="mt-4">Recent Orders</h5>
+<div class="table-responsive">
+  <table class="table-people" id="ordersTable">
+    <thead>
+      <tr>
+        <th>ID</th><th>Type</th><th>Status</th><th>Item</th><th>Price</th><th>Created</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for o in orders %}
+      <tr>
+        <td>{{ o.id }}</td>
+        <td>{{ o.order_type }}</td>
+        <td>{{ o.status }}</td>
+        <td>{{ o.variant }}</td>
+        <td>₹{{ '%.0f'|format(o.price or 0) }}</td>
+        <td>{{ o.created_at.strftime("%d %b %Y") if o.created_at else "-" }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="6" class="text-secondary">No orders yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <nav class="table-pager" id="ordersPager" data-table="#ordersTable" aria-label="Orders pagination">
+    <button class="tp-btn tp-first"  type="button">«</button>
+    <button class="tp-btn tp-prev"   type="button">‹</button>
+    <span class="tp-info">Page <b class="tp-page">1</b> / <span class="tp-pages">1</span></span>
+    <button class="tp-btn tp-next"   type="button">›</button>
+    <button class="tp-btn tp-last"   type="button">»</button>
+    <span class="tp-gap"></span>
+    <label class="tp-size">
+      Rows:
+      <select class="tp-page-size">
+        <option>10</option>
+        <option selected>20</option>
+        <option>30</option>
+        <option>50</option>
+      </select>
+    </label>
+  </nav>
+</div>
+
+<h5 class="mt-4">Recent Rentals</h5>
+<div class="table-responsive">
+  <table class="table-people" id="rentalsTable">
+    <thead>
+      <tr>
+        <th>ID</th><th>Status</th><th>Item</th><th>Rental Price</th><th>Start</th><th>End</th><th>Created</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in rentals %}
+      <tr>
+        <td>{{ r.id }}</td>
+        <td>{{ r.status }}</td>
+        <td>{{ r.variant }}</td>
+        <td>₹{{ '%.0f'|format(r.rental_price or 0) }}</td>
+        <td>{{ r.start_date.strftime("%d %b %Y") if r.start_date else "-" }}</td>
+        <td>{{ r.end_date.strftime("%d %b %Y") if r.end_date else "-" }}</td>
+        <td>{{ r.created_at.strftime("%d %b %Y") if r.created_at else "-" }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7" class="text-secondary">No rentals yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <nav class="table-pager" id="rentalsPager" data-table="#rentalsTable" aria-label="Rentals pagination">
+    <button class="tp-btn tp-first"  type="button">«</button>
+    <button class="tp-btn tp-prev"   type="button">‹</button>
+    <span class="tp-info">Page <b class="tp-page">1</b> / <span class="tp-pages">1</span></span>
+    <button class="tp-btn tp-next"   type="button">›</button>
+    <button class="tp-btn tp-last"   type="button">»</button>
+    <span class="tp-gap"></span>
+    <label class="tp-size">
+      Rows:
+      <select class="tp-page-size">
+        <option>10</option>
+        <option selected>20</option>
+        <option>30</option>
+        <option>50</option>
+      </select>
+    </label>
+  </nav>
+</div>
+
+{{ super() }}
+{% endblock %}

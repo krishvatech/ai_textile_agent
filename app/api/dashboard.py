@@ -12,13 +12,7 @@ from sqlalchemy import text
 from app.db.session import get_db  # <-- same pattern as admin.py
 
 router = APIRouter()
-templates = Jinja2Templates(directory="app/templates")
-
-def _no_store(resp: HTMLResponse) -> HTMLResponse:
-    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    resp.headers["Pragma"] = "no-cache"
-    resp.headers["Expires"] = "0"
-    return resp
+templates = Jinja2Templates(directory="app/templates/tenants")
 
 def require_auth(request: Request) -> int | RedirectResponse:
     tid = request.session.get("tenant_id")

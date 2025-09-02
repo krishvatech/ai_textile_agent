@@ -9,7 +9,7 @@ from app.db.models import Tenant
 from app.db.session import get_db
 
 router = APIRouter()
-templates = Jinja2Templates(directory="app/templates")
+templates = Jinja2Templates(directory="app/templates/tenants")
 
 def _no_store(resp: HTMLResponse) -> HTMLResponse:
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"

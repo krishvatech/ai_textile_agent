@@ -1,0 +1,110 @@
+{% extends "_dashboard_base.html" %}
+{% block title %}Customers{% endblock %}
+{% block nav_cust %}active{% endblock %}
+{% block content %}
+
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h3 class="mb-0">Customers</h3>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table-people">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Customer</th>
+          <th>Language</th>
+          <th>Mobile Number</th>
+          <!-- <th>Email</th> -->
+          <th>Joined</th>
+          <th>Status</th>
+          <!-- <th>Loyalty Points</th> -->
+          <th style="width:120px;">Actions</th>
+        </tr>
+      </thead>
+
+      <tbody>
+        {% if customers|length == 0 %}
+          <tr>
+            <td class="empty-cell" colspan="8">
+              <div class="empty-state">
+                <div class="icon"><i class="bi bi-inbox"></i></div>
+                <div class="title">No customers yet</div>
+                <div class="subtitle">New customers will appear here when they message or you add them.</div>
+              </div>
+            </td>
+          </tr>
+        {% else %}
+          {% for c in customers %}
+            {% set initials = (c.name or '').strip().split() %}
+            {% set initials = (initials[0][0] ~ (initials[1][0] if initials|length>1 else '')).upper() if c.name else 'U' %}
+            <tr>
+              <!-- ID -->
+              <td><strong>{{ c.id or "—" }}</strong></td>
+
+              <!-- Customer with avatar -->
+              <td>
+                <div class="person">
+                  <div class="avatar">{{ initials }}</div>
+                  <div>
+                    <div>{{ c.name or "—" }}</div>
+                    <div class="muted">ID: {{ c.id }}</div>
+                  </div>
+                </div>
+              </td>
+
+              <!-- Preferred Language -->
+              <td>{{ c.preferred_language or "—" }}</td>
+
+              <!-- Phone -->
+              <td>{{ c.phone or "—" }}</td>
+
+              <!-- Email -->
+              <!-- <td>{{ c.email or "—" }}</td> -->
+
+              <!-- Joined -->
+              <td>{{ c.created_at.strftime("%d %b %Y") if c.created_at else "—" }}</td>
+
+              <!-- Active status -->
+              <td>
+                {% if c.is_active %}
+                  <span class="chip">Active</span>
+                {% else %}
+                  <span class="chip">Inactive</span>
+                {% endif %}
+              </td>
+
+              <!-- Loyalty Points (optional) -->
+              {# <td>{{ c.loyalty_points or 0 }}</td> #}
+
+              <!-- Actions -->
+              <td class="text-end">
+                <a class="btn btn-ghost" href="/dashboard/customer/{{ c.id }}">View</a>
+              </td>
+            </tr>
+          {% endfor %}
+        {% endif %}
+      </tbody>
+    </table>
+
+    <!-- Client-side pager (binds to this table) -->
+    <nav class="table-pager" id="customersPager" data-table=".table-people" aria-label="Customers pagination">
+      <button class="tp-btn tp-first"  type="button">«</button>
+      <button class="tp-btn tp-prev"   type="button">‹</button>
+      <span class="tp-info">Page <b class="tp-page">1</b> / <span class="tp-pages">1</span></span>
+      <button class="tp-btn tp-next"   type="button">›</button>
+      <button class="tp-btn tp-last"   type="button">»</button>
+      <span class="tp-gap"></span>
+      <label class="tp-size">
+        Rows:
+        <select class="tp-page-size">
+          <option>10</option>
+          <option selected>20</option>
+          <option>30</option>
+          <option>50</option>
+        </select>
+      </label>
+    </nav>
+  </div>
+
+{% endblock %}
