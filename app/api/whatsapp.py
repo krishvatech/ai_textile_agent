@@ -40,9 +40,9 @@ logging.info("Conversation language remains as")
 
 WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
-PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
+# PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 META_APP_SECRET = os.getenv("META_APP_SECRET")
-CLOUD_SENDER_NUMBER = os.getenv("CLOUD_SENDER_NUMBER")
+# CLOUD_SENDER_NUMBER = os.getenv("CLOUD_SENDER_NUMBER")
 
 router = APIRouter()
 
@@ -55,6 +55,7 @@ async def get_tenant_id_by_phone(phone_number: str, db):
     """
     Fetch tenant id by phone number from the database.
     """
+    phone_number = _normalize_business_number(phone_number)
     query = text("SELECT id FROM tenants WHERE whatsapp_number = :phone AND is_active = true LIMIT 1")
     result = await db.execute(query, {"phone": phone_number})
     row = result.fetchone()
@@ -296,13 +297,19 @@ async def get_tenant_occasion_by_phone(phone_number: str, db):
 
 
 
-async def send_whatsapp_reply_cloud(to_waid: str, body, context_msg_id: str | None = None) -> str | None:
+async def send_whatsapp_reply_cloud(
+    to_waid: str,
+    body,
+    context_msg_id: str | None = None,
+    phone_number_id: str | None = None,
+) -> str | None:
     msg = body if isinstance(body, str) else (body.get("reply_text") if isinstance(body, dict) else str(body))
-    if not PHONE_NUMBER_ID or not WHATSAPP_TOKEN:
-        logging.error("Cloud API envs missing: PHONE_NUMBER_ID/WHATSAPP_TOKEN")
+    pnid = phone_number_id  # fallback only if you still keep it for legacy
+    if not pnid or not WHATSAPP_TOKEN:
+        logging.error("Cloud API missing: phone_number_id or WHATSAPP_TOKEN")
         return None
 
-    url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
+    url = f"https://graph.facebook.com/v20.0/{pnid}/messages"
     payload = {
         "messaging_product": "whatsapp",
         "to": to_waid.replace("+", "").strip(),
@@ -322,13 +329,19 @@ async def send_whatsapp_reply_cloud(to_waid: str, body, context_msg_id: str | No
     except Exception:
         return None
 
-
-async def send_whatsapp_image_cloud(to_waid: str, image_url: str, caption: str | None = None, context_msg_id: str | None = None) -> str | None:
-    if not PHONE_NUMBER_ID or not WHATSAPP_TOKEN:
-        logging.error("Cloud API envs missing: PHONE_NUMBER_ID/WHATSAPP_TOKEN")
+async def send_whatsapp_image_cloud(
+    to_waid: str,
+    image_url: str,
+    caption: str | None = None,
+    context_msg_id: str | None = None,
+    phone_number_id: str | None = None,
+) -> str | None:
+    pnid = phone_number_id
+    if not pnid or not WHATSAPP_TOKEN:
+        logging.error("Cloud API missing: phone_number_id or WHATSAPP_TOKEN")
         return None
 
-    url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
+    url = f"https://graph.facebook.com/v20.0/{pnid}/messages"
     payload = {
         "messaging_product": "whatsapp",
         "to": to_waid.replace("+", "").strip(),
@@ -639,7 +652,26 @@ def _iter_out_msgs_with_meta(out_msgs):
             img_url = None
         yield kind, txt, mid, img_url
 
+# Return digits-only (E.164 without +) for reliable DB matching.
+def _normalize_business_number(s: str | None) -> str:
+    """Return digits-only (E.164 without +) for reliable DB matching."""
+    return re.sub(r"\D+", "", s or "")
 
+async def _lookup_display_phone_number_digits(phone_number_id: str) -> str:
+    """GET /{phone_number_id}?fields=display_phone_number and normalize."""
+    if not WHATSAPP_TOKEN:
+        return ""
+    url = f"https://graph.facebook.com/v20.0/{phone_number_id}"
+    params = {"fields": "display_phone_number"}
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, params=params, headers=headers)
+            data = resp.json()
+        return _normalize_business_number(data.get("display_phone_number"))
+    except Exception:
+        logging.exception("[CLOUD] phone_number_id lookup failed")
+        return ""
 
 @router.post("/webhook")
 async def receive_cloud_webhook(request: Request):
@@ -668,6 +700,7 @@ async def receive_cloud_webhook(request: Request):
         logging.info("[CLOUD] Custom payload detected - skipping signature validation")
 
     msgs_to_process = []
+    outbound_pnid = None  
     business_number = ""
     contact_name_map: dict[str, str | None] = {}  
 
@@ -678,7 +711,18 @@ async def receive_cloud_webhook(request: Request):
             meta = value.get("metadata", {})  # display_phone_number, phone_number_id
             msgs = value.get("messages", [])
             if msgs:
-                business_number = (CLOUD_SENDER_NUMBER or meta.get("display_phone_number", "")).replace("+", "").replace(" ", "")
+                # business_number = (CLOUD_SENDER_NUMBER or meta.get("display_phone_number", "")).replace("+", "").replace(" ", "")
+                business_number = _normalize_business_number(meta.get("display_phone_number"))
+                outbound_pnid = meta.get("phone_number_id")
+                # If display_phone_number is missing, fetch it via phone_number_id
+                if not business_number:
+                    pnid = meta.get("phone_number_id")
+                    if pnid:
+                        business_number = await _lookup_display_phone_number_digits(pnid)
+                if not business_number:
+                    logging.error("[CLOUD] Could not resolve business number from webhook metadata.")
+                    return {"status": "no_business_number"}
+
                 msgs_to_process.extend(msgs)
         
         for c in value.get("contacts", []):
@@ -688,22 +732,43 @@ async def receive_cloud_webhook(request: Request):
                 contact_name_map[wa] = nm
 
     # Handle custom payload format
+    # Handle custom payload format
     if not msgs_to_process:
         whatsapp_data = data.get("whatsapp", {})
         custom_msgs = whatsapp_data.get("messages", [])
         if custom_msgs:
-            business_number = (CLOUD_SENDER_NUMBER or "919876543210").replace("+", "").replace(" ", "")
+            # ✅ NEW: resolve the business number from the custom payload (no ENV)
+            bn = (
+                whatsapp_data.get("business_number")
+                or whatsapp_data.get("to")
+                or whatsapp_data.get("display_phone_number")
+            )
+            business_number = _normalize_business_number(bn)
+            outbound_pnid = whatsapp_data.get("phone_number_id")
+
+            # Optional fallback: try phone_number_id → Graph API lookup
+            if not business_number:
+                pnid = whatsapp_data.get("phone_number_id")
+                if pnid:
+                    business_number = await _lookup_display_phone_number_digits(pnid)
+
+            if not business_number:
+                logging.error("[CLOUD] Custom payload missing business number")
+                return {"status": "no_business_number"}
+
             logging.info(f"[CLOUD] Using business_number: '{business_number}' for custom payload")
+
             for custom_msg in custom_msgs:
                 content = custom_msg.get("content", {})
                 standard_msg = {
                     "id": custom_msg.get("sid"),
                     "from": custom_msg.get("from", ""),
-                    "type": content.get("type", "unknown")
+                    "type": content.get("type", "unknown"),
                 }
                 if standard_msg["type"] == "text":
                     standard_msg["text"] = content.get("text", {})
                 msgs_to_process.append(standard_msg)
+
 
     if not msgs_to_process:
         return {"status": "no_messages"}
@@ -803,7 +868,8 @@ async def receive_cloud_webhook(request: Request):
                     if not caption:
                         await send_whatsapp_reply_cloud(
                             to_waid=from_waid,
-                            body="Sorry—couldn’t link your reply to a product. Please reply directly to the product image you like."
+                            body="Sorry—couldn’t link your reply to a product. Please reply directly to the product image you like.",
+                            phone_number_id=outbound_pnid,
                         )
                         await db.commit()
                         return {"status": "ok"}
@@ -954,7 +1020,8 @@ async def receive_cloud_webhook(request: Request):
                             mid = await send_whatsapp_image_cloud(
                                 to_waid=from_waid,
                                 image_url=img,
-                                caption=_product_caption(prod)
+                                caption=_product_caption(prod),
+                                phone_number_id=outbound_pnid,
                             )
                             if mid:
                                 sent_count += 1
@@ -965,14 +1032,14 @@ async def receive_cloud_webhook(request: Request):
                         if followup_text:
                             logging.info(f"[SWIPE] Sending follow-up: {followup_text!r}")
                             await asyncio.sleep(1.0)
-                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
+                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text,phone_number_id=outbound_pnid,)
                             out_msgs.append(("text", followup_text, mid))
                     else:
                         if reply_text:
-                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
+                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text,phone_number_id=outbound_pnid,)
                             out_msgs.append(("text", reply_text, mid))
                         if followup_text:
-                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
+                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text,phone_number_id=outbound_pnid,)
                             out_msgs.append(("text", followup_text, mid))
 
                     logging.info(f"============== out Messages :{out_msgs}=================")
@@ -1206,7 +1273,7 @@ async def receive_cloud_webhook(request: Request):
                                 if not img:
                                     continue
                                 mid = await send_whatsapp_image_cloud(
-                                    to_waid=from_waid, image_url=img, caption=_product_caption(prod)
+                                    to_waid=from_waid, image_url=img, caption=_product_caption(prod),phone_number_id=outbound_pnid,
                                 )
                                 if mid:
                                     sent_count += 1
@@ -1214,14 +1281,14 @@ async def receive_cloud_webhook(request: Request):
                                 out_msgs.append(("image", _product_caption(prod), mid, img))
                             if followup_text:
                                 await asyncio.sleep(1.0)
-                                mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
+                                mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text,phone_number_id=outbound_pnid,)
                                 out_msgs.append(("text", followup_text, mid))
                         else:
                             if reply_text:
-                                mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text)
+                                mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text,phone_number_id=outbound_pnid,)
                                 out_msgs.append(("text", reply_text, mid))
                             if followup_text:
-                                mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text)
+                                mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text,phone_number_id=outbound_pnid,)
                                 out_msgs.append(("text", followup_text, mid))
 
                         logging.info(f"============== out Messages :{out_msgs}=================")
@@ -1295,7 +1362,8 @@ async def receive_cloud_webhook(request: Request):
                                 mid = await send_whatsapp_image_cloud(
                                     to_waid=from_waid,
                                     image_url=img,
-                                    caption=cap
+                                    caption=cap,
+                                    phone_number_id=outbound_pnid,
                                 )
                                 if mid:
                                     sent_count += 1
@@ -1305,14 +1373,14 @@ async def receive_cloud_webhook(request: Request):
                             # If nothing sent, give one short fallback
                             if sent_count == 0:
                                 body = "Sorry, I couldn’t find visually similar items."
-                                mid  = await send_whatsapp_reply_cloud(to_waid=from_waid, body=body)
+                                mid  = await send_whatsapp_reply_cloud(to_waid=from_waid, body=body,phone_number_id=outbound_pnid)
                                 out_msgs.append(("image", cap, mid, img))
                             else:
                                 # Add a follow-up question in user’s saved language
                                 current_language = (customer.preferred_language or "en-IN")
                                 ftxt = _visual_followup_text(current_language)
                                 await asyncio.sleep(0.2)
-                                mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=ftxt)
+                                mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=ftxt,phone_number_id=outbound_pnid,)
                                 out_msgs.append(("image", cap, mid, img))
 
 
@@ -1341,7 +1409,7 @@ async def receive_cloud_webhook(request: Request):
                         except Exception:
                             logging.exception("[CLOUD] Visual search failed")
                             await db.rollback()
-                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body="Sorry, I couldn't read that image.")
+                            mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body="Sorry, I couldn't read that image.",phone_number_id=outbound_pnid,)
                             await append_transcript_message(
                                 db, chat_session, role="assistant", text="(visual search error)",
                                 msg_id=mid, direction="out", meta={"kind": "text", "channel": "cloud_api"}
@@ -1416,7 +1484,8 @@ async def receive_cloud_webhook(request: Request):
                                     mid = await send_whatsapp_image_cloud(
                                         to_waid=from_waid,
                                         image_url=img,
-                                        caption=cap
+                                        caption=cap,
+                                        phone_number_id=outbound_pnid,
                                     )
                                     if mid:
                                         sent_count += 1
@@ -1430,7 +1499,7 @@ async def receive_cloud_webhook(request: Request):
                                     current_language = (customer.preferred_language or "en-IN")
                                     ftxt = _visual_followup_text(current_language)
                                     await asyncio.sleep(0.2)
-                                    mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=ftxt)
+                                    mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=ftxt,phone_number_id=outbound_pnid,)
                                     out_msgs.append(("image", cap, mid, img))
 
 
@@ -1459,7 +1528,7 @@ async def receive_cloud_webhook(request: Request):
                             except Exception:
                                 logging.exception("[CLOUD] Visual search (document->image) failed")
                                 await db.rollback()
-                                mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body="Sorry, I couldn't read that file.")
+                                mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body="Sorry, I couldn't read that file.",phone_number_id=outbound_pnid,)
                                 await append_transcript_message(
                                     db, chat_session, role="assistant", text="(document visual search error)",
                                     msg_id=mid, direction="out", meta={"kind": "text", "channel": "cloud_api"}
@@ -1469,7 +1538,7 @@ async def receive_cloud_webhook(request: Request):
 
                         # Non-image docs: simple acknowledgement (you can extend with OCR/PDF later)
                         ack_text = "Got your file. I’ll take a look and get back to you."
-                        mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=ack_text)
+                        mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=ack_text,phone_number_id=outbound_pnid,)
                         await append_transcript_message(
                             db, chat_session,
                             role="assistant", text=ack_text, msg_id=mid, direction="out",
@@ -1486,7 +1555,8 @@ async def receive_cloud_webhook(request: Request):
                             return {"status": "ignored_unsupported"}
                         mid = await send_whatsapp_reply_cloud(
                             to_waid=from_waid,
-                            body="Sorry, I can only read text, images, or files for now."
+                            body="Sorry, I can only read text, images, or files for now.",
+                            phone_number_id=outbound_pnid,
                         )
                         await append_transcript_message(
                             db, chat_session,
