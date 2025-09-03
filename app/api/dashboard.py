@@ -14,11 +14,14 @@ from app.db.session import get_db  # <-- same pattern as admin.py
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates/tenants")
 
-def require_auth(request: Request) -> int | RedirectResponse:
+ALLOWED_DASHBOARD_ROLES = {"tenant_admin", "superadmin"}
+
+def require_auth(request: Request):
+    role = request.session.get("role")
     tid = request.session.get("tenant_id")
-    if not tid:
-        next_path = request.url.path or "/dashboard/"
-        return RedirectResponse(url=f"/login?next={next_path}", status_code=303)
+    if (not role) or (role not in ALLOWED_DASHBOARD_ROLES) or (tid is None):
+        nxt = request.url.path or "/dashboard"
+        return RedirectResponse(url=f"/login?next={nxt}", status_code=303)
     return int(tid)
 
 async def get_tenant_name(tenant_id: int, db: AsyncSession) -> str:

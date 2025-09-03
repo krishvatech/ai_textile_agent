@@ -1,11 +1,11 @@
-from fastapi import APIRouter, Depends, Request
-from fastapi.params import Form
+# app/api/login.py
+from fastapi import APIRouter, Depends, Request, Form
 from fastapi.responses import RedirectResponse, HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import text
 from fastapi.templating import Jinja2Templates
 
-from app.db.models import Tenant
+# 🔁 adjust this import to your project path (e.g., app.db.session.get_db)
 from app.db.session import get_db
 
 router = APIRouter()
@@ -18,37 +18,61 @@ def _no_store(resp: HTMLResponse) -> HTMLResponse:
     return resp
 
 @router.get("/login", response_class=HTMLResponse, name="login_page")
-async def login_page(request: Request):
-    # already logged in? → go to dashboard
-    if request.session.get("tenant_id"):
+async def login_page(request: Request, next: str | None = None):
+    role = request.session.get("role")
+    if role == "superadmin":
+        return RedirectResponse(url="/admin", status_code=303)
+    if role:
         return RedirectResponse(url="/dashboard", status_code=303)
-    resp =templates.TemplateResponse("login.html", {"request": request, "error": None})
+    resp = templates.TemplateResponse("login.html", {"request": request, "error": None, "next": next})
     return _no_store(resp)
-
 
 @router.post("/login", name="login_submit")
 async def login(
     request: Request,
     email: str = Form(...),
     password: str = Form(...),
+    next: str | None = Form(default=None),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Tenant).where(Tenant.email == email))
-    tenant = result.scalars().first()
+    # Look up user in public.users (password stored in "hashed_password" as plain text)
+    q = text("""
+        SELECT id, email, hashed_password, role::text, tenant_id, is_active
+        FROM public.users
+        WHERE email = :email
+        LIMIT 1
+    """)
+    row = (await db.execute(q, {"email": email.strip()})).fetchone()
 
-    if not tenant or not tenant.is_active or tenant.password != password:
-        resp = templates.TemplateResponse(
-            "login.html",
-            {"request": request, "error": "Invalid email or password"},
-            status_code=400,
-        )
+    if not row:
+        resp = templates.TemplateResponse("login.html", {"request": request, "error": "Invalid email or password"})
         return _no_store(resp)
 
-    # success → set session
-    request.session["tenant_id"] = tenant.id
-    request.session["tenant_name"] = tenant.name
-    return RedirectResponse(url="/dashboard", status_code=303)
+    user_id, _email, stored_pw, role, tenant_id, is_active = row
 
+    # 🔐 Plain-text check (as requested)
+    if (not is_active) or (password.strip() != (stored_pw or "")):
+        resp = templates.TemplateResponse("login.html", {"request": request, "error": "Invalid email or password"})
+        return _no_store(resp)
+
+    # Success — set session
+    request.session.clear()
+    request.session.update({
+        "user_id": int(user_id),
+        "email": _email,
+        "role": role,  # 'superadmin' | 'tenant_admin' | ...
+        "tenant_id": int(tenant_id) if tenant_id is not None else None,
+    })
+
+    # Redirect by role (or to `next`)
+    if next:
+        dest = next
+    elif role == "superadmin":
+        dest = "/admin"
+    else:
+        dest = "/dashboard"
+
+    return RedirectResponse(url=dest, status_code=303)
 
 @router.post("/logout")
 async def logout(request: Request):
