@@ -11,7 +11,7 @@
     <table class="table-people table-rentals">
       <thead>
         <tr>
-          <th >Order ID</th>
+          <th>No</th>
           <th>Customer</th>
           <th>Product Name</th>
           <th >Amount</th>
@@ -37,7 +37,7 @@
             {% set initials = (o.customer_name or '').strip().split() %}
             {% set initials = (initials[0][0] ~ (initials[1][0] if initials|length>1 else '')).upper() if o.customer_name else 'U' %}
             <tr data-type="{{ 'rental' if o.is_rental else 'purchase' }}" data-filtered="1">
-              <td><strong>#{{ o.id }}</strong></td>
+              <td><strong>{{ loop.index }}</strong></td>
               <td>
                 <div class="person">
                   <div class="avatar">{{ initials }}</div>

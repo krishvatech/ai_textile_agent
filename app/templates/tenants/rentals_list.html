@@ -21,7 +21,7 @@
     <table class="table-rentals w-100">
       <thead>
         <tr>
-          <th style="width:110px;">Rental ID</th>
+          <th style="width:110px;">No</th>
           <th>Customer</th>
           <th>Product</th>
           <th style="width:130px;">Price</th>
@@ -49,7 +49,7 @@
             {# Normalize enum-like strings such as 'RentalStatus.active' -> 'active' #}
             {% set status_key = (r.status|string)|lower|replace('rentalstatus.', '') %}
             <tr data-status="{{ status_key }}" data-filtered="1">
-              <td><strong>#{{ r.id }}</strong></td>
+              <td><strong>{{ loop.index }}</strong></td>
 
               <td>
                 <div class="person">

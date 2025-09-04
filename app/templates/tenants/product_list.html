@@ -30,7 +30,7 @@
     <table class="table-products w-100">
       <thead>
         <tr>
-          <th >Product ID</th>
+          <th>No</th>
           <th>Product</th>
           <th>Product Name</th>
           <th >Counts</th>
@@ -46,7 +46,7 @@
         data-has-sell="{{ 1 if p.sell_count>0 else 0 }}"
         data-has-rent="{{ 1 if p.rental_count>0 else 0 }}"
       >
-        <td><strong>#{{ p.product_id }}</strong></td>
+        <td><strong>{{ loop.index }}</strong></td>
 
         <!-- Product cell with image -->
         <td>

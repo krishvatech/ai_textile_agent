@@ -14,7 +14,7 @@
     <table class="table-products w-100">
       <thead>
         <tr>
-          <th>Variant ID</th>
+          <th>No</th>
           <th>Color</th>
           <th>Size</th>
           <th>Fabric</th>
@@ -38,7 +38,7 @@
         {% else %}
           {% for v in variants %}
             <tr>
-              <td>{{ v.variant_id }}</td>
+              <td>{{ loop.index }}</td>
               <td>{{ v.color }}</td>
               <td>{{ v.size }}</td>
               <td>{{ v.fabric }}</td>

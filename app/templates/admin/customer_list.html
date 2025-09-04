@@ -11,7 +11,7 @@
     <table class="table-people">
       <thead>
         <tr>
-          <th>ID</th>
+          <th>No</th>
           <th>Customer</th>
           <th>Language</th>
           <th>Mobile Number</th>
@@ -40,7 +40,7 @@
             {% set initials = (initials[0][0] ~ (initials[1][0] if initials|length>1 else '')).upper() if c.name else 'U' %}
             <tr>
               <!-- ID -->
-              <td><strong>{{ c.id or "—" }}</strong></td>
+              <td><strong>{{ loop.index }}</strong></td>
 
               <!-- Customer with avatar -->
               <td>
@@ -79,7 +79,7 @@
 
               <!-- Actions -->
               <td class="text-end">
-                <a class="btn btn-ghost" href="/dashboard/customer/{{ c.id }}">View</a>
+                <a class="btn btn-ghost" href="/admin/customer/{{ c.id }}">View</a>
               </td>
             </tr>
           {% endfor %}

@@ -1,7 +1,7 @@
 # app/api/admin_dashboard.py
 from __future__ import annotations
 
-from typing import Any, Dict, List, OrderedDict as _OrderedDict
+from typing import Any, Dict, List, Optional, OrderedDict as _OrderedDict
 from collections import OrderedDict
 
 from fastapi import APIRouter, Depends, Request
@@ -44,7 +44,11 @@ async def _kpis_all_tenants(db: AsyncSession) -> Dict[str, Any]:
     """
     Collect global KPIs across all tenants. Matches your admin dashboard tiles.
     """
-    tenants_count   = await _scalar_int(db, "SELECT COUNT(*) FROM tenants")
+    tenants_count = await _scalar_int(
+    db,
+    "SELECT COUNT(DISTINCT tenant_id) FROM public.users "
+    "WHERE role = 'tenant_admin' AND tenant_id IS NOT NULL AND COALESCE(is_active, true) = true"
+    )
     users_count     = await _scalar_int(db, "SELECT COUNT(*) FROM public.users")
     customers_count = await _scalar_int(db, "SELECT COUNT(*) FROM customers")
     products_count  = await _scalar_int(db, "SELECT COUNT(*) FROM products")
@@ -115,6 +119,55 @@ async def _series_monthly_all(db: AsyncSession) -> Dict[str, List[Any]]:
     rent_series = [v["rent"] for v in merged.values()]
     return {"labels": labels, "sell": sell_series, "rent": rent_series}
 
+@router.get("/tenants", response_class=HTMLResponse)
+async def admin_tenants(request: Request, db: AsyncSession = Depends(get_db)):
+    guard = require_superadmin(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+
+    res = await db.execute(text("""
+        SELECT
+            t.id,
+            t.name,
+            t.whatsapp_number,
+            t.address,
+            COUNT(DISTINCT c.id) AS customers_count,
+            (
+              SELECT MIN(u.email)  -- first/primary admin email (deterministic)
+              FROM public.users u
+              WHERE u.tenant_id = t.id
+                AND u.role = 'tenant_admin'
+                AND COALESCE(u.is_active, true) = true
+            ) AS admin_email
+        FROM tenants t
+        LEFT JOIN customers c ON c.tenant_id = t.id
+        WHERE EXISTS (
+            SELECT 1
+            FROM public.users u2
+            WHERE u2.tenant_id = t.id
+              AND u2.role = 'tenant_admin'
+              AND COALESCE(u2.is_active, true) = true
+        )
+        GROUP BY t.id, t.name, t.whatsapp_number, t.address
+        ORDER BY t.name
+    """))
+    rows = res.fetchall() or []
+
+    tenants = [{
+        "id": int(r[0]),
+        "name": r[1] or f"Tenant {r[0]}",
+        "whatsapp_number": (r[2] or "").strip(),
+        "address": (r[3] or "").strip(),
+        "customers_count": int(r[4] or 0),
+        "admin_email": (r[5] or "").strip(),
+    } for r in rows]
+
+    return templates.TemplateResponse("tenant_list.html", {
+        "request": request,
+        "tenants": tenants,
+    })
+
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Views
@@ -167,23 +220,25 @@ async def admin_home(request: Request, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/customers", response_class=HTMLResponse)
-async def admin_customers(request: Request, db: AsyncSession = Depends(get_db)):
-    """
-    Global customer list (latest 500 across all tenants) — uses admin/customer_list.html
-    """
+async def admin_customers(request: Request, tenant_id: Optional[int] = None,
+                          db: AsyncSession = Depends(get_db)):
     guard = require_superadmin(request)
     if isinstance(guard, RedirectResponse):
         return guard
 
-    res = await db.execute(text("""
+    where = "WHERE c.tenant_id = :tid" if tenant_id else ""
+    params: Dict[str, Any] = {"tid": tenant_id} if tenant_id else {}
+
+    res = await db.execute(text(f"""
         SELECT c.id, c.whatsapp_id, c.name, c.preferred_language, c.phone, c.email,
                c.created_at, c.is_active, c.loyalty_points, c.tenant_id,
                t.name AS tenant_name
         FROM customers c
         LEFT JOIN tenants t ON t.id = c.tenant_id
+        {where}
         ORDER BY c.created_at DESC
         LIMIT 500
-    """))
+    """), params)
     rows = res.fetchall() or []
 
     customers = [{
@@ -202,7 +257,11 @@ async def admin_customers(request: Request, db: AsyncSession = Depends(get_db)):
 
     return templates.TemplateResponse(
         "customer_list.html",
-        {"request": request, "customers": customers, "tenant_scope": "all"},
+        {
+            "request": request,
+            "customers": customers,
+            "tenant_scope": "single" if tenant_id else "all",
+        },
     )
 
 

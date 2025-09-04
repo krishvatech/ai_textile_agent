@@ -10,12 +10,12 @@
   <div class="table-responsive">
     <table class="table table-dark table-hover align-middle">
       <thead><tr>
-        <th>ID</th><th>Type</th><th>Status</th><th>Item</th><th>Price</th><th>Created</th>
+        <th>No</th><th>Type</th><th>Status</th><th>Item</th><th>Price</th><th>Created</th>
       </tr></thead>
       <tbody>
       {% for o in orders %}
         <tr>
-          <td>{{ o.id }}</td>
+          <td><strong>{{ loop.index }}</strong></td>
           <td>{{ o.order_type }}</td>
           <td>{{ o.status }}</td>
           <td>{{ o.variant }}</td>

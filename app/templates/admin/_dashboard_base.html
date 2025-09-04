@@ -58,10 +58,12 @@
           </a>
 
           <div class="nav-title text-uppercase small text-secondary px-2 mt-3">Manage</div>
-          <a class="nav-link d-flex align-items-center gap-2 {% block nav_cust %}
+
+          <!-- Tenants/Shops only -->
+          <a class="nav-link d-flex align-items-center gap-2 {% block nav_tenants %}
             {% endblock %}"
-            href="/admin/customers">
-            <i class="bi bi-people"></i><span>Customers</span>
+            href="/admin/tenants">
+            <i class="bi bi-buildings"></i><span>Tenants/Shops</span>
           </a>
         </nav>
       </aside>
