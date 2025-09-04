@@ -26,7 +26,7 @@
         <!-- left: brand + tenant -->
         <div class="d-flex align-items-center gap-3">
           <button class="btn btn-outline-light btn-sm d-md-none" id="sidebarToggle" aria-label="Toggle sidebar"><i class="bi bi-list"></i></button>
-          <a class="navbar-brand text-decoration-none fw-semibold" href="/dashboard"><i class="bi bi-threads me-1"></i> Ecommerce Agent Dashboard</a>
+          <a class="navbar-brand text-decoration-none fw-semibold" href="/admin"><i class="bi bi-threads me-1"></i> Admin Dashboard</a>
           <span class="text-secondary small d-none d-sm-inline" id="sbTenantName">{{ tenant_name }}</span>
         </div>
 
@@ -51,16 +51,17 @@
         <nav id="sidebarNav" class="nav flex-column gap-1">
           <div class="nav-title text-uppercase small text-secondary px-2">Overview</div>
           <a class="nav-link d-flex align-items-center gap-2 {% block nav_dash %}
+
             {% endblock %}"
-            href="/dashboard">
+            href="/admin">
             <i class="bi bi-speedometer2"></i><span>Dashboard</span>
           </a>
 
           <div class="nav-title text-uppercase small text-secondary px-2 mt-3">Manage</div>
           <a class="nav-link d-flex align-items-center gap-2 {% block nav_cust %}
             {% endblock %}"
-            href="/dashboard/customer">
-            <i class="bi bi-people"></i><span>Tenants</span>
+            href="/admin/customers">
+            <i class="bi bi-people"></i><span>Customers</span>
           </a>
         </nav>
       </aside>
@@ -68,6 +69,7 @@
       <!-- page -->
       <main class="flex-grow-1 p-5">
         {% block content %}
+
         {% endblock %}
       </main>
     </div>
