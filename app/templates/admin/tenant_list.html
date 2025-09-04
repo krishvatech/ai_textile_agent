@@ -1,81 +1,92 @@
-{% extends "_dashboard_base.html" %}
+{% extends '_dashboard_base.html' %}
 {% block title %}Admin / Tenants{% endblock %}
 {% block nav_tenants %}active{% endblock %}
 {% block content %}
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h3 class="mb-0">Tenants / Shops</h3>
+    <a class="btn btn-outline-light" href="/admin/tenants/add">
+      <i class="bi bi-plus"></i> Add Tenants
+    </a>
+  </div>
 
-<div class="d-flex justify-content-between align-items-center mb-3">
-  <h3 class="mb-0">Tenants / Shops</h3>
-</div>
-
-<div class="table-responsive">
-  <table class="table-people">
-    <thead>
-      <tr>
-        <th>NO</th>
-        <th>Tenant / Shop</th>
-        <th>Email</th>
-        <th>WhatsaApp NO.</th>
-        <th>Location</th>
-        <th style="width:180px;">Actions</th>
-      </tr>
-    </thead>
-    <tbody>
-    {% if tenants|length == 0 %}
-      <tr>
-        <td class="empty-cell" colspan="6">
-          <div class="empty-state">
-            <div class="icon"><i class="bi bi-buildings"></i></div>
-            <div class="title">No tenants yet</div>
-            <div class="subtitle">Add your first tenant to get started.</div>
-          </div>
-        </td>
-      </tr>
-    {% else %}
-      {% for t in tenants %}
-        {% set initials = (t.name or '').strip().split() %}
-        {% set initials = (initials[0][0] ~ (initials[1][0] if initials|length>1 else '')).upper() if t.name else 'T' %}
+  <div class="table-responsive">
+    <table class="table-people">
+      <thead>
         <tr>
-          <td><strong>{{ loop.index }}</strong></td>
-          <td>
-            <div class="person">
-              <div class="avatar">{{ initials }}</div>
-              <div>
-                <div>{{ t.name or "Tenant " ~ t.id }}</div>
-                <div class="muted">ID: {{ t.id }}</div>
-              </div>
-            </div>
-          </td>
-          <td>
-            {{ t.admin_email }}
-            </td>
-            <td>+{{ t.whatsapp_number }}</td>
-            <td>{{ t.address }}</td>
-          <td>
-            <a class="btn btn-ghost" href="/admin/customers?tenant_id={{ t.id }}">Customers</a>
-          </td>
+          <th>NO</th>
+          <th>Tenant / Shop</th>
+          <th>Email</th>
+          <th>WhatsaApp NO.</th>
+          <th>Location</th>
+          <th>Status</th>
+          <th style="width:180px;">Actions</th>
         </tr>
-      {% endfor %}
-    {% endif %}
-    </tbody>
-  </table>
+      </thead>
+      <tbody>
+        {% if tenants|length == 0 %}
+          <tr>
+            <td class="empty-cell" colspan="6">
+              <div class="empty-state">
+                <div class="icon">
+                  <i class="bi bi-buildings"></i>
+                </div>
+                <div class="title">No tenants yet</div>
+                <div class="subtitle">Add your first tenant to get started.</div>
+              </div>
+            </td>
+          </tr>
+        {% else %}
+          {% for t in tenants %}
+            {% set initials = t.name or ''.strip().split() %}
+            {% set initials = (initials[0][0] ~ (initials[1][0] if initials|length>1 else '')).upper() if t.name else 'T' %}
+            <tr>
+              <td>
+                <strong>{{ loop.index }}</strong>
+              </td>
+              <td>
+                <div class="person">
+                  <div class="avatar">{{ initials }}</div>
+                  <div>
+                    <div>{{ t.name or 'Tenant ' ~ t.id }}</div>
+                    <div class="muted">ID: {{ t.id }}</div>
+                  </div>
+                </div>
+              </td>
+              <td>{{ t.admin_email }}</td>
+              <td>+{{ t.whatsapp_number }}</td>
+              <td>{{ t.address }}</td>
+              <td>
+                {% if t.is_active %}
+                  <span class="btn btn-ghost">Active</span>
+                {% else %}
+                  <span class="btn btn-ghost">Inactive</span>
+                {% endif %}
+              </td>
 
-  <nav class="table-pager" id="tenantsPager" data-table=".table-people" aria-label="Tenants pagination">
-    <button class="tp-btn tp-first"  type="button">«</button>
-    <button class="tp-btn tp-prev"   type="button">‹</button>
-    <span class="tp-info">Page <b class="tp-page">1</b> / <span class="tp-pages">1</span></span>
-    <button class="tp-btn tp-next"   type="button">›</button>
-    <button class="tp-btn tp-last"   type="button">»</button>
-    <span class="tp-gap"></span>
-    <label class="tp-size">
-      Rows:
-      <select class="tp-page-size">
-        <option>10</option>
-        <option selected>20</option>
-        <option>30</option>
-        <option>50</option>
-      </select>
-    </label>
-  </nav>
-</div>
+              <td>
+                <a class="btn btn-ghost" href="/admin/customers?tenant_id={{ t.id }}">Customers</a>
+              </td>
+            </tr>
+          {% endfor %}
+        {% endif %}
+      </tbody>
+    </table>
 
+    <nav class="table-pager" id="tenantsPager" data-table=".table-people" aria-label="Tenants pagination">
+      <button class="tp-btn tp-first" type="button">«</button>
+      <button class="tp-btn tp-prev" type="button">‹</button>
+      <span class="tp-info">Page <b class="tp-page">1</b> / <span class="tp-pages">1</span></span>
+      <button class="tp-btn tp-next" type="button">›</button>
+      <button class="tp-btn tp-last" type="button">»</button>
+      <span class="tp-gap"></span>
+      <label class="tp-size">
+        Rows:<select class="tp-page-size">
+          <option>10</option>
+          <option selected>20</option>
+          <option>30</option>
+          <option>50</option>
+        </select>
+      </label>
+    </nav>
+  </div>
 {% endblock %}

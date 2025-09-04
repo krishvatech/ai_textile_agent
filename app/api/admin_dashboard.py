@@ -1,5 +1,6 @@
 # app/api/admin_dashboard.py
 from __future__ import annotations
+from fastapi import Form, status
 
 from typing import Any, Dict, List, Optional, OrderedDict as _OrderedDict
 from collections import OrderedDict
@@ -120,7 +121,11 @@ async def _series_monthly_all(db: AsyncSession) -> Dict[str, List[Any]]:
     return {"labels": labels, "sell": sell_series, "rent": rent_series}
 
 @router.get("/tenants", response_class=HTMLResponse)
-async def admin_tenants(request: Request, db: AsyncSession = Depends(get_db)):
+async def admin_tenants(
+    request: Request,
+    show_inactive: int = 0,                    # 0 = only active (default), 1 = include inactive
+    db: AsyncSession = Depends(get_db),
+):
     guard = require_superadmin(request)
     if isinstance(guard, RedirectResponse):
         return guard
@@ -131,6 +136,7 @@ async def admin_tenants(request: Request, db: AsyncSession = Depends(get_db)):
             t.name,
             t.whatsapp_number,
             t.address,
+            t.is_active,
             COUNT(DISTINCT c.id) AS customers_count,
             (
               SELECT MIN(u.email)  -- first/primary admin email (deterministic)
@@ -148,9 +154,11 @@ async def admin_tenants(request: Request, db: AsyncSession = Depends(get_db)):
               AND u2.role = 'tenant_admin'
               AND COALESCE(u2.is_active, true) = true
         )
-        GROUP BY t.id, t.name, t.whatsapp_number, t.address
+          AND (:include_inactive = 1 OR COALESCE(t.is_active, true) = true)
+        GROUP BY t.id, t.name, t.whatsapp_number, t.address, t.is_active
         ORDER BY t.name
-    """))
+    """), {"include_inactive": int(show_inactive)})
+
     rows = res.fetchall() or []
 
     tenants = [{
@@ -158,15 +166,16 @@ async def admin_tenants(request: Request, db: AsyncSession = Depends(get_db)):
         "name": r[1] or f"Tenant {r[0]}",
         "whatsapp_number": (r[2] or "").strip(),
         "address": (r[3] or "").strip(),
-        "customers_count": int(r[4] or 0),
-        "admin_email": (r[5] or "").strip(),
+        "is_active": bool(r[4]) if r[4] is not None else False,
+        "customers_count": int(r[5] or 0),
+        "admin_email": (r[6] or "").strip(),
     } for r in rows]
 
     return templates.TemplateResponse("tenant_list.html", {
         "request": request,
         "tenants": tenants,
+        "include_inactive": bool(show_inactive),
     })
-
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -226,6 +235,12 @@ async def admin_customers(request: Request, tenant_id: Optional[int] = None,
     if isinstance(guard, RedirectResponse):
         return guard
 
+    # If a tenant_id is provided, fetch its name for the page heading
+    selected_tenant_name = None
+    if tenant_id:
+        r = await db.execute(text("SELECT name FROM tenants WHERE id = :tid LIMIT 1"), {"tid": tenant_id})
+        selected_tenant_name = r.scalar()
+
     where = "WHERE c.tenant_id = :tid" if tenant_id else ""
     params: Dict[str, Any] = {"tid": tenant_id} if tenant_id else {}
 
@@ -255,15 +270,117 @@ async def admin_customers(request: Request, tenant_id: Optional[int] = None,
         "tenant_name": r[10] or "—",
     } for r in rows]
 
+    # Fallback: if tenant has 0 customers, still show its name if we looked it up
+    if not selected_tenant_name and customers and tenant_id:
+        selected_tenant_name = customers[0]["tenant_name"]
+
     return templates.TemplateResponse(
         "customer_list.html",
         {
             "request": request,
             "customers": customers,
             "tenant_scope": "single" if tenant_id else "all",
+            "selected_tenant_id": tenant_id,
+            "selected_tenant_name": selected_tenant_name,
+            "tenant_name": "Superadmin",  # shows in the topbar subtitle
         },
     )
 
+
+# ----------------------------------------------------------------------------
+
+# ── Add Tenant: form ──────────────────────────────────────────────────────────
+@router.get("/tenants/add", response_class=HTMLResponse)
+async def tenant_add_form(request: Request):
+    guard = require_superadmin(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    return templates.TemplateResponse("tenant_add.html", {
+        "request": request,
+        "tenant_name": "Superadmin",
+        "form_error": None,
+    })
+
+
+# ── Add Tenant: submit ────────────────────────────────────────────────────────
+@router.post("/tenants/add")
+async def tenant_add_submit(
+    request: Request,
+    name: str = Form(...),
+    email: str = Form(...),
+    password: str = Form(...),
+    whatsapp_number: str = Form(""),
+    phone_number: str = Form(""),
+    address: str = Form(""),
+    language: str = Form("en-IN"),
+    is_active: bool = Form(True),
+    db: AsyncSession = Depends(get_db),
+):
+    guard = require_superadmin(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+
+    # Basic sanity (very light; keep your existing style)
+    if not name.strip():
+        return templates.TemplateResponse("tenant_add.html", {
+            "request": request,
+            "tenant_name": "Superadmin",
+            "form_error": "Name is required.",
+        })
+    if not email.strip():
+        return templates.TemplateResponse("tenant_add.html", {
+            "request": request,
+            "tenant_name": "Superadmin",
+            "form_error": "Email is required.",
+        })
+
+    try:
+        # 1) create tenant and get id
+        insert_tenant = text("""
+            INSERT INTO tenants
+            (name, whatsapp_number, phone_number, address, language, is_active, email, password, created_at, updated_at)
+            VALUES
+            (:name, :whatsapp_number, :phone_number, :address, :language, :is_active, :email, :password, NOW(), NOW())
+            RETURNING id
+        """)
+        res = await db.execute(insert_tenant, {
+            "name": name.strip(),
+            "whatsapp_number": whatsapp_number.strip() or None,
+            "phone_number": phone_number.strip() or None,
+            "address": address.strip() or None,
+            "language": language.strip() or None,
+            "is_active": bool(is_active),
+            "email": email.strip(),
+            "password": password,   # your schema uses plain 'password' on tenants
+        })
+        tenant_id = int(res.scalar())
+
+        # 2) create tenant_admin user (mirrors your current data style)
+        insert_user = text("""
+            INSERT INTO public.users
+            (email, hashed_password, role, tenant_id, is_active, created_at, updated_at)
+            VALUES
+            (:email, :hashed_password, 'tenant_admin', :tenant_id, TRUE, NOW(), NOW())
+        """)
+        await db.execute(insert_user, {
+            "email": email.strip(),
+            "hashed_password": password,   # your table stores plain values currently
+            "tenant_id": tenant_id,
+        })
+
+        await db.commit()
+        return RedirectResponse("/admin/tenants?created=1", status_code=status.HTTP_303_SEE_OTHER)
+
+    except Exception as e:
+        await db.rollback()
+        return templates.TemplateResponse("tenant_add.html", {
+            "request": request,
+            "tenant_name": "Superadmin",
+            "form_error": f"Could not save tenant: {e}",
+        })
+
+
+# ----------------------------------------------------------------------------
 
 @router.get("/customer/{customer_id}", response_class=HTMLResponse)
 async def admin_customer_detail(request: Request, customer_id: int, db: AsyncSession = Depends(get_db)):
@@ -429,28 +546,3 @@ async def admin_analytics_top_tenants(db: AsyncSession = Depends(get_db)):
     """))
     items = [{"tenant_id": r[0], "tenant_name": r[1], "orders_30d": int(r[2] or 0)} for r in (res.fetchall() or [])]
     return JSONResponse({"items": items})
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Impersonate tenant → jump to tenant dashboard
-# ──────────────────────────────────────────────────────────────────────────────
-
-@router.get("/impersonate/{tenant_id}")
-async def admin_impersonate(request: Request, tenant_id: int, db: AsyncSession = Depends(get_db)):
-    """
-    Set session tenant and hop to /dashboard (tenant view).
-    Keeps role='superadmin' (same session scheme used by /login).
-    """
-    guard = require_superadmin(request)
-    if isinstance(guard, RedirectResponse):
-        return guard
-
-    # Validate tenant exists
-    res = await db.execute(text("SELECT name FROM tenants WHERE id = :tid LIMIT 1"), {"tid": tenant_id})
-    row = res.fetchone()
-    if not row:
-        return RedirectResponse("/admin", status_code=303)
-
-    request.session["tenant_id"] = int(tenant_id)
-    request.session["tenant_name"] = row[0] or f"Tenant {tenant_id}"
-    return RedirectResponse("/dashboard", status_code=303)

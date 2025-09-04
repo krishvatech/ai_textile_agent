@@ -14,7 +14,7 @@ from app.db.session import get_db  # <-- same pattern as admin.py
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates/tenants")
 
-ALLOWED_DASHBOARD_ROLES = {"tenant_admin", "superadmin"}
+ALLOWED_DASHBOARD_ROLES = {"tenant_admin"}
 
 def require_auth(request: Request):
     role = request.session.get("role")
@@ -23,6 +23,7 @@ def require_auth(request: Request):
         nxt = request.url.path or "/dashboard"
         return RedirectResponse(url=f"/login?next={nxt}", status_code=303)
     return int(tid)
+
 
 async def get_tenant_name(tenant_id: int, db: AsyncSession) -> str:
     res = await db.execute(
