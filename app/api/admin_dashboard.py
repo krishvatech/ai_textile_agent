@@ -208,6 +208,9 @@ async def admin_home(request: Request, db: AsyncSession = Depends(get_db)):
     """))
     top_tenants = [{"tenant_id": r[0], "tenant_name": r[1], "orders_30d": int(r[2] or 0)}
                    for r in (res.fetchall() or [])]
+    
+    cust_by_tenant = await _series_customers_by_tenant_monthly(db, top_n=5, months=None)
+    tenants_created = await _series_tenants_created_monthly(db, months=None)
 
     # Map to the exact variable names your templates expect
     ctx = {
@@ -224,6 +227,10 @@ async def admin_home(request: Request, db: AsyncSession = Depends(get_db)):
         "chart_sell":   series["sell"],
         "chart_rent":   series["rent"],
         "top_tenants":  top_tenants,
+
+        # NEW: charts
+        "cust_by_tenant": cust_by_tenant,   # {labels:[], datasets:[{label, data}]}
+        "tenants_created": tenants_created, # {labels:[], data:[]}
     }
     return templates.TemplateResponse("dashboard.html", ctx)
 
@@ -530,6 +537,84 @@ async def admin_analytics_monthly(db: AsyncSession = Depends(get_db)):
     """
     series = await _series_monthly_all(db)
     return JSONResponse(series)
+
+
+
+# ── Customers over time by tenant (top N) ─────────────────────────────────────
+async def _series_customers_by_tenant_monthly(db: AsyncSession, top_n: int = 5, months: int | None = None):
+    # Pick top N tenants by total customers (all time)
+    res = await db.execute(text("""
+        SELECT t.id, COALESCE(t.name, 'Tenant ' || t.id::text) AS name, COUNT(c.id) AS cnt
+        FROM tenants t
+        JOIN customers c ON c.tenant_id = t.id
+        GROUP BY t.id, t.name
+        ORDER BY cnt DESC, name ASC
+        LIMIT :top_n
+    """), {"top_n": int(top_n)})
+    top = res.fetchall() or []
+    if not top:
+        return {"labels": [], "datasets": []}
+
+    top_ids  = [int(r[0]) for r in top]
+    top_names = {int(r[0]): (r[1] or f"Tenant {r[0]}") for r in top}
+
+    # Build a safe IN clause like (:id0, :id1, ...)
+    id_params = {f"id{i}": tid for i, tid in enumerate(top_ids)}
+    in_clause = ", ".join([f":id{i}" for i in range(len(top_ids))])
+
+    # Optional month filter
+    month_filter = ""
+    if months:
+        month_filter = f"AND c.created_at >= NOW() - INTERVAL '{int(months)} months'"
+
+    # Pull monthly counts for those tenants
+    res = await db.execute(text(f"""
+        SELECT DATE_TRUNC('month', c.created_at) AS mth, c.tenant_id, COUNT(*) AS cnt
+        FROM customers c
+        WHERE c.tenant_id IN ({in_clause})
+          {month_filter}
+        GROUP BY mth, c.tenant_id
+        ORDER BY mth
+    """), id_params)
+    rows = res.fetchall() or []
+
+    # Collect all months in order
+    from collections import OrderedDict, defaultdict
+    months_map = OrderedDict()
+    per_tenant = defaultdict(dict)  # {tenant_id: {mth: cnt}}
+
+    for mth, tid, cnt in rows:
+        months_map[mth] = True
+        per_tenant[int(tid)][mth] = int(cnt)
+
+    labels = [m.strftime("%b %Y") for m in months_map.keys()]
+    datasets = []
+    for tid in top_ids:
+        data = [per_tenant.get(tid, {}).get(m, 0) for m in months_map.keys()]
+        datasets.append({"label": top_names[tid], "data": data})
+
+    return {"labels": labels, "datasets": datasets}
+
+
+# ── Tenants created per month ─────────────────────────────────────────────────
+async def _series_tenants_created_monthly(db: AsyncSession, months: int | None = None):
+    month_filter = ""
+    if months:
+        month_filter = f"WHERE t.created_at >= NOW() - INTERVAL '{int(months)} months'"
+
+    res = await db.execute(text(f"""
+        SELECT DATE_TRUNC('month', t.created_at) AS mth, COUNT(*) AS cnt
+        FROM tenants t
+        {month_filter}
+        GROUP BY mth
+        ORDER BY mth
+    """))
+    rows = res.fetchall() or []
+
+    labels = [r[0].strftime("%b %Y") for r in rows]
+    data   = [int(r[1] or 0) for r in rows]
+    return {"labels": labels, "data": data}
+
 
 
 @router.get("/analytics/top-tenants", response_class=JSONResponse)
