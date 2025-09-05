@@ -846,7 +846,8 @@ async def _handle_vto_flow(
     current_language: str,
     db,
     chat_session,
-    msg_id: str
+    msg_id: str,
+    request,  # <-- add request parameter
 ) -> tuple[bool, list]:
     """
     Handle VTO flow logic
@@ -1592,7 +1593,6 @@ async def receive_cloud_webhook(request: Request):
                             logging.info(f"[VTO][START] via HEURISTIC | session={session_key} (last message asked for person photo)")
                             _log_vto_state_snapshot(session_key, "after start (heuristic)")
 
-                    # -------------------- VTO handler (runs BEFORE dispatch) --------------------
                     pre_state = _get_vto_state(session_key)
                     vto_handled, vto_out_msgs = await _handle_vto_flow(
                         session_key=session_key,
@@ -1605,8 +1605,9 @@ async def receive_cloud_webhook(request: Request):
                         db=db,
                         chat_session=chat_session,
                         msg_id=msg_id,
-                        request=request,   # <-- so handler can read headers if needed
+                        request=request,   # <-- pass request here
                     )
+                    post_state = _get_vto_state(session_key)
                     post_state = _get_vto_state(session_key)
 
                     _log_vto_state_snapshot(session_key, "post-handle (normal flow)")
