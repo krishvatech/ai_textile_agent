@@ -971,6 +971,9 @@ async def _handle_vto_flow(
                         )
                         # Send result
                         public_url = _save_public_png_and_get_url(result_bytes)
+                        logging.info("="*100)
+                        logging.info(f"Public Url:{public_url}")
+                        logging.info("="*100)
                         if public_url:
                             result_mid = await send_whatsapp_image_cloud(
                                 to_waid=from_waid,
@@ -1051,6 +1054,9 @@ async def _handle_vto_flow(
                     )
 
                     public_url = _save_public_png_and_get_url(result_bytes)
+                    logging.info("="*100)
+                    logging.info(f"Public Url:{public_url}")
+                    logging.info("="*100)
                     if public_url:
                         result_mid = await send_whatsapp_image_cloud(
                             to_waid=from_waid,
