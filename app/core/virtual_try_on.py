@@ -1,11 +1,13 @@
 # app/services/virtual_try_on.py
-import os, io, tempfile, random, typing, asyncio
+import os, io, tempfile, random, asyncio, logging, json
 from uuid import uuid4
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
 from PIL import Image as PILImage, ImageDraw
 import numpy as np
 
-# Google GenAI
+# Google GenAI (python -m pip install google-genai)
 from google import genai
 from google.genai.types import (
     HttpOptions, RecontextImageSource, ProductImage, Image, RecontextImageConfig
@@ -24,7 +26,60 @@ except Exception:
     mp_pose = None
 
 
-# ---------- helpers ----------
+# ========== CREDENTIALS RESOLUTION (service account) ==========
+def _candidate_cred_paths() -> list[Path]:
+    """Preferred → fallback search order for credentials.json."""
+    env_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    return [
+        Path(env_path).expanduser() if env_path else None,
+        Path.cwd() / "credentials.json",
+        Path(__file__).resolve().parent.parent / "credentials.json",  # project root if this file is in app/services/
+        Path(__file__).resolve().parent / "credentials.json",
+    ]
+
+def _resolve_credentials_path() -> Path:
+    for p in _candidate_cred_paths():
+        if p and p.is_file():
+            return p
+    raise FileNotFoundError(
+        "Google credentials.json not found. "
+        "Set GOOGLE_APPLICATION_CREDENTIALS or place credentials.json at project root."
+    )
+
+def _ensure_google_adc() -> tuple[str, str]:
+    """
+    Ensures GOOGLE_APPLICATION_CREDENTIALS points to a readable file.
+    Returns (creds_path, project_id).
+    """
+    cred_path = _resolve_credentials_path()
+    if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(cred_path)
+        logging.info("[VTO][CREDS] Set GOOGLE_APPLICATION_CREDENTIALS=%s", cred_path)
+
+    # Read project_id from the file if GOOGLE_PROJECT_ID is not set
+    project_id = os.getenv("GOOGLE_PROJECT_ID")
+    if not project_id:
+        try:
+            with open(cred_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            project_id = (data or {}).get("project_id")
+            if project_id:
+                os.environ.setdefault("GOOGLE_PROJECT_ID", project_id)
+                os.environ.setdefault("GOOGLE_CLOUD_PROJECT", project_id)  # helpful for some libs
+                logging.info("[VTO][CREDS] Derived GOOGLE_PROJECT_ID from credentials.json: %s", project_id)
+            else:
+                raise ValueError("project_id missing in credentials.json")
+        except Exception as e:
+            raise RuntimeError(
+                "Could not determine GOOGLE_PROJECT_ID. "
+                "Set it in the environment or include 'project_id' in credentials.json."
+            ) from e
+
+    return str(cred_path), project_id
+# =============================================================
+
+
+# ---------- image helpers ----------
 def _as_temp_png(data: bytes) -> str:
     p = os.path.join(tempfile.gettempdir(), f"vto_{uuid4().hex}.png")
     with open(p, "wb") as f:
@@ -37,19 +92,8 @@ def _tight_bbox_from_rgba(img_rgba: PILImage.Image):
         alpha = arr[..., 3]
         ys, xs = np.where(alpha > 0)
         if len(xs) and len(ys):
-            return int(xs.min()), int(ys.min()), int(xs.max()+1), int(ys.max()+1)
+            return int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1)
     return None
-
-def _load_image_bytes_to_png_path(data: bytes) -> str:
-    try:
-        img = PILImage.open(io.BytesIO(data)).convert("RGBA")
-    except Exception:
-        # fallback—let PIL try again as RGB
-        img = PILImage.open(io.BytesIO(data)).convert("RGB")
-        buf = io.BytesIO(); img.save(buf, format="PNG")
-        return _as_temp_png(buf.getvalue())
-    buf = io.BytesIO(); img.save(buf, format="PNG")
-    return _as_temp_png(buf.getvalue())
 
 def prep_garment_bytes(garment_bytes: bytes) -> str:
     """BG removal + tight crop from raw bytes → temp PNG path."""
@@ -83,51 +127,61 @@ def neutralize_torso_bytes(person_bytes: bytes, alpha=0.7, soften=22) -> str:
         return _as_temp_png(b.getvalue())
 
     lm = res.pose_landmarks.landmark
-    def dn(p): return (int(p.x*w), int(p.y*h))
+    def dn(p): return (int(p.x * w), int(p.y * h))
     pts = [dn(lm[11]), dn(lm[12]), dn(lm[24]), dn(lm[23])]
     xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
-    x0, x1 = max(0, min(xs)-20), min(w, max(xs)+20)
-    y0, y1 = max(0, min(ys)-30), min(h, max(ys)+40)
+    x0, x1 = max(0, min(xs) - 20), min(w, max(xs) + 20)
+    y0, y1 = max(0, min(ys) - 30), min(h, max(ys) + 40)
 
-    overlay = PILImage.new("RGBA", img.size, (0,0,0,0))
+    overlay = PILImage.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    draw.rounded_rectangle([x0,y0,x1,y1], radius=soften, fill=(180,180,180,int(255*alpha)))
+    draw.rounded_rectangle([x0, y0, x1, y1], radius=soften, fill=(180, 180, 180, int(255 * alpha)))
     out = PILImage.alpha_composite(img, overlay)
     b = io.BytesIO(); out.save(b, format="PNG")
     return _as_temp_png(b.getvalue())
 
 
+# ---------- config & client ----------
 @dataclass
 class VTOConfig:
     base_steps: int = 60
-    seed: int | None = None
+    seed: Optional[int] = None
     add_watermark: bool = False
     model: str = "virtual-try-on-preview-08-04"  # Google GenAI Recontext image model
-    use_vertex: bool = bool(int(os.getenv("VTO_USE_VERTEX", "0")))
-    project: str | None = os.getenv("GOOGLE_PROJECT_ID")
-    location: str | None = os.getenv("GOOGLE_LOCATION", "us-central1")
+    # Use service-account / Vertex when true (recommended for server)
+    use_vertex: bool = bool(int(os.getenv("VTO_USE_VERTEX", "1")))
+    project: Optional[str] = os.getenv("GOOGLE_PROJECT_ID")  # may be filled from credentials.json
+    location: Optional[str] = os.getenv("GOOGLE_LOCATION", "us-central1")
 
 def _make_client(cfg: VTOConfig) -> genai.Client:
+    """
+    - If use_vertex=True → use service-account via ADC (GOOGLE_APPLICATION_CREDENTIALS)
+    - Else → expects a Google AI Studio API key (not covered here)
+    """
     if cfg.use_vertex:
-        # Vertex (only if you explicitly enable it)
+        cred_path, project_id = _ensure_google_adc()
+        project = cfg.project or project_id
+        location = cfg.location or "us-central1"
+        logging.info("[VTO][CLIENT] Vertex mode | project=%s | location=%s | creds=%s",
+                     project, location, cred_path)
         return genai.Client(
             vertexai=True,
-            project=cfg.project,
-            location=cfg.location,
+            project=project,
+            location=location,
             http_options=HttpOptions(api_version="v1"),
         )
-    # Pure Google GenAI (no Vertex)
+
+    # Non-Vertex usage would require an API key:
+    # os.environ["GOOGLE_API_KEY"] must be set (not service-account)
+    logging.info("[VTO][CLIENT] Non-Vertex mode (API key).")
     return genai.Client(http_options=HttpOptions(api_version="v1"))
 
-def _png_to_bytes(path: str) -> bytes:
-    with open(path, "rb") as f:
-        return f.read()
 
-
+# ---------- VTO core ----------
 async def generate_vto_image(
     person_bytes: bytes,
     garment_bytes: bytes,
-    cfg: VTOConfig | None = None,
+    cfg: Optional[VTOConfig] = None,
 ) -> bytes:
     """
     Main entry: returns PNG bytes of the try-on result.
@@ -135,14 +189,15 @@ async def generate_vto_image(
     cfg = cfg or VTOConfig()
     client = _make_client(cfg)
 
-    # prep inputs
+    # Prep inputs
     person_tmp  = neutralize_torso_bytes(person_bytes)
     garment_tmp = prep_garment_bytes(garment_bytes)
+    logging.info("[VTO][INPUTS] person_tmp=%s | garment_tmp=%s", person_tmp, garment_tmp)
 
     person_img  = Image.from_file(location=person_tmp)
     garment_img = Image.from_file(location=garment_tmp)
 
-    # seed & steps
+    # Seed & steps
     try:
         re_cfg = RecontextImageConfig(
             number_of_images=1,
@@ -153,7 +208,8 @@ async def generate_vto_image(
     except Exception:
         re_cfg = RecontextImageConfig(number_of_images=1)
 
-    # call VTO
+    # Call VTO
+    logging.info("[VTO][CALL] model=%s | steps=%s", cfg.model, getattr(re_cfg, "base_steps", None))
     resp = await asyncio.to_thread(
         client.models.recontext_image,
         cfg.model,
@@ -168,14 +224,18 @@ async def generate_vto_image(
     if not imgs:
         raise RuntimeError("VTO returned no image")
 
-    # Always return first
+    # Always return first, normalized to PNG bytes
     out = imgs[0].image
-    # Normalize to PNG bytes
     if isinstance(out, PILImage.Image):
-        buf = io.BytesIO(); out.save(buf, format="PNG"); return buf.getvalue()
+        buf = io.BytesIO(); out.save(buf, format="PNG")
+        logging.info("[VTO][OK] Generated PIL image (PNG %d bytes)", buf.getbuffer().nbytes)
+        return buf.getvalue()
     if isinstance(out, bytes):
+        logging.info("[VTO][OK] Generated raw bytes (len=%d)", len(out))
         return out
-    # Fallback if type unknown but has .save()
     if hasattr(out, "save"):
-        buf = io.BytesIO(); out.save(buf, format="PNG"); return buf.getvalue()
+        buf = io.BytesIO(); out.save(buf, format="PNG")
+        logging.info("[VTO][OK] Generated image via .save() (PNG %d bytes)", buf.getbuffer().nbytes)
+        return buf.getvalue()
+
     raise RuntimeError("Unsupported VTO output type")
