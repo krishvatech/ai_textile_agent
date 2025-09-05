@@ -23,11 +23,13 @@ Notes:
 import os
 import io
 import json
+import base64
 import tempfile
 import random
 import asyncio
 import typing
 import inspect
+import logging
 from uuid import uuid4
 from dataclasses import dataclass
 
@@ -40,8 +42,10 @@ from google.genai.types import (
     RecontextImageSource,
     RecontextImageConfig,
     ProductImage,
-    Image,
+    Image,  # google.genai.types.Image (not PIL)
 )
+
+log = logging.getLogger(__name__)
 
 # ---------- optional deps ----------
 try:
@@ -83,9 +87,8 @@ def prep_garment_bytes(garment_bytes: bytes) -> str:
         try:
             garment_bytes = rembg_remove(garment_bytes)
             img = PILImage.open(io.BytesIO(garment_bytes)).convert("RGBA")
-        except Exception:
-            # non-fatal; continue with original
-            pass
+        except Exception as e:
+            log.debug("rembg failed (non-fatal): %s", e)
     box = _tight_bbox_from_rgba(img)
     if box:
         img = img.crop(box)
@@ -203,6 +206,97 @@ def _make_client(cfg: VTOConfig) -> genai.Client:
     return genai.Client(api_key=api_key, http_options=HttpOptions(api_version="v1"))
 
 
+# ---------- response decoding helpers ----------
+def _decode_base64_field(val: typing.Any) -> typing.Optional[bytes]:
+    if isinstance(val, (bytes, bytearray)):
+        return bytes(val)
+    if isinstance(val, str):
+        try:
+            return base64.b64decode(val)
+        except Exception:
+            return None
+    return None
+
+
+def _to_png_bytes_from_unknown(obj: typing.Any) -> bytes:
+    """
+    Robustly convert various image objects to PNG bytes.
+
+    Handles:
+      - PIL.Image.Image
+      - google.genai.types.Image (via .as_pil_image() / .bytes / .data / .save)
+      - dict-like Vertex 'predictions' payloads (bytesBase64Encoded, imageBytes, etc.)
+      - plain bytes
+    """
+    # 1) Already PNG/raw bytes?
+    if isinstance(obj, (bytes, bytearray)):
+        return bytes(obj)
+
+    # 2) PIL Image
+    if isinstance(obj, PILImage.Image):
+        buf = io.BytesIO()
+        obj.save(buf, format="PNG")
+        return buf.getvalue()
+
+    # 3) google.genai.types.Image (the class we imported as Image)
+    if isinstance(obj, Image):
+        # Try a direct .as_pil_image()
+        as_pil = getattr(obj, "as_pil_image", None)
+        if callable(as_pil):
+            try:
+                pil = as_pil()
+                if isinstance(pil, PILImage.Image):
+                    return _to_png_bytes_from_unknown(pil)
+            except Exception as e:
+                log.debug("as_pil_image() failed: %s", e)
+
+        # Known byte-like fields
+        for attr in ("bytes", "image_bytes", "data", "content"):
+            val = getattr(obj, attr, None)
+            if isinstance(val, (bytes, bytearray)):
+                return bytes(val)
+            if isinstance(val, str):
+                decoded = _decode_base64_field(val)
+                if decoded:
+                    return decoded
+
+        # Last resort: an object-level .save that takes only a file-like param
+        save_fn = getattr(obj, "save", None)
+        if callable(save_fn):
+            try:
+                buf = io.BytesIO()
+                # Do NOT pass 'format' — some SDK versions don't accept it
+                save_fn(buf)
+                return buf.getvalue()
+            except TypeError:
+                # try with a positional "PNG" just in case
+                try:
+                    buf = io.BytesIO()
+                    save_fn(buf, "PNG")
+                    return buf.getvalue()
+                except Exception as e:
+                    log.debug("obj.save fallback failed: %s", e)
+
+    # 4) dict-like predictions (Vertex REST shapes)
+    if isinstance(obj, dict):
+        # common keys: bytesBase64Encoded, imageBytes, image, content
+        for k in ("bytesBase64Encoded", "imageBytes", "image", "content"):
+            if k in obj:
+                b = _decode_base64_field(obj[k])
+                if b:
+                    return b
+
+    # 5) iterable/sequence of candidates
+    if isinstance(obj, (list, tuple)):
+        for item in obj:
+            try:
+                return _to_png_bytes_from_unknown(item)
+            except Exception:
+                continue
+
+    raise RuntimeError("Unsupported image output type (cannot convert to PNG bytes)")
+
+
 # ---------- main API ----------
 async def generate_vto_image(
     person_bytes: bytes,
@@ -230,8 +324,8 @@ async def generate_vto_image(
             seed=(cfg.seed or random.randint(1, 10_000_000)),
             add_watermark=cfg.add_watermark,
         )
-    except Exception:
-        # In case of older SDK lacking some fields
+    except Exception as e:
+        log.debug("RecontextImageConfig with extras failed; falling back: %s", e)
         re_cfg = RecontextImageConfig(number_of_images=1)
 
     # Build source once
@@ -262,23 +356,29 @@ async def generate_vto_image(
 
     resp = await asyncio.to_thread(_call_recontext)
 
-    # Extract first image
-    images = getattr(resp, "generated_images", None) or getattr(resp, "images", None) or []
+    # --- Extract first image-like artifact from response ---
+    # Common shapes:
+    #   - resp.generated_images -> [GeneratedImage(image=Image(...)), ...]
+    #   - resp.images -> [Image | PIL.Image | bytes, ...]
+    #   - resp.predictions -> [ { bytesBase64Encoded: ... }, ... ]
+    images = (
+        getattr(resp, "generated_images", None)
+        or getattr(resp, "images", None)
+        or getattr(resp, "predictions", None)
+        or (resp if isinstance(resp, (list, tuple)) else None)
+        or []
+    )
+
     if not images:
-        raise RuntimeError("VTO returned no image")
+        # dict response with predictions
+        if isinstance(resp, dict) and "predictions" in resp:
+            images = resp["predictions"]
+        else:
+            raise RuntimeError("VTO returned no image")
 
-    out = images[0].image if hasattr(images[0], "image") else images[0]
+    # Prefer nested .image field if present (GeneratedImage)
+    candidate = images[0]
+    if hasattr(candidate, "image"):
+        candidate = candidate.image
 
-    # Normalize to PNG bytes
-    if isinstance(out, PILImage.Image):
-        buf = io.BytesIO()
-        out.save(buf, format="PNG")
-        return buf.getvalue()
-    if isinstance(out, bytes):
-        return out
-    if hasattr(out, "save"):
-        buf = io.BytesIO()
-        out.save(buf, format="PNG")
-        return buf.getvalue()
-
-    raise RuntimeError("Unsupported VTO output type")
+    return _to_png_bytes_from_unknown(candidate)
