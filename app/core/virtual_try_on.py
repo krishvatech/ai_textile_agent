@@ -253,7 +253,6 @@
 
 #     raise RuntimeError("Unsupported VTO output type")
 
-
 # app/core/virtual_try_on.py
 import os, io, tempfile, random, typing, asyncio, json, logging
 from uuid import uuid4
@@ -295,16 +294,6 @@ def _tight_bbox_from_rgba(img_rgba: PILImage.Image):
         if len(xs) and len(ys):
             return int(xs.min()), int(ys.min()), int(xs.max()+1), int(ys.max()+1)
     return None
-
-def _load_image_bytes_to_png_path(data: bytes) -> str:
-    try:
-        img = PILImage.open(io.BytesIO(data)).convert("RGBA")
-    except Exception:
-        img = PILImage.open(io.BytesIO(data)).convert("RGB")
-        buf = io.BytesIO(); img.save(buf, format="PNG")
-        return _as_temp_png(buf.getvalue())
-    buf = io.BytesIO(); img.save(buf, format="PNG")
-    return _as_temp_png(buf.getvalue())
 
 def prep_garment_bytes(garment_bytes: bytes) -> str:
     """BG removal + tight crop from raw bytes → temp PNG path."""
@@ -354,26 +343,17 @@ def neutralize_torso_bytes(person_bytes: bytes, alpha=0.7, soften=22) -> str:
 
 # -------------------- credentials / client --------------------
 def _find_credentials_file() -> str | None:
-    """
-    Prefer explicit GOOGLE_APPLICATION_CREDENTIALS.
-    Otherwise look for ./credentials.json (as in your server screenshot).
-    """
+    # Prefer explicit env; otherwise ./credentials.json (your server screenshot)
     if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
         return os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    cwd = os.getcwd()
-    cand = os.path.join(cwd, "credentials.json")
+    cand = os.path.join(os.getcwd(), "credentials.json")
     return cand if os.path.isfile(cand) else None
 
 def _ensure_vertex_env():
-    """
-    Make sure GOOGLE_APPLICATION_CREDENTIALS/GOOGLE_PROJECT_ID are set.
-    Derive project from the service-account JSON if needed.
-    """
     cred_path = _find_credentials_file()
     if cred_path and not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cred_path
 
-    # derive project id from json if missing
     project = os.getenv("GOOGLE_PROJECT_ID")
     if (not project) and cred_path and os.path.isfile(cred_path):
         try:
@@ -391,12 +371,10 @@ class VTOConfig:
     base_steps: int = 60
     seed: int | None = None
     add_watermark: bool = False
-    model: str = "virtual-try-on-preview-08-04"  # Vertex/Google GenAI model
-    # Force Vertex; we’re using service-account creds on the server
+    model: str = "virtual-try-on-preview-08-04"
     use_vertex: bool = True
     project: str | None = os.getenv("GOOGLE_PROJECT_ID")
     location: str | None = os.getenv("GOOGLE_LOCATION", "us-central1")
-    # how much padding the model should consider around the subject
     src_input_padding: float = 0.15
 
 def _make_client(cfg: VTOConfig) -> genai.Client:
@@ -414,12 +392,7 @@ def _make_client(cfg: VTOConfig) -> genai.Client:
             location=location,
             http_options=HttpOptions(api_version="v1"),
         )
-    # Fallback (only if you later provide GOOGLE_API_KEY)
     return genai.Client(http_options=HttpOptions(api_version="v1"))
-
-def _png_to_bytes(path: str) -> bytes:
-    with open(path, "rb") as f:
-        return f.read()
 
 
 # -------------------- main entry --------------------
@@ -431,8 +404,10 @@ async def generate_vto_image(
     """
     Returns PNG bytes of the try-on result.
 
-    IMPORTANT (Vertex): pass the person image at top-level `src_input`
-    and the garment as `source=RecontextImageSource(product_images=[...])`.
+    Correct request for Vertex `recontext_image`:
+      - Build RecontextImageSource with **src_input** (person) and **src_input_padding**
+      - Include garment as ProductImage(product_image=...)
+      - Call recontext_image(model=..., source=..., config=...)
     """
     cfg = cfg or VTOConfig()
     client = _make_client(cfg)
@@ -459,14 +434,15 @@ async def generate_vto_image(
     logging.info("[VTO][CALL] model=%s | steps=%s", cfg.model, cfg.base_steps)
 
     def _call_recontext():
-        # Correct kwargs for Vertex: src_input + src_input_padding + source + config
-        return client.models.recontext_image(
-            model=cfg.model,
+        source = RecontextImageSource(
+            # *** THIS IS THE FIX ***
             src_input=person_img,
             src_input_padding=cfg.src_input_padding,
-            source=RecontextImageSource(
-                product_images=[ProductImage(product_image=garment_img)]
-            ),
+            product_images=[ProductImage(product_image=garment_img)],
+        )
+        return client.models.recontext_image(
+            model=cfg.model,
+            source=source,
             config=re_cfg,
         )
 
