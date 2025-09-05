@@ -1039,7 +1039,7 @@ async def _handle_vto_flow(
                             cfg=VTOConfig(base_steps=60, add_watermark=False),
                         )
                         logging.info("="*100)
-                        logging.info(f"Results Bytes:{result_bytes}")
+                        
                         logging.info("="*100)
                         # Send result
                         # Save to outbox -> upload -> send -> delete local file
@@ -1143,7 +1143,7 @@ async def _handle_vto_flow(
                         cfg=VTOConfig(base_steps=60, add_watermark=False),
                     )
                     logging.info("="*100)
-                    logging.info(f"Results Bytes:{result_bytes}")
+                    
                     logging.info("="*100)
                     # Send result
                     # Save to outbox -> upload -> send -> delete local file
