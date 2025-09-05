@@ -836,187 +836,273 @@ def _get_vto_messages(lang: str = "en-IN") -> dict:
             "invalid_image": "Please send a clear photo."
         }
 
+# --- inside whatsapp.py ---
+
 async def _handle_vto_flow(
     session_key: str,
     text_msg: str,
     mtype: str,
     msg: dict,
     from_waid: str,
-    outbound_pnid: str,
+    outbound_pnid: str | None,
     current_language: str,
     db,
     chat_session,
     msg_id: str,
-    request,  # <-- add request parameter
-) -> tuple[bool, list]:
+    request,  # required by your code
+):
     """
-    Handle VTO flow logic
-    Returns: (handled: bool, out_msgs: list)
+    Returns (handled: bool, out_msgs: list[(kind, text, mid, [image_url])])
     """
     vto_messages = _get_vto_messages(current_language)
-    out_msgs = []
-    
-    # Check if user wants to start VTO
-    if not _is_vto_flow_active(session_key) and _detect_vto_keywords(text_msg):
-        # Start VTO flow
-        _set_vto_state(session_key, {
-            "active": True,
-            "step": "need_person",
-            "person_image": None,
-            "garment_image": None
-        })
-        
+    out_msgs: list[tuple] = []
+
+    # helpers bound to this session
+    def _get(): return _get_vto_state(session_key) or {}
+    def _set(s): return _set_vto_state(session_key, s)
+    def _have_both(s):
+        return bool(s.get("person_image")) and bool(s.get("garment_image") or s.get("garment_image_url"))
+
+    async def _bytes_from_url(url: str) -> bytes:
+        import httpx
+        async with httpx.AsyncClient(timeout=30) as hc:
+            r = await hc.get(url)
+            r.raise_for_status()
+            return r.content
+
+    async def _resolve_garment_bytes(s) -> bytes | None:
+        """Get garment bytes from in-memory bytes or the stored garment_image_url."""
+        if s.get("garment_image"):
+            return s["garment_image"]
+        if s.get("garment_image_url"):
+            try:
+                return await _bytes_from_url(s["garment_image_url"])
+            except Exception:
+                logging.exception("[VTO] Failed to fetch garment bytes from URL")
+                return None
+        return None
+
+    # --- state snapshot BEFORE handling
+    vto_state = _get()
+    logging.info(
+        "[VTO] pre-handle (normal flow) | session=%s active=%s step=%s person=%s garment_bytes=%s garment_url=%s",
+        session_key, vto_state.get("active"), vto_state.get("step"),
+        "yes" if vto_state.get("person_image") else "no",
+        "yes" if vto_state.get("garment_image") else "no",
+        "yes" if vto_state.get("garment_image_url") else "no",
+    )
+
+    # If VTO isn't active, nothing to do
+    if not vto_state.get("active"):
+        return False, []
+
+    current_step = vto_state.get("step") or "need_person"
+
+    # If text arrives while we're waiting for an image, gently remind once
+    if mtype == "text" and ("need_person" in current_step or "need_garment" in current_step):
+        reminder_key = "need_person" if current_step == "need_person" else "need_garment"
+        reminder = vto_messages.get(reminder_key)
         mid = await send_whatsapp_reply_cloud(
             to_waid=from_waid,
-            body=vto_messages["need_person"],
-            phone_number_id=outbound_pnid
+            body=reminder,
+            phone_number_id=outbound_pnid,
         )
-        out_msgs.append(("text", vto_messages["need_person"], mid))
+        out_msgs.append(("text", reminder, mid))
+        logging.info("[VTO][REMIND] session=%s step=%s -> sent: %s", session_key, current_step, reminder_key)
+        # keep state unchanged
+        logging.info(
+            "[VTO] post-handle (normal flow) | session=%s active=%s step=%s person=%s garment_bytes=%s garment_url=%s",
+            session_key, vto_state.get("active"), vto_state.get("step"),
+            "yes" if vto_state.get("person_image") else "no",
+            "yes" if vto_state.get("garment_image") else "no",
+            "yes" if vto_state.get("garment_image_url") else "no",
+        )
         return True, out_msgs
-    
-    # Handle VTO flow steps
-    if _is_vto_flow_active(session_key):
-        vto_state = _get_vto_state(session_key)
-        current_step = vto_state.get("step")
-        
-        # Handle text commands in VTO flow
-        if mtype == "text":
-            text_lower = text_msg.lower().strip()
-            
-            # Cancel VTO
-            if text_lower in ["cancel", "stop", "exit", "रद्द करें", "બંધ કરો"]:
-                _clear_vto_state(session_key)
-                cancel_msg = "Virtual try-on cancelled." if current_language.startswith("en") else (
-                    "वर्चुअल ट्राई-ऑन रद्द कर दिया।" if current_language.startswith("hi") else 
-                    "વર્ચ્યુઅલ ટ્રાય-ઓન રદ્દ કર્યું."
-                )
-                mid = await send_whatsapp_reply_cloud(
-                    to_waid=from_waid,
-                    body=cancel_msg,
-                    phone_number_id=outbound_pnid
-                )
-                out_msgs.append(("text", cancel_msg, mid))
-                return True, out_msgs
-            
-            # If user sends text during VTO, remind them to send image
-            reminder = vto_messages.get("need_person" if current_step == "need_person" else "need_garment")
-            mid = await send_whatsapp_reply_cloud(
-                to_waid=from_waid,
-                body=reminder,
-                phone_number_id=outbound_pnid
-            )
-            out_msgs.append(("text", reminder, mid))
-            return True, out_msgs
-        
-        # Handle image uploads
-        if mtype == "image" and "image" in msg:
-            try:
-                img_obj = msg.get("image", {}) if isinstance(msg, dict) else {}
-                media_id = img_obj.get("id")
-                link = img_obj.get("link")
-                is_local = request.headers.get("X-LOCAL-TEST") == "1"
 
-                if is_local and link:
-                    async with httpx.AsyncClient(timeout=30) as hc:
-                        r = await hc.get(link)
-                        r.raise_for_status()
-                        img_bytes = r.content
-                else:
-                    if not media_id:
-                        raise Exception("No media ID")
-                
+    # ---- IMAGE upload handling
+    if mtype == "image" and "image" in msg:
+        try:
+            # Download inbound bytes (works for real webhook & local tester)
+            img_obj = msg.get("image", {}) if isinstance(msg, dict) else {}
+            media_id = img_obj.get("id")
+            link = img_obj.get("link")
+            is_local = request.headers.get("X-LOCAL-TEST") == "1"
+
+            if is_local and link:
+                import httpx
+                async with httpx.AsyncClient(timeout=30) as hc:
+                    r = await hc.get(link)
+                    r.raise_for_status()
+                    img_bytes = r.content
+            else:
+                if not media_id:
+                    raise RuntimeError("no-media-id")
                 img_bytes = await download_media_bytes(media_id)
-                if not img_bytes:
-                    raise Exception("Failed to download image")
-                
-                # Save image based on current step
-                if current_step == "need_person":
-                    vto_state["person_image"] = img_bytes
-                    vto_state["step"] = "need_garment"
-                    _set_vto_state(session_key, vto_state)
-                    
-                    mid = await send_whatsapp_reply_cloud(
-                        to_waid=from_waid,
-                        body=vto_messages["need_garment"],
-                        phone_number_id=outbound_pnid
+
+            if not img_bytes:
+                raise RuntimeError("empty-image")
+
+            # Persist into state based on the step we are in
+            if current_step == "need_person":
+                vto_state["person_image"] = img_bytes
+
+                # IMPORTANT: if we already have a garment (bytes or URL), do NOT ask again → go generate
+                if vto_state.get("garment_image") or vto_state.get("garment_image_url"):
+                    logging.info(
+                        "[VTO][READY] Both images present for session=%s (person=bytes; garment=%s)",
+                        session_key, "bytes" if vto_state.get("garment_image") else "url"
                     )
-                    out_msgs.append(("text", vto_messages["need_garment"], mid))
-                    return True, out_msgs
-                
-                elif current_step == "need_garment":
-                    vto_state["garment_image"] = img_bytes
-                    _set_vto_state(session_key, vto_state)
-                    
-                    # Send processing message
+
+                    # Tell user we’re generating right away
                     mid = await send_whatsapp_reply_cloud(
                         to_waid=from_waid,
                         body=vto_messages["processing"],
-                        phone_number_id=outbound_pnid
+                        phone_number_id=outbound_pnid,
                     )
                     out_msgs.append(("text", vto_messages["processing"], mid))
-                    
-                    # Generate VTO
+
+                    # Run VTO
                     try:
-                        vto_config = VTOConfig(
-                            base_steps=60,
-                            add_watermark=False
-                        )
-                        
+                        garment_bytes = await _resolve_garment_bytes(vto_state)
                         result_bytes = await generate_vto_image(
                             person_bytes=vto_state["person_image"],
-                            garment_bytes=vto_state["garment_image"],
-                            cfg=vto_config
+                            garment_bytes=garment_bytes,
+                            cfg=VTOConfig(base_steps=60, add_watermark=False),
                         )
-                        
-                        # Save result image and get public URL
-                        result_url = _save_public_png_and_get_url(result_bytes)
-                        
-                        if result_url:
-                            # Send VTO result
-                            mid = await send_whatsapp_image_cloud(
+                        # Send result
+                        public_url = _save_public_png_and_get_url(result_bytes)
+                        if public_url:
+                            result_mid = await send_whatsapp_image_cloud(
                                 to_waid=from_waid,
-                                image_url=result_url,
+                                image_url=public_url,
                                 caption=vto_messages["ready"],
-                                phone_number_id=outbound_pnid
+                                phone_number_id=outbound_pnid,
                             )
-                            out_msgs.append(("image", vto_messages["ready"], mid, result_url))
+                            out_msgs.append(("image", vto_messages["ready"], result_mid, public_url))
                         else:
-                            # Fallback: send as text if image hosting fails
-                            mid = await send_whatsapp_reply_cloud(
+                            # hosting not configured
+                            result_mid = await send_whatsapp_reply_cloud(
                                 to_waid=from_waid,
-                                body=f"{vto_messages['ready']} (Image generated but hosting unavailable)",
-                                phone_number_id=outbound_pnid
+                                body=f"{vto_messages['ready']} (image hosting unavailable)",
+                                phone_number_id=outbound_pnid,
                             )
-                            out_msgs.append(("text", f"{vto_messages['ready']} (Image generated but hosting unavailable)", mid))
-                        
-                        # Clear VTO state
-                        _clear_vto_state(session_key)
-                        return True, out_msgs
-                        
-                    except Exception as e:
+                            out_msgs.append(("text", f"{vto_messages['ready']} (image hosting unavailable)", result_mid))
+
+                        # Clear VTO session
+                        _set({"active": False})
+                        logging.info("[VTO][DONE] session=%s (state cleared)", session_key)
+
+                    except Exception:
                         logging.exception("[VTO] Generation failed")
-                        mid = await send_whatsapp_reply_cloud(
+                        fail_mid = await send_whatsapp_reply_cloud(
                             to_waid=from_waid,
                             body=vto_messages["error"],
-                            phone_number_id=outbound_pnid
+                            phone_number_id=outbound_pnid,
                         )
-                        out_msgs.append(("text", vto_messages["error"], mid))
-                        
-                        # Clear VTO state on error
-                        _clear_vto_state(session_key)
-                        return True, out_msgs
-                        
-            except Exception as e:
-                logging.exception("[VTO] Image processing failed")
+                        out_msgs.append(("text", vto_messages["error"], fail_mid))
+                        _set({})  # reset state
+                        logging.info("[VTO][RESET] session=%s due to failure", session_key)
+
+                    logging.info(
+                        "[VTO] post-handle (normal flow) | session=%s active=%s step=%s person=%s garment_bytes=%s garment_url=%s",
+                        session_key, _get().get("active"), _get().get("step"),
+                        "yes" if _get().get("person_image") else "no",
+                        "yes" if _get().get("garment_image") else "no",
+                        "yes" if _get().get("garment_image_url") else "no",
+                    )
+                    return True, out_msgs
+
+                # otherwise we still need a garment photo
+                vto_state["step"] = "need_garment"
+                _set(vto_state)
                 mid = await send_whatsapp_reply_cloud(
                     to_waid=from_waid,
-                    body=vto_messages["invalid_image"],
-                    phone_number_id=outbound_pnid
+                    body=vto_messages["need_garment"],
+                    phone_number_id=outbound_pnid,
                 )
-                out_msgs.append(("text", vto_messages["invalid_image"], mid))
+                out_msgs.append(("text", vto_messages["need_garment"], mid))
+                logging.info("[VTO][PHASE] session=%s moved -> need_garment", session_key)
                 return True, out_msgs
-    
-    return False, []
+
+            # If we were waiting for the garment
+            elif current_step == "need_garment":
+                vto_state["garment_image"] = img_bytes
+                _set(vto_state)
+
+                logging.info("[VTO][READY] Both images present for session=%s (person=%s; garment=bytes)",
+                             session_key, "yes" if vto_state.get("person_image") else "no")
+
+                # Tell user we're generating
+                mid = await send_whatsapp_reply_cloud(
+                    to_waid=from_waid,
+                    body=vto_messages["processing"],
+                    phone_number_id=outbound_pnid,
+                )
+                out_msgs.append(("text", vto_messages["processing"], mid))
+
+                # Run VTO
+                try:
+                    person = vto_state.get("person_image")
+                    garment = vto_state.get("garment_image")
+                    result_bytes = await generate_vto_image(
+                        person_bytes=person,
+                        garment_bytes=garment,
+                        cfg=VTOConfig(base_steps=60, add_watermark=False),
+                    )
+
+                    public_url = _save_public_png_and_get_url(result_bytes)
+                    if public_url:
+                        result_mid = await send_whatsapp_image_cloud(
+                            to_waid=from_waid,
+                            image_url=public_url,
+                            caption=vto_messages["ready"],
+                            phone_number_id=outbound_pnid,
+                        )
+                        out_msgs.append(("image", vto_messages["ready"], result_mid, public_url))
+                    else:
+                        result_mid = await send_whatsapp_reply_cloud(
+                            to_waid=from_waid,
+                            body=f"{vto_messages['ready']} (image hosting unavailable)",
+                            phone_number_id=outbound_pnid,
+                        )
+                        out_msgs.append(("text", f"{vto_messages['ready']} (image hosting unavailable)", result_mid))
+
+                    _set({"active": False})
+                    logging.info("[VTO][DONE] session=%s (state cleared)", session_key)
+
+                except Exception:
+                    logging.exception("[VTO] Generation failed")
+                    fail_mid = await send_whatsapp_reply_cloud(
+                        to_waid=from_waid,
+                        body=vto_messages["error"],
+                        phone_number_id=outbound_pnid,
+                    )
+                    out_msgs.append(("text", vto_messages["error"], fail_mid))
+                    _set({})  # reset state
+                    logging.info("[VTO][RESET] session=%s due to failure", session_key)
+
+                logging.info(
+                    "[VTO] post-handle (normal flow) | session=%s active=%s step=%s person=%s garment_bytes=%s garment_url=%s",
+                    session_key, _get().get("active"), _get().get("step"),
+                    "yes" if _get().get("person_image") else "no",
+                    "yes" if _get().get("garment_image") else "no",
+                    "yes" if _get().get("garment_image_url") else "no",
+                )
+                return True, out_msgs
+
+        except Exception:
+            logging.exception("[VTO] image handling error")
+
+    # No VTO action taken
+    logging.info(
+        "[VTO] post-handle (normal flow) | session=%s active=%s step=%s person=%s garment_bytes=%s garment_url=%s",
+        session_key, vto_state.get("active"), vto_state.get("step"),
+        "yes" if vto_state.get("person_image") else "no",
+        "yes" if vto_state.get("garment_image") else "no",
+        "yes" if vto_state.get("garment_image_url") else "no",
+    )
+    return False, out_msgs
+
 
 @router.post("/webhook")
 async def receive_cloud_webhook(request: Request):
