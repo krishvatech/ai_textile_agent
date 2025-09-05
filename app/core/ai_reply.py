@@ -2312,8 +2312,50 @@ async def analyze_message(
             "reply_text": reply
             # intentionally no "followup_reply"
         }
+        # --- virtual try-on (ask only for person image, sentence format)
+    elif intent_type == "virtual_try_on":
+        acc_entities["vto_requested"] = True
+        have_person = any(
+            acc_entities.get(k)
+            for k in ("person_image_id", "person_image", "person_photo_id", "person_photo_url")
+        )
 
-    
+        lr = (language or "en-IN").split("-")[0].lower()
+        if not have_person:
+            if lr == "hi":
+                reply_text = (
+                    "कृपया एक स्पष्ट, सामने से ली गई *फुल-बॉडी* (या *वेस्ट-अप*) फोटो साझा करें—"
+                    "अच्छी रोशनी और सादा बैकग्राउंड के साथ—ताकि हम आपके फोटो पर virtual try-on कर सकें."
+                )
+            elif lr == "gu":
+                reply_text = (
+                    "કૃપા કરીને એક સ્પષ્ટ, આગળથી લેવાયેલ *ફુલ-બોડી* (અથવા *વેસ્ટ-અપ*) ફોટો મોકલો—"
+                    "સારો પ્રકાશ અને સાદા બેકગ્રાઉન્ડ સાથે—તેથી અમે તમારા ફોટા પર virtual try-on કરી શકીએ."
+                )
+            else:
+                reply_text = (
+                    "Please share a clear, front-facing *full-body* (or *waist-up*) photo in good lighting with a plain background, "
+                    "so we can run the virtual try-on on your photo."
+                )
+            acc_entities["vto_need_person_photo"] = True
+
+        history.append({"role": "assistant", "content": reply_text})
+        session_memory[sk] = history
+        session_entities[sk] = acc_entities
+
+        payload = {
+            "input_text": text,
+            "language": language,
+            "intent_type": "virtual_try_on",
+            "history": history,
+            "collected_entities": acc_entities,
+        }
+        if mode == "call":
+            payload["answer"] = reply_text
+        else:
+            payload["reply_text"] = reply_text
+        return payload
+
     # --- other / fallback
     elif intent_type == "other" or intent_type is None:
         def _is_missing(v): 

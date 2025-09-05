@@ -119,7 +119,7 @@ load_dotenv()
 
 # Point this to your local webhook route
 # If your endpoint is /meta/webhook, change the default below accordingly.
-WEBHOOK_URL = os.getenv("WHATSAPP_WEBHOOK_URL", "http://localhost:8001/whatsapp/webhook")
+WEBHOOK_URL = os.getenv("WHATSAPP_WEBHOOK_URL", "http://localhost:8000/whatsapp/webhook")
 
 DISPLAY_PHONE_NUMBER = os.getenv("DISPLAY_PHONE_NUMBER", "919274417433")
 PHONE_NUMBER_ID      = os.getenv("PHONE_NUMBER_ID", "805136529344134")
@@ -240,6 +240,7 @@ async def _post_json(url: str, payload: dict):
         return ok, resp
         
     except Exception as e:
+        logging.error("❌ Request failed: %s",resp.status_code)
         logging.error("❌ Request failed: %s", e)
         print(f"❌ Request failed: {e}")
         return False, None
@@ -292,6 +293,96 @@ async def simulate_swipe_reply(url: str, from_waid: str, text: str, reply_to_msg
     
     return success
 
+async def simulate_image_message(url: str, from_waid: str, image_url: str = None, caption: str = None):
+    """
+    Simulate sending an image message (for virtual try-on testing)
+    """
+    # Default test image if none provided
+    if not image_url:
+        image_url = "https://example.com/test-image.jpg"  # Replace with your test image URL
+    
+    payload = _base_payload(from_waid)
+    
+    image_msg = {
+        "from": from_waid,
+        "id": _new_wamid("USER_IMAGE"),
+        "timestamp": _now_ts(),
+        "type": "image",
+        "image": {
+            "mime_type": "image/jpeg",
+            "sha256": "test_sha256_hash",  # In real scenarios, this would be actual hash
+            "id": f"image_id_{int(time.time())}"
+        }
+    }
+    
+    # Add caption if provided
+    if caption:
+        image_msg["image"]["caption"] = caption
+    
+    # Add the image URL for testing purposes (not part of actual WhatsApp format)
+    image_msg["image"]["link"] = image_url
+    
+    payload["entry"][0]["changes"][0]["value"]["messages"] = [image_msg]
+    
+    print(f"\n📸 Sending IMAGE from {from_waid}")
+    print(f"   URL: {image_url}")
+    if caption:
+        print(f"   Caption: {caption!r}")
+    
+    success, resp = await _post_json(url, payload)
+    
+    if success:
+        print("✅ Image sent successfully!")
+    else:
+        print("❌ Image failed to send!")
+    
+    return success
+
+async def simulate_image_reply(url: str, from_waid: str, image_url: str, reply_to_msg_id: str, caption: str = None):
+    """
+    Simulate replying to a message with an image (e.g., user photo for virtual try-on)
+    """
+    if not image_url:
+        image_url = "https://example.com/user-photo.jpg"
+    
+    payload = _base_payload(from_waid)
+    
+    image_msg = {
+        "context": {
+            "from": DISPLAY_PHONE_NUMBER,
+            "id": reply_to_msg_id
+        },
+        "from": from_waid,
+        "id": _new_wamid("USER_IMAGE_REPLY"),
+        "timestamp": _now_ts(),
+        "type": "image",
+        "image": {
+            "mime_type": "image/jpeg",
+            "sha256": "test_sha256_hash",
+            "id": f"image_id_{int(time.time())}",
+            "link": image_url
+        }
+    }
+    
+    if caption:
+        image_msg["image"]["caption"] = caption
+    
+    payload["entry"][0]["changes"][0]["value"]["messages"] = [image_msg]
+    
+    print(f"\n📸 Sending IMAGE-REPLY from {from_waid} to {reply_to_msg_id}")
+    print(f"   URL: {image_url}")
+    if caption:
+        print(f"   Caption: {caption!r}")
+    
+    success, resp = await _post_json(url, payload)
+    
+    if success:
+        print("✅ Image reply sent successfully!")
+    else:
+        print("❌ Image reply failed to send!")
+    
+    return success
+
 # ────────────────────────────────────────────────────────────────────────────────
 # Interactive CLI
 # ────────────────────────────────────────────────────────────────────────────────
@@ -329,30 +420,51 @@ async def main():
 
     while True:
         print("\nWhat do you want to send?")
-        print("  1) Normal text (no context)")
-        print("  2) Swipe-Reply (reply to a bot msg_id)")
-        print("  3) Exit")
+        print(" 1) Normal text (no context)")
+        print(" 2) Swipe-Reply (reply to a bot msg_id)")
+        print(" 3) Send image")
+        print(" 4) Reply with image (for virtual try-on)")
+        print(" 5) Exit")
         choice = (input("Choice: ").strip() or "1")
 
-        if choice == "3":
+        if choice == "5":
             print("👋 Bye!")
             break
 
-        if choice not in ("1", "2"):
-            print("⚠️  Invalid choice, try again.")
+        if choice not in ("1", "2", "3", "4"):
+            print("⚠️ Invalid choice, try again.")
             continue
 
-        text = input("Enter message text: ").strip() or "I want this"
-
         if choice == "1":
+            text = input("Enter message text: ").strip() or "I want this"
             await simulate_normal_text(WEBHOOK_URL, from_waid, text)
-        else:
-            print("\nℹ️  For SWIPE-REPLY you need the *bot* message id to reply to.")
+            
+        elif choice == "2":
+            text = input("Enter message text: ").strip() or "I want this"
+            print("\nℹ️ For SWIPE-REPLY you need the *bot* message id to reply to.")
             reply_to_msg_id = input("Paste bot msg_id (starts with 'wamid.'): ").strip()
             if not reply_to_msg_id:
-                print("⚠️  Missing msg_id; aborting this attempt.")
+                print("⚠️ Missing msg_id; aborting this attempt.")
                 continue
             await simulate_swipe_reply(WEBHOOK_URL, from_waid, text, reply_to_msg_id)
+            
+        elif choice == "3":
+            image_url = input("Enter image URL (or press Enter for test image): ").strip()
+            caption = input("Enter image caption (optional): ").strip() or None
+            await simulate_image_message(WEBHOOK_URL, from_waid, image_url, caption)
+            
+        elif choice == "4":
+            print("\nℹ️ This will reply to a bot message with an image (for virtual try-on)")
+            reply_to_msg_id = input("Paste bot msg_id that requested the photo: ").strip()
+            if not reply_to_msg_id:
+                print("⚠️ Missing msg_id; aborting this attempt.")
+                continue
+            image_url = input("Enter your photo URL: ").strip()
+            if not image_url:
+                image_url = "https://example.com/user-full-body-photo.jpg"
+                print(f"Using default test image: {image_url}")
+            await simulate_image_reply(WEBHOOK_URL, from_waid, image_url, reply_to_msg_id)
+
 
 if __name__ == "__main__":
     try:

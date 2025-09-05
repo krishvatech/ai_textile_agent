@@ -1,4 +1,5 @@
 # app/api/whatsapp.py
+
 from fastapi import FastAPI, Request, Response, APIRouter
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
@@ -16,6 +17,7 @@ from app.core.chat_persistence import (
     get_or_open_active_session,
     append_transcript_message,
 )
+
 from app.services.wa_media import download_media_bytes
 from app.services.wa_media import get_media_url_and_meta
 from app.services.visual_search import visual_search_bytes_sync, format_matches_for_whatsapp_images,group_matches_by_product
@@ -24,9 +26,13 @@ from app.core.product_pick_ import (
     get_attrs_for_product_async,
     extract_attrs_from_text,find_assistant_image_caption_by_msg_id,find_prev_assistant_image_caption,_ensure_allowed_lists
 )
+
+from uuid import uuid4
+# ADD VTO IMPORT
+from app.core.virtual_try_on import generate_vto_image, VTOConfig
 import re
 from sqlalchemy import text
-from app.db.session import SessionLocal  # ensure this is imported
+from app.db.session import SessionLocal # ensure this is imported
 
 # Load environment variables
 load_dotenv()
@@ -36,6 +42,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO
 )
+
 logging.info("Conversation language remains as")
 
 WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
@@ -46,7 +53,30 @@ router = APIRouter()
 
 # Simple in-memory deduplication for processed incoming message SIDs
 processed_message_sids = {}
+
 mode = "chat"
+
+# VTO STATE MANAGEMENT - KEEP EXISTING
+_vto_state: dict[str, dict] = {}
+
+# ADD NEW VTO STATE FUNCTIONS
+def _get_vto_state(session_key: str) -> dict:
+    """Get VTO state for a session"""
+    return _vto_state.get(session_key, {})
+
+def _set_vto_state(session_key: str, state: dict):
+    """Set VTO state for a session"""
+    _vto_state[session_key] = state
+
+def _clear_vto_state(session_key: str):
+    """Clear VTO state for a session"""
+    _vto_state.pop(session_key, None)
+
+def _is_vto_flow_active(session_key: str) -> bool:
+    """Check if VTO flow is active for this session"""
+    state = _get_vto_state(session_key)
+    return state.get("active", False)
+
 
 
 async def get_tenant_id_by_phone(phone_number: str, db):
@@ -61,7 +91,6 @@ async def get_tenant_id_by_phone(phone_number: str, db):
         return row[0]
     return None
 
-
 async def update_customer_language(db, customer_id: int, language: str):
     """
     Update the preferred_language for a customer in the database.
@@ -69,7 +98,6 @@ async def update_customer_language(db, customer_id: int, language: str):
     query = text("UPDATE customers SET preferred_language = :language WHERE id = :customer_id")
     await db.execute(query, {"language": language, "customer_id": customer_id})
     # No commit here; it's handled in the main flow
-
 
 async def get_tenant_name_by_phone(phone_number: str, db):
     query = text("SELECT name FROM tenants WHERE whatsapp_number = :phone AND is_active = true LIMIT 1")
@@ -86,20 +114,24 @@ async def get_tenant_fabric_by_phone(phone_number: str, db):
                 LIMIT 1"""),
         {"phone": phone_number}
     )).scalar()
+
     if not tid:
         return []
+
     # 2) Helper: does table.column exist?
     async def col_exists(table: str, col: str) -> bool:
         q = text("""
             SELECT 1
             FROM information_schema.columns
             WHERE table_name = :table
-              AND column_name = :col
-              AND table_schema = ANY (current_schemas(false))
+            AND column_name = :col
+            AND table_schema = ANY (current_schemas(false))
             LIMIT 1
         """)
         return (await db.execute(q, {"table": table, "col": col})).first() is not None
+
     sources = []
+
     # product_variants.fabric (if present)
     if await col_exists("product_variants", "fabric"):
         sources.append("""
@@ -107,11 +139,13 @@ async def get_tenant_fabric_by_phone(phone_number: str, db):
             FROM product_variants pv
             JOIN products p ON p.id = pv.product_id
             WHERE p.tenant_id = :tid
-              AND pv.fabric IS NOT NULL
-              AND TRIM(pv.fabric) <> ''
+            AND pv.fabric IS NOT NULL
+            AND TRIM(pv.fabric) <> ''
         """)
+
     if not sources:
         return []
+
     union_sql = " UNION ALL ".join(sources)
     final_sql = f"SELECT DISTINCT fab FROM ({union_sql}) s"
     result = await db.execute(text(final_sql), {"tid": tid})
@@ -127,20 +161,24 @@ async def get_tenant_color_by_phone(phone_number: str, db):
                 LIMIT 1"""),
         {"phone": phone_number}
     )).scalar()
+
     if not tid:
         return []
+
     # 2) Helper: does table.column exist?
     async def col_exists(table: str, col: str) -> bool:
         q = text("""
             SELECT 1
             FROM information_schema.columns
             WHERE table_name = :table
-              AND column_name = :col
-              AND table_schema = ANY (current_schemas(false))
+            AND column_name = :col
+            AND table_schema = ANY (current_schemas(false))
             LIMIT 1
         """)
         return (await db.execute(q, {"table": table, "col": col})).first() is not None
+
     sources = []
+
     # product_variants.fabric (if present)
     if await col_exists("product_variants", "color"):
         sources.append("""
@@ -148,11 +186,13 @@ async def get_tenant_color_by_phone(phone_number: str, db):
             FROM product_variants pv
             JOIN products p ON p.id = pv.product_id
             WHERE p.tenant_id = :tid
-              AND pv.color IS NOT NULL
-              AND TRIM(pv.color) <> ''
+            AND pv.color IS NOT NULL
+            AND TRIM(pv.color) <> ''
         """)
+
     if not sources:
         return []
+
     union_sql = " UNION ALL ".join(sources)
     final_sql = f"SELECT DISTINCT fab FROM ({union_sql}) s"
     result = await db.execute(text(final_sql), {"tid": tid})
@@ -168,20 +208,24 @@ async def get_tenant_size_by_phone(phone_number: str, db):
                 LIMIT 1"""),
         {"phone": phone_number}
     )).scalar()
+
     if not tid:
         return []
+
     # 2) Helper: does table.column exist?
     async def col_exists(table: str, col: str) -> bool:
         q = text("""
             SELECT 1
             FROM information_schema.columns
             WHERE table_name = :table
-              AND column_name = :col
-              AND table_schema = ANY (current_schemas(false))
+            AND column_name = :col
+            AND table_schema = ANY (current_schemas(false))
             LIMIT 1
         """)
         return (await db.execute(q, {"table": table, "col": col})).first() is not None
+
     sources = []
+
     # product_variants.fabric (if present)
     if await col_exists("product_variants", "size"):
         sources.append("""
@@ -189,11 +233,13 @@ async def get_tenant_size_by_phone(phone_number: str, db):
             FROM product_variants pv
             JOIN products p ON p.id = pv.product_id
             WHERE p.tenant_id = :tid
-              AND pv.size IS NOT NULL
-              AND TRIM(pv.size) <> ''
+            AND pv.size IS NOT NULL
+            AND TRIM(pv.size) <> ''
         """)
+
     if not sources:
         return []
+
     union_sql = " UNION ALL ".join(sources)
     final_sql = f"SELECT DISTINCT fab FROM ({union_sql}) s"
     result = await db.execute(text(final_sql), {"tid": tid})
@@ -208,17 +254,17 @@ async def get_tenant_category_by_phone(phone_number: str, db):
     """
     query = text("""
         WITH t AS (
-          SELECT id
-          FROM tenants
-          WHERE whatsapp_number = :phone AND is_active = true
-          LIMIT 1
+            SELECT id
+            FROM tenants
+            WHERE whatsapp_number = :phone AND is_active = true
+            LIMIT 1
         )
         -- pull from products.category
         SELECT DISTINCT LOWER(TRIM(p.category)) AS cat
         FROM products p, t
         WHERE p.tenant_id = t.id
-          AND p.category IS NOT NULL
-          AND TRIM(p.category) <> '';
+        AND p.category IS NOT NULL
+        AND TRIM(p.category) <> '';
     """)
     result = await db.execute(query, {"phone": phone_number})
     rows = result.fetchall() or []
@@ -233,67 +279,102 @@ async def get_tenant_type_by_phone(phone_number: str, db):
     """
     query = text("""
         WITH t AS (
-          SELECT id
-          FROM tenants
-          WHERE whatsapp_number = :phone AND is_active = true
-          LIMIT 1
+            SELECT id
+            FROM tenants
+            WHERE whatsapp_number = :phone AND is_active = true
+            LIMIT 1
         )
         -- pull from products.type
         SELECT DISTINCT LOWER(TRIM(p.type)) AS cat
         FROM products p, t
         WHERE p.tenant_id = t.id
-          AND p.type IS NOT NULL
-          AND TRIM(p.type) <> '';
+        AND p.type IS NOT NULL
+        AND TRIM(p.type) <> '';
     """)
     result = await db.execute(query, {"phone": phone_number})
     rows = result.fetchall() or []
     # return a simple Python list of strings
     return [r[0] for r in rows]
 
-
-# occasion by tenant_id
 # occasion bby tenant_id
 async def get_tenant_occasion_by_phone(phone_number: str, db):
     """
     Return a lowercase, de-duplicated list of occasion names available for the tenant
     mapped to this WhatsApp number.
-
     Uses:
-      tenants.whatsapp_number -> tenants.id
-      products.tenant_id -> products.id
-      product_variants.product_id -> product_variants.id
-      product_variant_occasions.variant_id -> occasions.id
+    tenants.whatsapp_number -> tenants.id
+    products.tenant_id -> products.id
+    product_variants.product_id -> product_variants.id
+    product_variant_occasions.variant_id -> occasions.id
     Filters out empty names and (by default) inactive variants.
     """
     query = text("""
         WITH t AS (
-          SELECT id
-          FROM tenants
-          WHERE whatsapp_number = :phone
+            SELECT id
+            FROM tenants
+            WHERE whatsapp_number = :phone
             AND is_active = TRUE
-          ORDER BY id
-          LIMIT 1
+            ORDER BY id
+            LIMIT 1
         )
         SELECT DISTINCT LOWER(TRIM(o.name)) AS occ
         FROM t
         JOIN products p
-          ON p.tenant_id = t.id
+            ON p.tenant_id = t.id
         JOIN product_variants pv
-          ON pv.product_id = p.id
+            ON pv.product_id = p.id
         JOIN product_variant_occasions pvo
-          ON pvo.variant_id = pv.id
+            ON pvo.variant_id = pv.id
         JOIN occasions o
-          ON o.id = pvo.occasion_id
+            ON o.id = pvo.occasion_id
         WHERE COALESCE(pv.is_active, TRUE) = TRUE
-          AND o.name IS NOT NULL
-          AND TRIM(o.name) <> '';
+        AND o.name IS NOT NULL
+        AND TRIM(o.name) <> '';
     """)
     result = await db.execute(query, {"phone": phone_number})
     rows = result.fetchall() or []
     return [r[0] for r in rows]
 
+def _save_public_png_and_get_url(png_bytes: bytes) -> str | None:
+    base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+    static_dir = os.getenv("PUBLIC_STATIC_DIR", "")
+    if not base or not static_dir:
+        return None  # You'll fall back to text if you don't configure hosting
 
+    try:
+        os.makedirs(static_dir, exist_ok=True)
+        name = f"vto_{uuid4().hex}.png"
+        fpath = os.path.join(static_dir, name)
+        with open(fpath, "wb") as f:
+            f.write(png_bytes)
+        return f"{base}/static/{name}"
+    except Exception:
+        logging.exception("Failed to save VTO public file")
+        return None
 
+async def _get_replied_bot_image_url(db, chat_session_id: int, replied_message_id: str | None) -> str | None:
+    """Return the image URL from the assistant message the user replied to."""
+    if not replied_message_id:
+        return None
+
+    # If you already have helpers like below, prefer them:
+    try:
+        # Example: replace by your own query helpers if they exist.
+        cap = await find_assistant_image_caption_by_msg_id(db, replied_message_id)  # ← your helper
+        if isinstance(cap, dict):
+            return cap.get("image_url") or cap.get("url")
+    except Exception:
+        pass
+
+    # Fallback: last assistant image in this session (implement to match your schema)
+    try:
+        rec = await find_prev_assistant_image_caption(db, chat_session_id)  # ← your helper
+        if isinstance(rec, dict):
+            return rec.get("image_url") or rec.get("url")
+    except Exception:
+        pass
+
+    return None
 
 async def send_whatsapp_reply_cloud(
     to_waid: str,
@@ -303,6 +384,7 @@ async def send_whatsapp_reply_cloud(
 ) -> str | None:
     msg = body if isinstance(body, str) else (body.get("reply_text") if isinstance(body, dict) else str(body))
     pnid = phone_number_id  # fallback only if you still keep it for legacy
+
     if not pnid or not WHATSAPP_TOKEN:
         logging.error("Cloud API missing: phone_number_id or WHATSAPP_TOKEN")
         return None
@@ -314,18 +396,21 @@ async def send_whatsapp_reply_cloud(
         "type": "text",
         "text": {"body": (msg or "")[:4096]},
     }
+
     if context_msg_id:
         payload["context"] = {"message_id": context_msg_id}
 
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.post(url, json=payload, headers=headers)
-    logging.info(f"[CLOUD] Send resp: {resp.status_code} {resp.text}")
-    try:
-        data = resp.json()
-        return (data.get("messages") or [{}])[0].get("id")
-    except Exception:
-        return None
+        logging.info(f"[CLOUD] Send resp: {resp.status_code} {resp.text}")
+
+        try:
+            data = resp.json()
+            return (data.get("messages") or [{}])[0].get("id")
+        except Exception:
+            return None
 
 async def send_whatsapp_image_cloud(
     to_waid: str,
@@ -335,6 +420,7 @@ async def send_whatsapp_image_cloud(
     phone_number_id: str | None = None,
 ) -> str | None:
     pnid = phone_number_id
+
     if not pnid or not WHATSAPP_TOKEN:
         logging.error("Cloud API missing: phone_number_id or WHATSAPP_TOKEN")
         return None
@@ -346,29 +432,34 @@ async def send_whatsapp_image_cloud(
         "type": "image",
         "image": {"link": image_url},
     }
+
     if caption:
         payload["image"]["caption"] = caption[:1024]
+
     if context_msg_id:
         payload["context"] = {"message_id": context_msg_id}
 
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.post(url, json=payload, headers=headers)
-    logging.info(f"[CLOUD] Send image resp: {resp.status_code} {resp.text}")
-    try:
-        data = resp.json()
-        return (data.get("messages") or [{}])[0].get("id")
-    except Exception:
-        return None
+        logging.info(f"[CLOUD] Send image resp: {resp.status_code} {resp.text}")
+
+        try:
+            data = resp.json()
+            return (data.get("messages") or [{}])[0].get("id")
+        except Exception:
+            return None
 
 # ------- Normalize Phone ----------
+
 def _normalize_waid_phone(waid: str | None) -> str | None:
     """Turn '918799559020' into '+918799559020' for customers.phone."""
     if not waid:
         return None
+
     digits = re.sub(r"\D+", "", waid)
     return f"+{digits}" if digits else None
-
 
 def _normalize_url(u: str | None) -> str | None:
     if not u:
@@ -380,14 +471,14 @@ def _normalize_url(u: str | None) -> str | None:
 
 # def _product_caption(prod: dict) -> str:
 #     name = prod.get("name") or prod.get("product_name") or "Product"
-#     tag  = "Rent" if prod.get("is_rental") else "sale"
-#     url  = _normalize_url(prod.get("product_url") or prod.get("image_url"))
-#     cap  = f"{name} - {tag}" + (f" — {url}" if url else "")
+#     tag = "Rent" if prod.get("is_rental") else "sale"
+#     url = _normalize_url(prod.get("product_url") or prod.get("image_url"))
+#     cap = f"{name} - {tag}" + (f" — {url}" if url else "")
 #     return cap[:1024]
 
 def _product_caption(prod: dict) -> str:
     name = prod.get("name") or prod.get("product_name") or "Product"
-    url  = _normalize_url(prod.get("product_url") or prod.get("image_url"))
+    url = _normalize_url(prod.get("product_url") or prod.get("image_url"))
 
     # helpers
     def _to_bool(v):
@@ -411,23 +502,23 @@ def _product_caption(prod: dict) -> str:
             return str(val)
 
     is_rental = _to_bool(prod.get("is_rental"))
-
     if is_rental:
         label = "Rent"
         amount = _fmt_money(prod.get("rental_price"))
     else:
         label = "Sale"
         price = (prod.get("price") or prod.get("sale_price") or prod.get("selling_price")
-                 or prod.get("variant_price") or prod.get("current_price"))
+                or prod.get("variant_price") or prod.get("current_price"))
         amount = _fmt_money(price)
 
     cap = f"{name}\n{label}: {amount}\n"
     if url:
         cap += f"Webiste: {url}"
+
     return cap[:1024]
 
-
 # ---------- NEW HELPERS: direct product pick ----------
+
 async def get_tenant_products_by_phone(phone_number: str, db):
     """
     Return list[(product_id, product_name)] for the tenant mapped to business WhatsApp number.
@@ -435,13 +526,13 @@ async def get_tenant_products_by_phone(phone_number: str, db):
     """
     q = text("""
         WITH t AS (
-          SELECT id FROM tenants WHERE whatsapp_number = :phone AND is_active = true LIMIT 1
+            SELECT id FROM tenants WHERE whatsapp_number = :phone AND is_active = true LIMIT 1
         )
         SELECT p.id, p.name
         FROM products p, t
         WHERE p.tenant_id = t.id
-          AND p.name IS NOT NULL
-          AND TRIM(p.name) <> ''
+        AND p.name IS NOT NULL
+        AND TRIM(p.name) <> ''
     """)
     rows = (await db.execute(q, {"phone": phone_number})).fetchall() or []
     return [(r[0], r[1]) for r in rows]
@@ -453,7 +544,7 @@ async def get_transcript_by_phone(phone_number: str, db):
             SELECT id
             FROM customers
             WHERE phone = :phone
-              AND is_active = TRUE
+            AND is_active = TRUE
             LIMIT 1
         )
         SELECT cs.transcript
@@ -464,12 +555,14 @@ async def get_transcript_by_phone(phone_number: str, db):
     """)
     result = await db.execute(query, {"phone": phone_number})
     result = result.scalar_one_or_none()
+
     if result is None:
         return []
-    
+
     # If stored as text, decode; if JSONB, driver already gives list/dict
     if isinstance(result, (bytes, bytearray)):
         result = result.decode("utf-8", errors="ignore")
+
     if isinstance(result, str):
         try:
             return json.loads(result)
@@ -477,7 +570,6 @@ async def get_transcript_by_phone(phone_number: str, db):
             return []
 
     return result if isinstance(result, (list, dict)) else []
-
 
 def _normalize_messages(transcript):
     """
@@ -503,9 +595,11 @@ def _normalize_messages(transcript):
             val = data.get(key)
             if isinstance(val, list):
                 return val
+
         # If the whole dict is a single message, wrap it
         if {"role", "msg_id"} <= set(data.keys()):
             return [data]
+
         return []
 
     return []
@@ -530,21 +624,26 @@ def find_assistant_text_by_msg_id(messages: list[dict], msg_id: str) -> str | No
     return None
 
 # --- Cloud API Webhook (Meta) ----------------------------------------------
+
 processed_meta_msg_ids = set()
 
 @router.get("/webhook")
 async def verify_cloud_webhook(request: Request):
     """Meta verification handshake: echo hub.challenge if token matches."""
     params = request.query_params
+
     mode = params.get("hub.mode")
     token = params.get("hub.verify_token")
     challenge = params.get("hub.challenge", "")
+
     logging.info("-------In Get Method Webhook-----")
+
     if mode == "subscribe" and token == WHATSAPP_VERIFY_TOKEN:
         try:
             return int(challenge)
         except ValueError:
             return challenge
+
     return Response(status_code=403)
 
 def _valid_signature(app_secret: str, raw: bytes, header: str) -> bool:
@@ -552,6 +651,7 @@ def _valid_signature(app_secret: str, raw: bytes, header: str) -> bool:
         return True
     if not header or not header.startswith("sha256="):
         return False
+
     import hmac, hashlib
     expected = "sha256=" + hmac.new(app_secret.encode(), raw, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, header)
@@ -567,9 +667,9 @@ def _primary_image_for_product(prod: dict) -> str | None:
 def find_entities_by_msg_id(messages: list[dict], msg_id: str):
     """
     Return the entities saved alongside an assistant message, searching:
-      1) the exact message (meta.entities)
-      2) a companion row with msg_id == f"{msg_id}:entities"
-         (take meta.entities if present, else parse text as JSON)
+    1) the exact message (meta.entities)
+    2) a companion row with msg_id == f"{msg_id}:entities"
+       (take meta.entities if present, else parse text as JSON)
     """
     if not msg_id:
         return None
@@ -619,8 +719,8 @@ def _merge_entities(base: dict | None, overlay: dict | None, override: bool = Fa
         else:
             if k not in merged or merged[k] in (None, "", [], {}):
                 merged[k] = v
-    return merged
 
+    return merged
 
 # ----------- Static FollowUp For Visual Search -------------
 def _visual_followup_text(lang: str = "en-IN") -> str:
@@ -632,14 +732,14 @@ def _visual_followup_text(lang: str = "en-IN") -> str:
     }
     return m.get(lang, m["en-IN"])
 
-
 # ---- helper: normalize out_msgs tuples ----
 def _iter_out_msgs_with_meta(out_msgs):
     """
     Accepts tuples of either:
-      ("text", caption, msg_id)
-      ("image", caption, msg_id)
-      ("image", caption, msg_id, image_url)   # preferred for images
+    ("text", caption, msg_id)
+    ("image", caption, msg_id)
+    ("image", caption, msg_id, image_url)  # preferred for images
+
     and always yields (kind, text, msg_id, image_url_or_None).
     """
     for item in out_msgs:
@@ -648,6 +748,7 @@ def _iter_out_msgs_with_meta(out_msgs):
         else:
             kind, txt, mid = item
             img_url = None
+
         yield kind, txt, mid, img_url
 
 # Return digits-only (E.164 without +) for reliable DB matching.
@@ -659,17 +760,262 @@ async def _lookup_display_phone_number_digits(phone_number_id: str) -> str:
     """GET /{phone_number_id}?fields=display_phone_number and normalize."""
     if not WHATSAPP_TOKEN:
         return ""
+
     url = f"https://graph.facebook.com/v20.0/{phone_number_id}"
     params = {"fields": "display_phone_number"}
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(url, params=params, headers=headers)
             data = resp.json()
-        return _normalize_business_number(data.get("display_phone_number"))
+            return _normalize_business_number(data.get("display_phone_number"))
     except Exception:
         logging.exception("[CLOUD] phone_number_id lookup failed")
         return ""
+    
+
+# ADD NEW VTO HELPER FUNCTIONS
+def _detect_vto_keywords(text: str) -> bool:
+    """Detect if user wants virtual try-on"""
+    if not text:
+        return False
+    
+    text_lower = text.lower().strip()
+    
+    # English keywords
+    vto_keywords = [
+        "virtual try on", "virtual try-on", "vto", "try on", "try-on",
+        "how will this look on me", "how would this look", "see on me",
+        "try this", "fit on me", "wear this", "looks on me"
+    ]
+    
+    # Hindi keywords  
+    hindi_keywords = [
+        "वर्चुअल ट्राई ऑन", "ट्राई ऑन", "मुझ पर कैसा लगेगा", "पहनकर दिखाओ"
+    ]
+    
+    # Gujarati keywords
+    gujarati_keywords = [
+        "વર્ચ્યુઅલ ટ્રાય ઓન", "ટ્રાય ઓન", "મારા પર કેવું લાગશે", "પહેરીને બતાવો"
+    ]
+    
+    all_keywords = vto_keywords + hindi_keywords + gujarati_keywords
+    
+    return any(keyword in text_lower for keyword in all_keywords)
+
+def _get_vto_messages(lang: str = "en-IN") -> dict:
+    """Get localized VTO messages"""
+    lr = lang.split('-')[0].lower()
+    
+    if lr == "hi":
+        return {
+            "need_person": "वर्चुअल ट्राई-ऑन के लिए कृपया अपनी एक स्पष्ट, सामने से ली गई पूरे शरीर की या कमर तक की फोटो भेजें। अच्छी रोशनी और सादे बैकग्राउंड के साथ।",
+            "need_garment": "कृपया उस कपड़े की फोटो भेजें जिसे आप ट्राई करना चाहते हैं।",
+            "processing": "🔄 वर्चुअल ट्राई-ऑन तैयार कर रहे हैं... कृपया थोड़ा इंतजार करें।",
+            "ready": "✨ आपका वर्चुअल ट्राई-ऑन तैयार है!",
+            "error": "❌ वर्चुअल ट्राई-ऑन में कोई समस्या हुई। कृपया फिर से कोशिश करें।",
+            "invalid_image": "कृपया एक स्पष्ट फोटो भेजें।"
+        }
+    elif lr == "gu":
+        return {
+            "need_person": "વર્ચ્યુઅલ ટ્રાય-ઓન માટે કૃપા કરીને તમારો એક સ્પષ્ટ, આગળથી લેવાયેલો પૂરા શરીરનો અથવા કમર સુધીનો ફોટો મોકલો. સારા પ્રકાશ અને સાદા બેકગ્રાઉન્ડ સાથે.",
+            "need_garment": "કૃપા કરીને તે કપડાંનો ફોટો મોકલો જેને તમે ટ્રાય કરવા માગો છો.",
+            "processing": "🔄 વર્ચ્યુઅલ ટ્રાય-ઓન તૈયાર કરી રહ્યા છીએ... કૃપા કરી થોડી રાહ જુઓ.",
+            "ready": "✨ તમારો વર્ચ્યુઅલ ટ્રાય-ઓન તૈયાર છે!",
+            "error": "❌ વર્ચ્યુઅલ ટ્રાય-ઓનમાં કોઈ સમસ્યા થઈ. કૃપા કરી ફરીથી પ્રયાસ કરો.",
+            "invalid_image": "કૃપા કરીને એક સ્પષ્ટ ફોટો મોકલો."
+        }
+    else:  # English
+        return {
+            "need_person": "For virtual try-on, please send a clear, front-facing full-body or waist-up photo of yourself with good lighting and plain background.",
+            "need_garment": "Please send the photo of the garment you want to try on.",
+            "processing": "🔄 Generating your virtual try-on... please wait a moment.",
+            "ready": "✨ Your virtual try-on is ready!",
+            "error": "❌ Something went wrong with the virtual try-on. Please try again.",
+            "invalid_image": "Please send a clear photo."
+        }
+
+async def _handle_vto_flow(
+    session_key: str,
+    text_msg: str,
+    mtype: str,
+    msg: dict,
+    from_waid: str,
+    outbound_pnid: str,
+    current_language: str,
+    db,
+    chat_session,
+    msg_id: str
+) -> tuple[bool, list]:
+    """
+    Handle VTO flow logic
+    Returns: (handled: bool, out_msgs: list)
+    """
+    vto_messages = _get_vto_messages(current_language)
+    out_msgs = []
+    
+    # Check if user wants to start VTO
+    if not _is_vto_flow_active(session_key) and _detect_vto_keywords(text_msg):
+        # Start VTO flow
+        _set_vto_state(session_key, {
+            "active": True,
+            "step": "need_person",
+            "person_image": None,
+            "garment_image": None
+        })
+        
+        mid = await send_whatsapp_reply_cloud(
+            to_waid=from_waid,
+            body=vto_messages["need_person"],
+            phone_number_id=outbound_pnid
+        )
+        out_msgs.append(("text", vto_messages["need_person"], mid))
+        return True, out_msgs
+    
+    # Handle VTO flow steps
+    if _is_vto_flow_active(session_key):
+        vto_state = _get_vto_state(session_key)
+        current_step = vto_state.get("step")
+        
+        # Handle text commands in VTO flow
+        if mtype == "text":
+            text_lower = text_msg.lower().strip()
+            
+            # Cancel VTO
+            if text_lower in ["cancel", "stop", "exit", "रद्द करें", "બંધ કરો"]:
+                _clear_vto_state(session_key)
+                cancel_msg = "Virtual try-on cancelled." if current_language.startswith("en") else (
+                    "वर्चुअल ट्राई-ऑन रद्द कर दिया।" if current_language.startswith("hi") else 
+                    "વર્ચ્યુઅલ ટ્રાય-ઓન રદ્દ કર્યું."
+                )
+                mid = await send_whatsapp_reply_cloud(
+                    to_waid=from_waid,
+                    body=cancel_msg,
+                    phone_number_id=outbound_pnid
+                )
+                out_msgs.append(("text", cancel_msg, mid))
+                return True, out_msgs
+            
+            # If user sends text during VTO, remind them to send image
+            reminder = vto_messages.get("need_person" if current_step == "need_person" else "need_garment")
+            mid = await send_whatsapp_reply_cloud(
+                to_waid=from_waid,
+                body=reminder,
+                phone_number_id=outbound_pnid
+            )
+            out_msgs.append(("text", reminder, mid))
+            return True, out_msgs
+        
+        # Handle image uploads
+        if mtype == "image" and "image" in msg:
+            try:
+                img_obj = msg.get("image", {}) if isinstance(msg, dict) else {}
+                media_id = img_obj.get("id")
+                link = img_obj.get("link")
+                is_local = request.headers.get("X-LOCAL-TEST") == "1"
+
+                if is_local and link:
+                    async with httpx.AsyncClient(timeout=30) as hc:
+                        r = await hc.get(link)
+                        r.raise_for_status()
+                        img_bytes = r.content
+                else:
+                    if not media_id:
+                        raise Exception("No media ID")
+                
+                img_bytes = await download_media_bytes(media_id)
+                if not img_bytes:
+                    raise Exception("Failed to download image")
+                
+                # Save image based on current step
+                if current_step == "need_person":
+                    vto_state["person_image"] = img_bytes
+                    vto_state["step"] = "need_garment"
+                    _set_vto_state(session_key, vto_state)
+                    
+                    mid = await send_whatsapp_reply_cloud(
+                        to_waid=from_waid,
+                        body=vto_messages["need_garment"],
+                        phone_number_id=outbound_pnid
+                    )
+                    out_msgs.append(("text", vto_messages["need_garment"], mid))
+                    return True, out_msgs
+                
+                elif current_step == "need_garment":
+                    vto_state["garment_image"] = img_bytes
+                    _set_vto_state(session_key, vto_state)
+                    
+                    # Send processing message
+                    mid = await send_whatsapp_reply_cloud(
+                        to_waid=from_waid,
+                        body=vto_messages["processing"],
+                        phone_number_id=outbound_pnid
+                    )
+                    out_msgs.append(("text", vto_messages["processing"], mid))
+                    
+                    # Generate VTO
+                    try:
+                        vto_config = VTOConfig(
+                            base_steps=60,
+                            add_watermark=False
+                        )
+                        
+                        result_bytes = await generate_vto_image(
+                            person_bytes=vto_state["person_image"],
+                            garment_bytes=vto_state["garment_image"],
+                            cfg=vto_config
+                        )
+                        
+                        # Save result image and get public URL
+                        result_url = _save_public_png_and_get_url(result_bytes)
+                        
+                        if result_url:
+                            # Send VTO result
+                            mid = await send_whatsapp_image_cloud(
+                                to_waid=from_waid,
+                                image_url=result_url,
+                                caption=vto_messages["ready"],
+                                phone_number_id=outbound_pnid
+                            )
+                            out_msgs.append(("image", vto_messages["ready"], mid, result_url))
+                        else:
+                            # Fallback: send as text if image hosting fails
+                            mid = await send_whatsapp_reply_cloud(
+                                to_waid=from_waid,
+                                body=f"{vto_messages['ready']} (Image generated but hosting unavailable)",
+                                phone_number_id=outbound_pnid
+                            )
+                            out_msgs.append(("text", f"{vto_messages['ready']} (Image generated but hosting unavailable)", mid))
+                        
+                        # Clear VTO state
+                        _clear_vto_state(session_key)
+                        return True, out_msgs
+                        
+                    except Exception as e:
+                        logging.exception("[VTO] Generation failed")
+                        mid = await send_whatsapp_reply_cloud(
+                            to_waid=from_waid,
+                            body=vto_messages["error"],
+                            phone_number_id=outbound_pnid
+                        )
+                        out_msgs.append(("text", vto_messages["error"], mid))
+                        
+                        # Clear VTO state on error
+                        _clear_vto_state(session_key)
+                        return True, out_msgs
+                        
+            except Exception as e:
+                logging.exception("[VTO] Image processing failed")
+                mid = await send_whatsapp_reply_cloud(
+                    to_waid=from_waid,
+                    body=vto_messages["invalid_image"],
+                    phone_number_id=outbound_pnid
+                )
+                out_msgs.append(("text", vto_messages["invalid_image"], mid))
+                return True, out_msgs
+    
+    return False, []
 
 @router.post("/webhook")
 async def receive_cloud_webhook(request: Request):
@@ -698,9 +1044,9 @@ async def receive_cloud_webhook(request: Request):
         logging.info("[CLOUD] Custom payload detected - skipping signature validation")
 
     msgs_to_process = []
-    outbound_pnid = None  
+    outbound_pnid = None
     business_number = ""
-    contact_name_map: dict[str, str | None] = {}  
+    contact_name_map: dict[str, str | None] = {}
 
     # Handle standard Meta Cloud API format
     for entry in data.get("entry", []):
@@ -708,30 +1054,34 @@ async def receive_cloud_webhook(request: Request):
             value = change.get("value", {})
             meta = value.get("metadata", {})  # display_phone_number, phone_number_id
             msgs = value.get("messages", [])
+
             if msgs:
                 # business_number = (CLOUD_SENDER_NUMBER or meta.get("display_phone_number", "")).replace("+", "").replace(" ", "")
                 business_number = _normalize_business_number(meta.get("display_phone_number"))
                 outbound_pnid = meta.get("phone_number_id")
+
                 logging.info("=%"*100)
                 logging.info(f"[CLOUD] Busieness Number : {business_number}")
                 logging.info("=%"*100)
                 logging.info(f"[CLOUD] Phone Number ID : {outbound_pnid}")
+
                 # If display_phone_number is missing, fetch it via phone_number_id
                 if not business_number:
                     pnid = meta.get("phone_number_id")
                     if pnid:
                         business_number = await _lookup_display_phone_number_digits(pnid)
+
                 if not business_number:
                     logging.error("[CLOUD] Could not resolve business number from webhook metadata.")
                     return {"status": "no_business_number"}
 
                 msgs_to_process.extend(msgs)
-        
-        for c in value.get("contacts", []):
-            wa = (c.get("wa_id") or "").strip()
-            nm = (c.get("profile") or {}).get("name")
-            if wa:
-                contact_name_map[wa] = nm
+
+            for c in value.get("contacts", []):
+                wa = (c.get("wa_id") or "").strip()
+                nm = (c.get("profile") or {}).get("name")
+                if wa:
+                    contact_name_map[wa] = nm
 
     # Handle custom payload format
     # Handle custom payload format
@@ -767,10 +1117,11 @@ async def receive_cloud_webhook(request: Request):
                     "from": custom_msg.get("from", ""),
                     "type": content.get("type", "unknown"),
                 }
+
                 if standard_msg["type"] == "text":
                     standard_msg["text"] = content.get("text", {})
-                msgs_to_process.append(standard_msg)
 
+                msgs_to_process.append(standard_msg)
 
     if not msgs_to_process:
         return {"status": "no_messages"}
@@ -778,8 +1129,10 @@ async def receive_cloud_webhook(request: Request):
     # Process all messages with unified structure
     for msg in msgs_to_process:
         msg_id = msg.get("id") or msg.get("wamid")
+
         if msg_id in processed_meta_msg_ids:
             continue
+
         processed_meta_msg_ids.add(msg_id)
         if len(processed_meta_msg_ids) > 5000:
             processed_meta_msg_ids.clear()
@@ -796,10 +1149,16 @@ async def receive_cloud_webhook(request: Request):
                 logging.info("[CLOUD] Ignoring temporary 'unsupported' (131051) — HD image handshake.")
                 continue  # do NOT persist or reply to this stub; the real image event follows
 
-
-        
         replied_message_id = None
+        try:
+            # Meta "context" is per message
+            if "context" in msg:
+                replied_message_id = msg["context"].get("id")
+        except Exception:
+            replied_message_id = None
+
         context_obj = msg.get("context")
+
         # Swipe reply FLow
         if context_obj and context_obj.get("id"):
             logging.info("=" * 100)
@@ -811,6 +1170,7 @@ async def receive_cloud_webhook(request: Request):
                 try:
                     tenant_id = await get_tenant_id_by_phone(business_number, db)
                     tenant_name = await get_tenant_name_by_phone(business_number, db) or "Your Shop"
+
                     if not tenant_id:
                         logging.error(f"[CLOUD] No tenant found for business number: '{business_number}'")
                         return {"status": "no_tenant"}
@@ -820,14 +1180,15 @@ async def receive_cloud_webhook(request: Request):
                     customer = await get_or_create_customer(
                         db,
                         tenant_id=tenant_id,
-                        phone=_normalize_waid_phone(from_waid),   # saves +E.164 in customers.phone
-                        whatsapp_id=from_waid,                    # saves raw wa_id in customers.whatsapp_id
-                        name=sender_name,                         # saves profile name
+                        phone=_normalize_waid_phone(from_waid),  # saves +E.164 in customers.phone
+                        whatsapp_id=from_waid,  # saves raw wa_id in customers.whatsapp_id
+                        name=sender_name,  # saves profile name
                     )
 
                     logging.info("=" * 100)
                     logging.info(f"========{from_waid}")
                     logging.info("=" * 100)
+
                     chat_session = await get_or_open_active_session(db, customer_id=customer.id)
                     phone_norm = _normalize_waid_phone(from_waid)
 
@@ -855,6 +1216,7 @@ async def receive_cloud_webhook(request: Request):
                         role="user", text=inbound_text, msg_id=msg_id, direction="in",
                         meta=inbound_meta,
                     )
+
                     transcript = await get_transcript_by_phone(phone_norm, db)
                     messages = _normalize_messages(transcript)
 
@@ -867,10 +1229,11 @@ async def receive_cloud_webhook(request: Request):
 
                     # 1) Pick the right caption (image caption if reply was to an image; else previous assistant image)
                     caption = find_assistant_image_caption_by_msg_id(messages, replied_message_id)
+
                     if not caption:
                         await send_whatsapp_reply_cloud(
                             to_waid=from_waid,
-                            body="Sorry—couldn’t link your reply to a product. Please reply directly to the product image you like.",
+                            body="Sorry—couldn't link your reply to a product. Please reply directly to the product image you like.",
                             phone_number_id=outbound_pnid,
                         )
                         await db.commit()
@@ -879,12 +1242,13 @@ async def receive_cloud_webhook(request: Request):
                     logging.info("=" * 20)
                     logging.info(f"=========Caption used for resolve======== {caption}")
 
-                    # 2) Resolve product name + ids from caption (URL → DB, else caption line)  ✅ async
+                    # 2) Resolve product name + ids from caption (URL → DB, else caption line) ✅ async
                     resolved = await resolve_product_from_caption_async(caption)
-                    resolved_name        = resolved.get("name")
-                    resolved_product_id  = resolved.get("product_id")
-                    resolved_variant_id  = resolved.get("variant_id")
-                    resolved_url         = resolved.get("product_url")
+                    resolved_name = resolved.get("name")
+                    resolved_product_id = resolved.get("product_id")
+                    resolved_variant_id = resolved.get("variant_id")
+                    resolved_url = resolved.get("product_url")
+
                     logging.info(
                         f"✅ Resolved swipe → name='{resolved_name}', product_id={resolved_product_id}, "
                         f"variant_id={resolved_variant_id}, url={resolved_url}"
@@ -896,6 +1260,7 @@ async def receive_cloud_webhook(request: Request):
                     # ✅ Language detection (same logic as normal flow)
                     SUPPORTED_LANGUAGES = ["gu-IN", "hi-IN", "en-IN", "en-US"]
                     current_language = customer.preferred_language or "en-IN"
+
                     if current_language not in SUPPORTED_LANGUAGES:
                         detected = await detect_language(text_msg, "en-IN")
                         current_language = detected[0] if isinstance(detected, tuple) else detected
@@ -903,11 +1268,11 @@ async def receive_cloud_webhook(request: Request):
 
                     # ✅ Tenant filters (load real lists, not just defaults)
                     tenant_categories = await get_tenant_category_by_phone(business_number, db)
-                    tenant_fabric     = await get_tenant_fabric_by_phone(business_number, db)
-                    tenant_color      = await get_tenant_color_by_phone(business_number, db)
-                    tenant_occasion   = await get_tenant_occasion_by_phone(business_number, db)
-                    tenant_size       = await get_tenant_size_by_phone(business_number, db)
-                    tenant_type       = await get_tenant_type_by_phone(business_number, db)
+                    tenant_fabric = await get_tenant_fabric_by_phone(business_number, db)
+                    tenant_color = await get_tenant_color_by_phone(business_number, db)
+                    tenant_occasion = await get_tenant_occasion_by_phone(business_number, db)
+                    tenant_size = await get_tenant_size_by_phone(business_number, db)
+                    tenant_type = await get_tenant_type_by_phone(business_number, db)
 
                     # Make sure entities exists before merging
                     if not isinstance(entities, dict):
@@ -923,23 +1288,23 @@ async def receive_cloud_webhook(request: Request):
                         allowed_categories=tenant_categories,
                         allowed_fabrics=tenant_fabric,
                         allowed_occasions=tenant_occasion,
-                        allowed_colors=tenant_color,   # ← NEW
+                        allowed_colors=tenant_color,  # ← NEW
                     )
 
-                    category  = attrs_db.get("category")  or attrs_text.get("category")
-                    fabric    = attrs_db.get("fabric")    or attrs_text.get("fabric")
-                    occasion  = attrs_db.get("occasion")  or attrs_text.get("occasion")
-                    color     = attrs_db.get("color")     or attrs_text.get("color")
+                    category = attrs_db.get("category") or attrs_text.get("category")
+                    fabric = attrs_db.get("fabric") or attrs_text.get("fabric")
+                    occasion = attrs_db.get("occasion") or attrs_text.get("occasion")
+                    color = attrs_db.get("color") or attrs_text.get("color")
                     is_rental = attrs_db.get("is_rental")
                     if is_rental is None:
                         is_rental = attrs_text.get("is_rental")
 
                     # Keep your resolved attrs as a seed (do NOT merge into entities yet)
                     seed_entities = {"name": resolved_name}
-                    if category:  seed_entities["category"]  = category
-                    if fabric:    seed_entities["fabric"]    = fabric
-                    if occasion:  seed_entities["occasion"]  = occasion
-                    if color:     seed_entities["color"]     = color
+                    if category: seed_entities["category"] = category
+                    if fabric: seed_entities["fabric"] = fabric
+                    if occasion: seed_entities["occasion"] = occasion
+                    if color: seed_entities["color"] = color
                     if is_rental is not None:
                         seed_entities["is_rental"] = bool(is_rental)
 
@@ -957,6 +1322,7 @@ async def receive_cloud_webhook(request: Request):
                             allowed_size=tenant_size,
                             allowed_type=tenant_type,
                         )
+
                         entities = ai_entities or {}
                         for k, v in (seed_entities or {}).items():
                             if k == "is_rental":
@@ -984,6 +1350,7 @@ async def receive_cloud_webhook(request: Request):
                         )
 
                         reply_text = raw_reply.get("reply_text") if isinstance(raw_reply, dict) else str(raw_reply)
+
                         # Personalize greeting once the AI says it's a greeting
                         if isinstance(raw_reply, dict) and raw_reply.get("intent_type") == "greeting":
                             person = (getattr(customer, "name", None) or sender_name or "").strip()
@@ -993,11 +1360,13 @@ async def receive_cloud_webhook(request: Request):
                                 reply_text = f"Hello {person},\nHow can I assist you today?"
 
                         collected_entities = raw_reply.get("collected_entities") if isinstance(raw_reply, dict) else {}
+
                     except Exception:
                         logging.exception("[CLOUD] AI pipeline failed")
                         raw_reply = {}
                         reply_text = "Sorry, I'm having trouble. I'll get back to you shortly."
                         collected_entities = {}
+
                     # -----------------------------------------------------------------------------
 
                     print("--reply=", reply_text)
@@ -1005,9 +1374,10 @@ async def receive_cloud_webhook(request: Request):
                     # --- Safely extract followup + media/products
                     raw_obj = raw_reply if isinstance(raw_reply, dict) else {}
                     followup_text = (raw_obj.get("followup_reply") or "").strip() or None
-                    logging.info(f"[SWIPE] Followup_Question = {followup_text!r}")
-                    products = (raw_obj.get("pinecone_data") or [])[:5]  # max 5
 
+                    logging.info(f"[SWIPE] Followup_Question = {followup_text!r}")
+
+                    products = (raw_obj.get("pinecone_data") or [])[:5]  # max 5
                     sent_count = 0
                     out_msgs: list[tuple[str, str, str | None]] = []
 
@@ -1025,28 +1395,30 @@ async def receive_cloud_webhook(request: Request):
                                 caption=_product_caption(prod),
                                 phone_number_id=outbound_pnid,
                             )
+
                             if mid:
                                 sent_count += 1
                                 logging.info(f"[PRODUCT] Sent product message_id={mid} to {from_waid}")
-
-                            out_msgs.append(("image", _product_caption(prod), mid, img))
+                                out_msgs.append(("image", _product_caption(prod), mid, img))
 
                         if followup_text:
                             logging.info(f"[SWIPE] Sending follow-up: {followup_text!r}")
                             await asyncio.sleep(1.0)
                             mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text,phone_number_id=outbound_pnid,)
                             out_msgs.append(("text", followup_text, mid))
+
                     else:
                         if reply_text:
                             mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text,phone_number_id=outbound_pnid,)
                             out_msgs.append(("text", reply_text, mid))
+
                         if followup_text:
                             mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text,phone_number_id=outbound_pnid,)
                             out_msgs.append(("text", followup_text, mid))
 
                     logging.info(f"============== out Messages :{out_msgs}=================")
 
-                    # Persist outbound  (now stores meta.image_url for images)
+                    # Persist outbound (now stores meta.image_url for images)
                     for item in out_msgs:
                         # support both 3-tuple: (kind, txt, mid) and 4-tuple: (kind, txt, mid, image_url)
                         if isinstance(item, (list, tuple)) and len(item) == 4:
@@ -1056,7 +1428,7 @@ async def receive_cloud_webhook(request: Request):
                             img_url = None
 
                         meta = {"kind": kind, "channel": "cloud_api"}
-                        save_id   = mid
+                        save_id = mid
                         save_text = txt
 
                         if kind == "image":
@@ -1066,7 +1438,7 @@ async def receive_cloud_webhook(request: Request):
                                 meta["entities"] = collected_entities
 
                         if kind == "entities":
-                            base    = mid or msg_id
+                            base = mid or msg_id
                             save_id = f"{base}:entities"
                             if isinstance(txt, (dict, list)):
                                 meta["entities"] = txt
@@ -1082,7 +1454,6 @@ async def receive_cloud_webhook(request: Request):
                             direction="out",
                             meta=meta,
                         )
-
 
                     await db.commit()
 
@@ -1109,6 +1480,7 @@ async def receive_cloud_webhook(request: Request):
                 try:
                     tenant_id = await get_tenant_id_by_phone(business_number, db)
                     tenant_name = await get_tenant_name_by_phone(business_number, db) or "Your Shop"
+
                     if not tenant_id:
                         logging.error(f"[CLOUD] No tenant found for business number: '{business_number}'")
                         return {"status": "no_tenant"}
@@ -1118,9 +1490,9 @@ async def receive_cloud_webhook(request: Request):
                     customer = await get_or_create_customer(
                         db,
                         tenant_id=tenant_id,
-                        phone=_normalize_waid_phone(from_waid),   # saves +E.164 in customers.phone
-                        whatsapp_id=from_waid,                    # saves raw wa_id in customers.whatsapp_id
-                        name=sender_name,                         # saves profile name
+                        phone=_normalize_waid_phone(from_waid),  # saves +E.164 in customers.phone
+                        whatsapp_id=from_waid,  # saves raw wa_id in customers.whatsapp_id
+                        name=sender_name,  # saves profile name
                     )
 
                     logging.info(f"========{from_waid}")
@@ -1128,15 +1500,15 @@ async def receive_cloud_webhook(request: Request):
                     # Pull transcript and derive product context (for logs + intent merge)
                     phone_norm = _normalize_waid_phone(from_waid)
                     transcript = await get_transcript_by_phone(phone_norm, db)
-                    messages   = _normalize_messages(transcript)
-
+                    messages = _normalize_messages(transcript)
 
                     # Use last assistant message as the "reply_id" context when user isn't swiping
                     last_assistant = next((m for m in reversed(messages)
-                                        if m.get("role") == "assistant" and m.get("msg_id")), None)
-                    derived_reply_id   = last_assistant.get("msg_id") if last_assistant else None
-                    product_text       = find_assistant_text_by_msg_id(messages, derived_reply_id) if derived_reply_id else None
-                    product_entities   = find_entities_by_msg_id(messages, derived_reply_id) if derived_reply_id else None
+                                          if m.get("role") == "assistant" and m.get("msg_id")), None)
+
+                    derived_reply_id = last_assistant.get("msg_id") if last_assistant else None
+                    product_text = find_assistant_text_by_msg_id(messages, derived_reply_id) if derived_reply_id else None
+                    product_entities = find_entities_by_msg_id(messages, derived_reply_id) if derived_reply_id else None
 
                     logging.info("=" * 20)
                     logging.info(f"=========Product_text(derived)======== {product_text}")
@@ -1149,9 +1521,23 @@ async def receive_cloud_webhook(request: Request):
                     inbound_text = text_msg
 
                     if mtype == "image" and "image" in msg:
-                        media_id = msg["image"].get("id")
-                        if media_id:
-                            try:
+                        img_obj = msg.get("image", {}) if isinstance(msg, dict) else {}
+                        media_id = img_obj.get("id")
+                        link = img_obj.get("link")
+                        is_local = request.headers.get("X-LOCAL-TEST") == "1"
+
+                        try:
+                            if is_local and link:
+                                # Local tester path: fetch the image directly by URL instead of Graph API
+                                inbound_meta["image"] = {
+                                    "id": media_id or "local-test",
+                                    "mime_type": img_obj.get("mime_type") or "image/jpeg",
+                                    "sha256": img_obj.get("sha256") or "",
+                                    "url": link,
+                                }
+                                inbound_text = link
+                            elif media_id:
+                                # Production/real webhook path: resolve through Graph
                                 media_meta = await get_media_url_and_meta(media_id)  # {url, mime_type, sha256, ...}
                                 inbound_meta["image"] = {
                                     "id": media_id,
@@ -1159,15 +1545,15 @@ async def receive_cloud_webhook(request: Request):
                                     "sha256": media_meta.get("sha256"),
                                     "url": media_meta.get("url"),
                                 }
-                                # make the transcript clickable in your dashboard
                                 inbound_text = media_meta.get("url") or inbound_text
-                            except Exception:
-                                logging.exception("[CLOUD] Failed to fetch inbound image url")
+                        except Exception:
+                            logging.exception("[CLOUD][SWIPE] Failed to fetch inbound image url")
 
                     # (optional) if user sent an image as a 'document'
                     elif mtype == "document" and "document" in msg:
                         mime = (msg["document"].get("mime_type") or "").lower()
                         media_id = msg["document"].get("id")
+
                         if media_id and mime.startswith("image/"):
                             try:
                                 media_meta = await get_media_url_and_meta(media_id)
@@ -1189,25 +1575,75 @@ async def receive_cloud_webhook(request: Request):
                         meta=inbound_meta,
                     )
 
+                    # CREATE SESSION KEY FOR VTO
+                    session_key = f"{tenant_id}:whatsapp:wa:{from_waid}"
+                    logging.info(f"[VTO] Session key: {session_key}")
+                    logging.info(f"[VTO] Current state: {_get_vto_state(session_key)}")
+                    logging.info(f"[VTO] Is VTO active: {_is_vto_flow_active(session_key)}")
+                    
+                    # DETECT LANGUAGE FIRST (needed for VTO messages)
+                    SUPPORTED_LANGUAGES = ["gu-IN", "hi-IN", "en-IN", "en-US"]
+                    current_language = customer.preferred_language or "en-IN"
+                    if current_language not in SUPPORTED_LANGUAGES:
+                        detected = await detect_language(text_msg, "en-IN")
+                        current_language = detected[0] if isinstance(detected, tuple) else detected
+                        await update_customer_language(db, customer.id, current_language)
+
+                    # ADD VTO FLOW HANDLING HERE (BEFORE EXISTING TYPE DISPATCH)
+                    vto_handled, vto_out_msgs = await _handle_vto_flow(
+                        session_key=session_key,
+                        text_msg=text_msg,
+                        mtype=mtype,
+                        msg=msg,
+                        from_waid=from_waid,
+                        outbound_pnid=outbound_pnid,
+                        current_language=current_language,
+                        db=db,
+                        chat_session=chat_session,
+                        msg_id=msg_id
+                    )
+                    
+                    if vto_handled:
+                        # Persist VTO messages
+                        for item in vto_out_msgs:
+                            if isinstance(item, (list, tuple)) and len(item) == 4:
+                                kind, txt, mid, img_url = item
+                            else:
+                                kind, txt, mid = item
+                                img_url = None
+
+                            meta = {"kind": kind, "channel": "cloud_api"}
+                            if kind == "image" and img_url:
+                                meta["image_url"] = img_url
+
+                            await append_transcript_message(
+                                db, chat_session,
+                                role="assistant",
+                                text=txt,
+                                msg_id=mid,
+                                direction="out",
+                                meta=meta,
+                            )
+
+                        await db.commit()
+                        return {
+                            "status": "ok",
+                            "mode": "virtual_try_on",
+                            "sent_messages": len(vto_out_msgs)
+                        }
 
                     # ------------------------ PRIORITIZED TYPE DISPATCH ------------------------
+
                     # 1) TEXT
                     if mtype == "text" and "text" in msg:
-                        # Detect language
-                        SUPPORTED_LANGUAGES = ["gu-IN", "hi-IN", "en-IN", "en-US"]
-                        current_language = customer.preferred_language or "en-IN"
-                        if current_language not in SUPPORTED_LANGUAGES:
-                            detected = await detect_language(text_msg, "en-IN")
-                            current_language = detected[0] if isinstance(detected, tuple) else detected
-                            await update_customer_language(db, customer.id, current_language)
 
                         # Tenant filters
                         tenant_categories = await get_tenant_category_by_phone(business_number, db)
-                        tenant_fabric     = await get_tenant_fabric_by_phone(business_number, db)
-                        tenant_color      = await get_tenant_color_by_phone(business_number, db)
-                        tenant_occasion   = await get_tenant_occasion_by_phone(business_number, db)
-                        tenant_size       = await get_tenant_size_by_phone(business_number, db)
-                        tenant_type       = await get_tenant_type_by_phone(business_number, db)
+                        tenant_fabric = await get_tenant_fabric_by_phone(business_number, db)
+                        tenant_color = await get_tenant_color_by_phone(business_number, db)
+                        tenant_occasion = await get_tenant_occasion_by_phone(business_number, db)
+                        tenant_size = await get_tenant_size_by_phone(business_number, db)
+                        tenant_type = await get_tenant_type_by_phone(business_number, db)
 
                         # --- AI pipeline
                         raw_reply = None
@@ -1225,7 +1661,8 @@ async def receive_cloud_webhook(request: Request):
                             # Merge any entities we captured alongside the last assistant card
                             if product_entities:
                                 entities = _merge_entities(entities, product_entities)  # fill-only
-                                logging.info(f"[ENTITIES] merged with product_entities (normal flow): {entities}")
+
+                            logging.info(f"[ENTITIES] merged with product_entities (normal flow): {entities}")
 
                             logging.info("=" * 20)
                             logging.info(f"New ENtities Form the intent type ====== {entities}")
@@ -1243,7 +1680,9 @@ async def receive_cloud_webhook(request: Request):
                                 mode="chat",
                                 session_key=f"{tenant_id}:whatsapp:wa:{from_waid}",
                             )
-                            reply_text         = raw_reply.get("reply_text") if isinstance(raw_reply, dict) else str(raw_reply)
+
+                            reply_text = raw_reply.get("reply_text") if isinstance(raw_reply, dict) else str(raw_reply)
+
                             # Personalize greeting once the AI says it's a greeting
                             if isinstance(raw_reply, dict) and raw_reply.get("intent_type") == "greeting":
                                 person = (getattr(customer, "name", None) or sender_name or "").strip()
@@ -1253,6 +1692,7 @@ async def receive_cloud_webhook(request: Request):
                                     reply_text = f"Hello {person},\nHow can I assist you today?"
 
                             collected_entities = raw_reply.get("collected_entities") if isinstance(raw_reply, dict) else None
+
                         except Exception:
                             logging.exception("[CLOUD] AI pipeline failed")
                             reply_text = "Sorry, I'm having trouble. I'll get back to you shortly."
@@ -1261,11 +1701,12 @@ async def receive_cloud_webhook(request: Request):
                         print("reply=", reply_text)
 
                         # --- Outbound (products + followup + text)
-                        raw_obj       = raw_reply if isinstance(raw_reply, dict) else {}
+                        raw_obj = raw_reply if isinstance(raw_reply, dict) else {}
                         followup_text = (raw_obj.get("followup_reply") or "").strip() or None
-                        print("Followup_Question =", followup_text)  # 👈 add this
-                        products      = (raw_obj.get("pinecone_data") or [])[:5]
 
+                        print("Followup_Question =", followup_text)  # 👈 add this
+
+                        products = (raw_obj.get("pinecone_data") or [])[:5]
                         sent_count = 0
                         out_msgs: list[tuple[str, str, str | None]] = []
 
@@ -1274,21 +1715,26 @@ async def receive_cloud_webhook(request: Request):
                                 img = _primary_image_for_product(prod)
                                 if not img:
                                     continue
+
                                 mid = await send_whatsapp_image_cloud(
                                     to_waid=from_waid, image_url=img, caption=_product_caption(prod),phone_number_id=outbound_pnid,
                                 )
+
                                 if mid:
                                     sent_count += 1
                                     logging.info(f"[PRODUCT] Sent product message_id={mid} to {from_waid}")
-                                out_msgs.append(("image", _product_caption(prod), mid, img))
+                                    out_msgs.append(("image", _product_caption(prod), mid, img))
+
                             if followup_text:
                                 await asyncio.sleep(1.0)
                                 mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text,phone_number_id=outbound_pnid,)
                                 out_msgs.append(("text", followup_text, mid))
+
                         else:
                             if reply_text:
                                 mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=reply_text,phone_number_id=outbound_pnid,)
                                 out_msgs.append(("text", reply_text, mid))
+
                             if followup_text:
                                 mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text,phone_number_id=outbound_pnid,)
                                 out_msgs.append(("text", followup_text, mid))
@@ -1296,7 +1742,7 @@ async def receive_cloud_webhook(request: Request):
                         logging.info(f"============== out Messages :{out_msgs}=================")
 
                         # Persist outbound
-                        # Persist outbound  (now stores meta.image_url for images)
+                        # Persist outbound (now stores meta.image_url for images)
                         for item in out_msgs:
                             # support both 3-tuple: (kind, txt, mid) and 4-tuple: (kind, txt, mid, image_url)
                             if isinstance(item, (list, tuple)) and len(item) == 4:
@@ -1306,7 +1752,7 @@ async def receive_cloud_webhook(request: Request):
                                 img_url = None
 
                             meta = {"kind": kind, "channel": "cloud_api"}
-                            save_id   = mid
+                            save_id = mid
                             save_text = txt
 
                             if kind == "image":
@@ -1316,7 +1762,7 @@ async def receive_cloud_webhook(request: Request):
                                     meta["entities"] = collected_entities
 
                             if kind == "entities":
-                                base    = mid or msg_id
+                                base = mid or msg_id
                                 save_id = f"{base}:entities"
                                 if isinstance(txt, (dict, list)):
                                     meta["entities"] = txt
@@ -1333,8 +1779,8 @@ async def receive_cloud_webhook(request: Request):
                                 meta=meta,
                             )
 
-
                         await db.commit()
+
                         return {
                             "status": "ok",
                             "sent_images": sent_count,
@@ -1345,7 +1791,7 @@ async def receive_cloud_webhook(request: Request):
                     # 2) IMAGE
                     elif mtype == "image" and "image" in msg:
                         try:
-                            media_id  = msg["image"].get("id")
+                            media_id = msg["image"].get("id")
                             img_bytes = await download_media_bytes(media_id)
 
                             matches = visual_search_bytes_sync(img_bytes, tenant_id=tenant_id, top_k=20)
@@ -1360,6 +1806,7 @@ async def receive_cloud_webhook(request: Request):
                                 img = _primary_image_for_product(md) or md.get("image_url")
                                 if not img:
                                     continue
+
                                 cap = _product_caption(md)
                                 mid = await send_whatsapp_image_cloud(
                                     to_waid=from_waid,
@@ -1367,24 +1814,25 @@ async def receive_cloud_webhook(request: Request):
                                     caption=cap,
                                     phone_number_id=outbound_pnid,
                                 )
+
                                 if mid:
                                     sent_count += 1
                                     logging.info(f"[PRODUCT] Sent product message_id={mid} to {from_waid}")
-                                out_msgs.append(("image", cap, mid, img))
+                                    out_msgs.append(("image", cap, mid, img))
 
                             # If nothing sent, give one short fallback
                             if sent_count == 0:
-                                body = "Sorry, I couldn’t find visually similar items."
-                                mid  = await send_whatsapp_reply_cloud(to_waid=from_waid, body=body,phone_number_id=outbound_pnid)
+                                body = "Sorry, I couldn't find visually similar items."
+                                mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=body,phone_number_id=outbound_pnid)
                                 out_msgs.append(("image", cap, mid, img))
+
                             else:
-                                # Add a follow-up question in user’s saved language
+                                # Add a follow-up question in user's saved language
                                 current_language = (customer.preferred_language or "en-IN")
                                 ftxt = _visual_followup_text(current_language)
                                 await asyncio.sleep(0.2)
                                 mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=ftxt,phone_number_id=outbound_pnid,)
                                 out_msgs.append(("image", cap, mid, img))
-
 
                             for kind, txt, mid, img_url in _iter_out_msgs_with_meta(out_msgs):
                                 meta = {"kind": kind, "channel": "cloud_api"}
@@ -1393,7 +1841,7 @@ async def receive_cloud_webhook(request: Request):
 
                                 # (optional) you already add entities for images in one place — keep that:
                                 # if kind == "image" and isinstance(collected_entities, (dict, list)):
-                                #     meta["entities"] = collected_entities
+                                # meta["entities"] = collected_entities
 
                                 await append_transcript_message(
                                     db, chat_session,
@@ -1404,7 +1852,6 @@ async def receive_cloud_webhook(request: Request):
                                     meta=meta,
                                 )
 
-
                             await db.commit()
                             return {"status": "ok", "mode": "visual_search", "sent_images": sent_count}
 
@@ -1412,65 +1859,70 @@ async def receive_cloud_webhook(request: Request):
                             logging.exception("[CLOUD] Visual search failed")
                             await db.rollback()
                             mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body="Sorry, I couldn't read that image.",phone_number_id=outbound_pnid,)
+
                             await append_transcript_message(
                                 db, chat_session, role="assistant", text="(visual search error)",
                                 msg_id=mid, direction="out", meta={"kind": "text", "channel": "cloud_api"}
                             )
+
                             await db.commit()
                             return {"status": "error", "mode": "visual_search_failed"}
-                    
-                
+
                     # 2.5) VIDEO (feature not available yet)
                     elif mtype == "video" and "video" in msg:
                         # Reply with under-development notice
                         VIDEO_UNAVAILABLE_MSG = (
-                        "🎥 Video understanding is under development right now. "
-                        "Please send a clear photo or text so I can help."
+                            "🎥 Video understanding is under development right now. "
+                            "Please send a clear photo or text so I can help."
                         )
+
                         mid = await send_whatsapp_reply_cloud(
                             to_waid=from_waid,
                             body=VIDEO_UNAVAILABLE_MSG
                         )
+
                         await append_transcript_message(
                             db, chat_session,
                             role="assistant", text=VIDEO_UNAVAILABLE_MSG,
                             msg_id=mid, direction="out",
                             meta={"kind": "text", "channel": "cloud_api", "feature": "video", "status": "unavailable"}
                         )
+
                         await db.commit()
                         return {"status": "ok", "mode": "video_unavailable"}
 
-
                     # 3) DOCUMENT
                     elif mtype == "document" and "document" in msg:
-                        doc      = msg["document"]
-                        mime     = (doc.get("mime_type") or "").lower()
+                        doc = msg["document"]
+                        mime = (doc.get("mime_type") or "").lower()
                         media_id = doc.get("id")
+
                         VIDEO_UNAVAILABLE_MSG = (
-                        "🎥 Video understanding is under development right now. "
-                        "Please send a clear photo or text so I can help."
+                            "🎥 Video understanding is under development right now. "
+                            "Please send a clear photo or text so I can help."
                         )
+
                         # If the document is actually a video file, say it's under development
                         if media_id and mime.startswith("video/"):
                             mid = await send_whatsapp_reply_cloud(
                                 to_waid=from_waid,
                                 body=VIDEO_UNAVAILABLE_MSG
                             )
+
                             await append_transcript_message(
                                 db, chat_session,
                                 role="assistant", text=VIDEO_UNAVAILABLE_MSG,
                                 msg_id=mid, direction="out",
                                 meta={"kind": "text", "channel": "cloud_api", "feature": "video", "status": "unavailable", "doc_mime": mime}
                             )
+
                             await db.commit()
                             return {"status": "ok", "mode": "doc_video_unavailable"}
-
 
                         # If the document is actually an image file, treat it like an image (visual search)
                         if media_id and mime.startswith("image/"):
                             try:
                                 img_bytes = await download_media_bytes(media_id)
-
                                 matches = visual_search_bytes_sync(img_bytes, tenant_id=tenant_id, top_k=20)
                                 matches = group_matches_by_product(matches)[:5]
 
@@ -1482,6 +1934,7 @@ async def receive_cloud_webhook(request: Request):
                                     img = _primary_image_for_product(md) or md.get("image_url")
                                     if not img:
                                         continue
+
                                     cap = _product_caption(md)
                                     mid = await send_whatsapp_image_cloud(
                                         to_waid=from_waid,
@@ -1489,13 +1942,14 @@ async def receive_cloud_webhook(request: Request):
                                         caption=cap,
                                         phone_number_id=outbound_pnid,
                                     )
+
                                     if mid:
                                         sent_count += 1
-                                    out_msgs.append(("image", cap, mid, img))
+                                        out_msgs.append(("image", cap, mid, img))
 
                                 if sent_count == 0:
-                                    body = "Sorry, I couldn’t find visually similar items."
-                                    mid  = await send_whatsapp_reply_cloud(to_waid=from_waid, body=body)
+                                    body = "Sorry, I couldn't find visually similar items."
+                                    mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=body)
                                     out_msgs.append(("text", body, mid))
                                 else:
                                     current_language = (customer.preferred_language or "en-IN")
@@ -1503,7 +1957,6 @@ async def receive_cloud_webhook(request: Request):
                                     await asyncio.sleep(0.2)
                                     mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=ftxt,phone_number_id=outbound_pnid,)
                                     out_msgs.append(("image", cap, mid, img))
-
 
                                 for kind, txt, mid, img_url in _iter_out_msgs_with_meta(out_msgs):
                                     meta = {"kind": kind, "channel": "cloud_api"}
@@ -1523,7 +1976,6 @@ async def receive_cloud_webhook(request: Request):
                                         meta=meta,
                                     )
 
-
                                 await db.commit()
                                 return {"status": "ok", "mode": "visual_search_doc_image", "sent_images": sent_count}
 
@@ -1531,21 +1983,25 @@ async def receive_cloud_webhook(request: Request):
                                 logging.exception("[CLOUD] Visual search (document->image) failed")
                                 await db.rollback()
                                 mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body="Sorry, I couldn't read that file.",phone_number_id=outbound_pnid,)
+
                                 await append_transcript_message(
                                     db, chat_session, role="assistant", text="(document visual search error)",
                                     msg_id=mid, direction="out", meta={"kind": "text", "channel": "cloud_api"}
                                 )
+
                                 await db.commit()
                                 return {"status": "error", "mode": "doc_visual_search_failed"}
 
                         # Non-image docs: simple acknowledgement (you can extend with OCR/PDF later)
-                        ack_text = "Got your file. I’ll take a look and get back to you."
+                        ack_text = "Got your file. I'll take a look and get back to you."
                         mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=ack_text,phone_number_id=outbound_pnid,)
+
                         await append_transcript_message(
                             db, chat_session,
                             role="assistant", text=ack_text, msg_id=mid, direction="out",
                             meta={"kind": "text", "channel": "cloud_api", "doc_mime": mime}
                         )
+
                         await db.commit()
                         return {"status": "ok", "mode": "document_ack"}
 
@@ -1555,16 +2011,19 @@ async def receive_cloud_webhook(request: Request):
                             logging.info("[CLOUD] Suppressing fallback for transient 'unsupported' (131051).")
                             await db.commit()
                             return {"status": "ignored_unsupported"}
+
                         mid = await send_whatsapp_reply_cloud(
                             to_waid=from_waid,
                             body="Sorry, I can only read text, images, or files for now.",
                             phone_number_id=outbound_pnid,
                         )
+
                         await append_transcript_message(
                             db, chat_session,
                             role="assistant", text="(unsupported message type)", msg_id=mid, direction="out",
                             meta={"kind": "text", "channel": "cloud_api", "mtype": mtype}
                         )
+
                         await db.commit()
                         return {"status": "ok", "mode": "unsupported"}
 
@@ -1574,7 +2033,7 @@ async def receive_cloud_webhook(request: Request):
                     return {"status": "error"}
                 finally:
                     break
-            # ---------------------- END Normal Flow ----------------------
 
+            # ---------------------- END Normal Flow ----------------------
 
     return {"status": "ok"}

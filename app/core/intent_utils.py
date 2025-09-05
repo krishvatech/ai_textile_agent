@@ -133,6 +133,8 @@ If any product attribute (including occasion) is present, do NOT return asking_i
   — but ONLY when (a) the last bot turn asked for confirmation OR (b) exactly one product is in focus (e.g., context has product_variant_id).
   This is a final go-ahead, not just a preference update.
 - stock_check — user replies with ONLY a quantity (e.g., "1", "2", "25", "2 pcs"), meaning “check if this many of the currently selected item/category is available right now.”
+- virtual_try_on — the user wants to SEE a garment applied on a person photo or model (“try on”, “how will it look on me”, “mere photo pe pehna do”, “pehna ke dikhao”, “મને પહેરીને બતાવો”, “try karo”, “VTO”), possibly sharing/mentioning a person photo and/or garment image/URL. This is a visualization request, not a purchase/reservation step.
+- other — order status, tracking, delivery, payment, returns, complaints, small talk, or unrelated topics.
 - other — order status, tracking, delivery, payment, returns, complaints, small talk, or unrelated topics.
 
 Decision rules (apply in order; pick exactly one):
@@ -154,6 +156,33 @@ Decision rules (apply in order; pick exactly one):
    → If dates/quantity are present, normalize start_date/end_date/quantity.
 
    This rule OVERRIDES all other rules (never classify such messages as "greeting").
+   
+0a) VIRTUAL-TRY-ON LOCK (priority after Rule 0, before Rule 1):
+   Fire when the message primarily requests a visual try-on / mockup of a garment on a person (user photo or model), e.g.:
+   • English/Hinglish: "try this saree on me", "how will it look on me", "apply this on my photo", "VTO", "virtual try on", "try with my pic", "make me wear this".
+   • Hindi: "मुझे ये साड़ी पहनाकर दिखाओ", "मेरी फोटो पर ट्राय करो", "कैसा लगेगा मेरे ऊपर".
+   • Gujarati: "આ સાડી મને પહેરાવીને બતાવો", "મારી ફોટા પર ટ્રાય કરો".
+   • Imperatives like "try karo", "pehna ke dikhao", "mere photo pe lagao".
+   • A Shopify/product URL is included AND the text says to “try on me / on model” → VTO takes precedence.
+   • If attachments/context indicate a person image and a garment image AND the text implies try-on, classify as VTO.
+   • Minimal phrasing that still maps to VTO: "try", "i want to try", "try it", "try this", "try set", "can i try?", "try now",
+     Hindi: "ट्राय", "ट्राय करो", "ट्राय करना है"; Gujarati: "ટ્રાય", "ટ્રાય કરવું છે".
+
+   Context anchors (any one is enough to confirm VTO on minimal phrasing):
+   • An item is already in focus (product_variant_id or non-null category in context), OR
+   • The message includes a product URL or garment image, OR
+   • The message includes a person photo.
+   If minimal phrasing appears without any anchor, still classify as VTO (lower confidence) with all entities null.
+
+   Behavior when it fires:
+   → intent = "virtual_try_on"
+   → Carry forward known product context (category/type/fabric/color/size) if already established; also extract any attributes mentioned now.
+   → Do NOT set entities.is_rental unless explicit RENT/BUY words appear (keep null by default).
+   → Ignore booking dates for VTO; set start_date/end_date = null.
+   → If the user also asks price/range while clearly asking for try-on, keep intent = virtual_try_on (list price questions alone fall under 1b).
+
+   Precedence:
+   • If Rule 0a and Rule 1b both match, prefer Rule 0a when the text clearly requests try-on.
 
 1) PRODUCT-SEARCH LOCK (highest after 0):
    If the message contains ANY product attribute — name, category, fabric, color, size, or occasion —
