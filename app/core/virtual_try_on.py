@@ -181,15 +181,12 @@ def _make_client(cfg: VTOConfig) -> genai.Client:
 async def generate_vto_image(
     person_bytes: bytes,
     garment_bytes: bytes,
-    cfg: Optional[VTOConfig] = None,
+    cfg: VTOConfig | None = None,
 ) -> bytes:
-    """
-    Main entry: returns PNG bytes of the try-on result.
-    """
     cfg = cfg or VTOConfig()
     client = _make_client(cfg)
 
-    # Prep inputs
+    # Prep inputs (unchanged)
     person_tmp  = neutralize_torso_bytes(person_bytes)
     garment_tmp = prep_garment_bytes(garment_bytes)
     logging.info("[VTO][INPUTS] person_tmp=%s | garment_tmp=%s", person_tmp, garment_tmp)
@@ -197,7 +194,7 @@ async def generate_vto_image(
     person_img  = Image.from_file(location=person_tmp)
     garment_img = Image.from_file(location=garment_tmp)
 
-    # Seed & steps
+    # Seed & steps (unchanged)
     try:
         re_cfg = RecontextImageConfig(
             number_of_images=1,
@@ -208,23 +205,39 @@ async def generate_vto_image(
     except Exception:
         re_cfg = RecontextImageConfig(number_of_images=1)
 
-    # Call VTO
+    # ✅ FIXED: call with keyword args; provide a "source=" fallback
     logging.info("[VTO][CALL] model=%s | steps=%s", cfg.model, getattr(re_cfg, "base_steps", None))
-    resp = await asyncio.to_thread(
-        client.models.recontext_image,
-        cfg.model,
-        RecontextImageSource(
-            person_image=person_img,
-            product_images=[ProductImage(product_image=garment_img)],
-        ),
-        re_cfg,
-    )
 
+    def _call_recontext():
+        try:
+            # Most current builds expect `image=` for the source payload.
+            return client.models.recontext_image(
+                model=cfg.model,
+                image=RecontextImageSource(
+                    person_image=person_img,
+                    product_images=[ProductImage(product_image=garment_img)],
+                ),
+                config=re_cfg,
+            )
+        except TypeError:
+            # Some earlier builds used `source=`.
+            logging.info("[VTO][CALL] Retrying recontext_image with source=")
+            return client.models.recontext_image(
+                model=cfg.model,
+                source=RecontextImageSource(
+                    person_image=person_img,
+                    product_images=[ProductImage(product_image=garment_img)],
+                ),
+                config=re_cfg,
+            )
+
+    resp = await asyncio.to_thread(_call_recontext)
+
+    # Handle output (unchanged)
     imgs = getattr(resp, "generated_images", []) or []
     if not imgs:
         raise RuntimeError("VTO returned no image")
 
-    # Always return first, normalized to PNG bytes
     out = imgs[0].image
     if isinstance(out, PILImage.Image):
         buf = io.BytesIO(); out.save(buf, format="PNG")
