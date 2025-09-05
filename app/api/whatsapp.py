@@ -18,6 +18,9 @@ from app.core.chat_persistence import (
     append_transcript_message,
 )
 
+import tempfile
+import typing
+
 from app.services.wa_media import download_media_bytes
 from app.services.wa_media import get_media_url_and_meta
 from app.services.visual_search import visual_search_bytes_sync, format_matches_for_whatsapp_images,group_matches_by_product
@@ -335,22 +338,88 @@ async def get_tenant_occasion_by_phone(phone_number: str, db):
     rows = result.fetchall() or []
     return [r[0] for r in rows]
 
-def _save_public_png_and_get_url(png_bytes: bytes) -> str | None:
-    base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
-    static_dir = os.getenv("PUBLIC_STATIC_DIR", "")
-    if not base or not static_dir:
-        return None  # You'll fall back to text if you don't configure hosting
+# Save VTO result to a local outbox folder so we can upload to WhatsApp Media
+def _save_png_to_outbox(png_bytes: bytes) -> str:
+    """
+    Save PNG bytes to a single folder and return the absolute file path.
+    Folder is controlled by VTO_OUT_DIR (optional) or defaults to /tmp/vto_outbox.
+    """
+    out_dir = os.getenv("VTO_OUT_DIR") or os.path.join(tempfile.gettempdir(), "vto_outbox")
+    os.makedirs(out_dir, exist_ok=True)
+    fname = f"vto_{uuid4().hex}.png"
+    fpath = os.path.join(out_dir, fname)
+    with open(fpath, "wb") as f:
+        f.write(png_bytes)
+    logging.info(f"[VTO][FILE] Saved result to {fpath}")
+    return fpath
+
+
+async def upload_whatsapp_media_cloud(
+    phone_number_id: str,
+    file_path: str,
+    mime: str = "image/png",
+) -> typing.Optional[str]:
+    """
+    Upload a local file to WhatsApp Cloud and return its media_id.
+    """
+    if not phone_number_id or not WHATSAPP_TOKEN:
+        logging.error("Cloud API missing: phone_number_id or WHATSAPP_TOKEN")
+        return None
+
+    url = f"https://graph.facebook.com/v20.0/{phone_number_id}/media"
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+    data = {"messaging_product": "whatsapp", "type": mime}
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        # NOTE: httpx 'files' must be opened inside the context manager
+        with open(file_path, "rb") as fh:
+            files = {"file": (os.path.basename(file_path), fh, mime)}
+            resp = await client.post(url, data=data, files=files, headers=headers)
+
+    logging.info(f"[CLOUD] Upload media resp: {resp.status_code} {resp.text}")
+    if resp.status_code >= 400:
+        return None
 
     try:
-        os.makedirs(static_dir, exist_ok=True)
-        name = f"vto_{uuid4().hex}.png"
-        fpath = os.path.join(static_dir, name)
-        with open(fpath, "wb") as f:
-            f.write(png_bytes)
-        return f"{base}/static/{name}"
+        return resp.json().get("id")
     except Exception:
-        logging.exception("Failed to save VTO public file")
         return None
+
+async def send_whatsapp_image_by_media_id_cloud(
+    to_waid: str,
+    media_id: str,
+    caption: str | None = None,
+    context_msg_id: str | None = None,
+    phone_number_id: str | None = None,
+) -> str | None:
+    if not phone_number_id or not WHATSAPP_TOKEN:
+        logging.error("Cloud API missing: phone_number_id or WHATSAPP_TOKEN")
+        return None
+
+    url = f"https://graph.facebook.com/v20.0/{phone_number_id}/messages"
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_waid.replace("+", "").strip(),
+        "type": "image",
+        "image": {"id": media_id},
+    }
+    if caption:
+        payload["image"]["caption"] = caption[:1024]
+    if context_msg_id:
+        payload["context"] = {"message_id": context_msg_id}
+
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.post(url, json=payload, headers=headers)
+    logging.info(f"[CLOUD] Send image-by-id resp: {resp.status_code} {resp.text}")
+
+    try:
+        data = resp.json()
+        return (data.get("messages") or [{}])[0].get("id")
+    except Exception:
+        return None
+
+
 
 async def _get_replied_bot_image_url(db, chat_session_id: int, replied_message_id: str | None) -> str | None:
     """Return the image URL from the assistant message the user replied to."""
@@ -969,27 +1038,48 @@ async def _handle_vto_flow(
                             garment_bytes=garment_bytes,
                             cfg=VTOConfig(base_steps=60, add_watermark=False),
                         )
+                        logging.info("="*100)
+                        logging.info(f"Results Bytes:{result_bytes}")
+                        logging.info("="*100)
                         # Send result
-                        public_url = _save_public_png_and_get_url(result_bytes)
-                        logging.info("="*100)
-                        logging.info(f"Public Url:{public_url}")
-                        logging.info("="*100)
-                        if public_url:
-                            result_mid = await send_whatsapp_image_cloud(
-                                to_waid=from_waid,
-                                image_url=public_url,
-                                caption=vto_messages["ready"],
+                        # Save to outbox -> upload -> send -> delete local file
+                        fpath = _save_png_to_outbox(result_bytes)
+                        sent_ok = False
+                        try:
+                            media_id = await upload_whatsapp_media_cloud(
                                 phone_number_id=outbound_pnid,
+                                file_path=fpath,
+                                mime="image/png",
                             )
-                            out_msgs.append(("image", vto_messages["ready"], result_mid, public_url))
-                        else:
-                            # hosting not configured
-                            result_mid = await send_whatsapp_reply_cloud(
-                                to_waid=from_waid,
-                                body=f"{vto_messages['ready']} (image hosting unavailable)",
-                                phone_number_id=outbound_pnid,
-                            )
-                            out_msgs.append(("text", f"{vto_messages['ready']} (image hosting unavailable)", result_mid))
+
+                            if media_id:
+                                result_mid = await send_whatsapp_image_by_media_id_cloud(
+                                    to_waid=from_waid,
+                                    media_id=media_id,
+                                    caption=vto_messages["ready"],
+                                    phone_number_id=outbound_pnid,
+                                )
+                                sent_ok = bool(result_mid)
+
+                            if not sent_ok:
+                                fail_mid = await send_whatsapp_reply_cloud(
+                                    to_waid=from_waid,
+                                    body=f"{vto_messages['ready']} (upload failed)",
+                                    phone_number_id=outbound_pnid,
+                                )
+                                out_msgs.append(("text", f"{vto_messages['ready']} (upload failed)", fail_mid))
+                            else:
+                                out_msgs.append(("image", vto_messages["ready"], result_mid, None))
+                        finally:
+                            if sent_ok:
+                                try:
+                                    os.remove(fpath)
+                                    logging.info(f"[VTO][FILE] Deleted local file: {fpath}")
+                                except Exception as e:
+                                    logging.warning(f"[VTO][FILE] Delete failed for {fpath}: {e}")
+                            else:
+                                logging.warning(f"[VTO][FILE] Keeping file for troubleshooting: {fpath}")
+
 
                         # Clear VTO session
                         _set({"active": False})
@@ -1052,26 +1142,48 @@ async def _handle_vto_flow(
                         garment_bytes=garment,
                         cfg=VTOConfig(base_steps=60, add_watermark=False),
                     )
+                    logging.info("="*100)
+                    logging.info(f"Results Bytes:{result_bytes}")
+                    logging.info("="*100)
+                    # Send result
+                    # Save to outbox -> upload -> send -> delete local file
+                    fpath = _save_png_to_outbox(result_bytes)
+                    sent_ok = False
+                    try:
+                        media_id = await upload_whatsapp_media_cloud(
+                            phone_number_id=outbound_pnid,
+                            file_path=fpath,
+                            mime="image/png",
+                        )
 
-                    public_url = _save_public_png_and_get_url(result_bytes)
-                    logging.info("="*100)
-                    logging.info(f"Public Url:{public_url}")
-                    logging.info("="*100)
-                    if public_url:
-                        result_mid = await send_whatsapp_image_cloud(
-                            to_waid=from_waid,
-                            image_url=public_url,
-                            caption=vto_messages["ready"],
-                            phone_number_id=outbound_pnid,
-                        )
-                        out_msgs.append(("image", vto_messages["ready"], result_mid, public_url))
-                    else:
-                        result_mid = await send_whatsapp_reply_cloud(
-                            to_waid=from_waid,
-                            body=f"{vto_messages['ready']} (image hosting unavailable)",
-                            phone_number_id=outbound_pnid,
-                        )
-                        out_msgs.append(("text", f"{vto_messages['ready']} (image hosting unavailable)", result_mid))
+                        if media_id:
+                            result_mid = await send_whatsapp_image_by_media_id_cloud(
+                                to_waid=from_waid,
+                                media_id=media_id,
+                                caption=vto_messages["ready"],
+                                phone_number_id=outbound_pnid,
+                            )
+                            sent_ok = bool(result_mid)
+
+                        if not sent_ok:
+                            fail_mid = await send_whatsapp_reply_cloud(
+                                to_waid=from_waid,
+                                body=f"{vto_messages['ready']} (upload failed)",
+                                phone_number_id=outbound_pnid,
+                            )
+                            out_msgs.append(("text", f"{vto_messages['ready']} (upload failed)", fail_mid))
+                        else:
+                            out_msgs.append(("image", vto_messages["ready"], result_mid, None))
+                    finally:
+                        if sent_ok:
+                            try:
+                                os.remove(fpath)
+                                logging.info(f"[VTO][FILE] Deleted local file: {fpath}")
+                            except Exception as e:
+                                logging.warning(f"[VTO][FILE] Delete failed for {fpath}: {e}")
+                        else:
+                            logging.warning(f"[VTO][FILE] Keeping file for troubleshooting: {fpath}")
+
 
                     _set({"active": False})
                     logging.info("[VTO][DONE] session=%s (state cleared)", session_key)
