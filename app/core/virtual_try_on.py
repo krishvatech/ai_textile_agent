@@ -78,10 +78,7 @@ def _tight_bbox_from_rgba(img_rgba: PILImage.Image):
     return None
 
 
-def prep_garment_bytes(garment_bytes: bytes) -> str:
-    """
-    BG remove (if rembg present) + tight crop → temp PNG path.
-    """
+def prep_garment_bytes(garment_bytes: bytes, garment_type: str | None = None) -> str:
     img = PILImage.open(io.BytesIO(garment_bytes)).convert("RGBA")
     if rembg_remove:
         try:
@@ -89,9 +86,14 @@ def prep_garment_bytes(garment_bytes: bytes) -> str:
             img = PILImage.open(io.BytesIO(garment_bytes)).convert("RGBA")
         except Exception as e:
             log.debug("rembg failed (non-fatal): %s", e)
-    box = _tight_bbox_from_rgba(img)
-    if box:
-        img = img.crop(box)
+
+    # Skip tight crop for flair bottoms (lehenga / gown / choli-gown)
+    flair_types = {"lehenga", "gown", "choli_gown", "choli-gown", "ghaghra", "ghagra"}
+    if (garment_type or "").lower() not in flair_types:
+        box = _tight_bbox_from_rgba(img)
+        if box:
+            img = img.crop(box)
+
     b2 = io.BytesIO()
     img.save(b2, format="PNG")
     return _as_temp_png(b2.getvalue())
@@ -99,98 +101,35 @@ def prep_garment_bytes(garment_bytes: bytes) -> str:
 
 def neutralize_torso_bytes(person_bytes: bytes, alpha=0.7, soften=22) -> str:
     """
-    Softly mute UPPER + LOWER body so the model can draw a wide ghaghra flare.
-    - Extends mask down to knees/ankles (pref: ankles)
-    - Expands horizontally around hips by a flare factor
-    - Reads overrides from env: VTO_NEUTRALIZE_ALPHA, VTO_MASK_SOFTEN,
-      VTO_MASK_FLARE_X, VTO_MASK_PAD_Y, VTO_MASK_EXTEND_TO
+    Softly mute torso so the model replaces garment cleanly.
     Falls back to no-op if mediapipe is unavailable or landmarks missing.
     """
-    # env overrides
-    try:
-        alpha = float(os.getenv("VTO_NEUTRALIZE_ALPHA", alpha))
-    except Exception:
-        pass
-    try:
-        soften = int(os.getenv("VTO_MASK_SOFTEN", soften))
-    except Exception:
-        pass
-    flare_x = float(os.getenv("VTO_MASK_FLARE_X", "1.7"))  # widen around hips
-    pad_y   = int(os.getenv("VTO_MASK_PAD_Y", "60"))       # extra space below ankles
-    extend_to = (os.getenv("VTO_MASK_EXTEND_TO", "ankles") or "ankles").lower()
-
     img = PILImage.open(io.BytesIO(person_bytes)).convert("RGBA")
     w, h = img.size
-
-    # If mediapipe missing or fails → return original as PNG path (no-op)
     if mp_pose is None:
-        b = io.BytesIO(); img.save(b, format="PNG")
-        return _as_temp_png(b.getvalue())
+        b = io.BytesIO(); img.save(b, format="PNG"); return _as_temp_png(b.getvalue())
 
-    with mp_pose.Pose(static_image_mode=True, model_complexity=1, enable_segmentation=False) as pose:
-        res = pose.process(np.array(img.convert("RGB")))
+    with mp_pose.Pose(static_image_mode=True, model_complexity=1) as pose:
+        rgb = np.array(img.convert("RGB"))
+        res = pose.process(rgb)
 
     if not getattr(res, "pose_landmarks", None):
-        b = io.BytesIO(); img.save(b, format="PNG")
-        return _as_temp_png(b.getvalue())
+        b = io.BytesIO(); img.save(b, format="PNG"); return _as_temp_png(b.getvalue())
 
     lm = res.pose_landmarks.landmark
+    def dn(p): return (int(p.x * w), int(p.y * h))
+    # shoulders (11,12) + hips (24,23)
+    pts = [dn(lm[11]), dn(lm[12]), dn(lm[24]), dn(lm[23])]
+    xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+    x0, x1 = max(0, min(xs) - 20), min(w, max(xs) + 20)
+    y0, y1 = max(0, min(ys) - 30), min(h, max(ys) + 40)
 
-    def dn(p):  # normalized landmark -> pixel
-        return (int(p.x * w), int(p.y * h))
-
-    # Landmarks
-    L_SH, R_SH = 11, 12
-    L_HIP, R_HIP = 23, 24
-    L_KNEE, R_KNEE = 25, 26
-    L_ANK, R_ANK = 27, 28
-
-    # Key points (with fallbacks if any are missing)
-    try:
-        ls, rs = dn(lm[L_SH]), dn(lm[R_SH])
-        lh, rh = dn(lm[L_HIP]), dn(lm[R_HIP])
-        lk, rk = dn(lm[L_KNEE]), dn(lm[R_KNEE])
-        la, ra = dn(lm[L_ANK]), dn(lm[R_ANK])
-    except Exception:
-        b = io.BytesIO(); img.save(b, format="PNG")
-        return _as_temp_png(b.getvalue())
-
-    # Horizontal center & hip width
-    hip_cx = (lh[0] + rh[0]) // 2
-    hip_w  = max(10, abs(rh[0] - lh[0]))
-    half_w = int(0.5 * hip_w * flare_x)
-
-    # Top: above shoulders slightly
-    y_top = max(0, min(ls[1], rs[1]) - 20)
-
-    # Bottom: extend to ankles (preferred), fallback to knees, then image bottom
-    if extend_to == "knees":
-        y_bottom = max(lk[1], rk[1])
-    elif extend_to == "hips":
-        y_bottom = max(lh[1], rh[1]) + 30
-    else:  # "ankles"
-        y_bottom = max(la[1], ra[1])
-
-    y_bottom = min(h, y_bottom + pad_y)
-
-    # Final mask box (clamped)
-    x0 = max(0, hip_cx - half_w)
-    x1 = min(w, hip_cx + half_w)
-    y0 = max(0, y_top)
-    y1 = min(h, y_bottom)
-
-    # Draw soft neutralization box
     overlay = PILImage.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    draw.rounded_rectangle([x0, y0, x1, y1],
-                           radius=soften,
-                           fill=(180, 180, 180, int(255 * alpha)))
+    draw.rounded_rectangle([x0, y0, x1, y1], radius=soften, fill=(180, 180, 180, int(255 * alpha)))
     out = PILImage.alpha_composite(img, overlay)
-
-    b = io.BytesIO()
-    out.save(b, format="PNG")
+    b = io.BytesIO(); out.save(b, format="PNG")
     return _as_temp_png(b.getvalue())
-
 
 
 # ---------- env helpers ----------
@@ -364,6 +303,7 @@ def _to_png_bytes_from_unknown(obj: typing.Any) -> bytes:
 async def generate_vto_image(
     person_bytes: bytes,
     garment_bytes: bytes,
+    garment_type: str = None,
     cfg: typing.Optional[VTOConfig] = None,
 ) -> bytes:
     """
@@ -374,7 +314,7 @@ async def generate_vto_image(
 
     # Prep inputs
     person_tmp = neutralize_torso_bytes(person_bytes)
-    garment_tmp = prep_garment_bytes(garment_bytes)
+    garment_tmp = prep_garment_bytes(garment_bytes, garment_type=garment_type)
 
     person_img = Image.from_file(location=person_tmp)
     garment_img = Image.from_file(location=garment_tmp)
