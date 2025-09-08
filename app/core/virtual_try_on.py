@@ -111,8 +111,7 @@ def prep_garment_bytes(garment_bytes: bytes, is_flare: bool = False) -> str:
     else:
         # flare gowns/lehenga/choli — don’t crop
         # you can also add padding if needed
-        pass
-
+        img = _pad_canvas(img, pad_w=180, pad_h=200)
     b2 = io.BytesIO()
     img.save(b2, format="PNG")
     return _as_temp_png(b2.getvalue())
