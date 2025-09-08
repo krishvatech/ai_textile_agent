@@ -7,17 +7,19 @@ Required env:
 
 Optional env:
 - GOOGLE_PROJECT_ID / GOOGLE_CLOUD_PROJECT  -> if absent, auto-read from the JSON's project_id
-- GOOGLE_LOCATION / GOOGLE_CLOUD_LOCATION   -> default 'us-central1'
+- GOOGLE_LOCATION / GOOGLE_CLOUD_LOCATION   -> set to your Vertex location (e.g. 'us-central1')
 - VTO_USE_VERTEX / GOOGLE_GENAI_USE_VERTEXAI -> default True (use Vertex with ADC)
 - GOOGLE_API_KEY (only if VTO_USE_VERTEX=0 / GOOGLE_GENAI_USE_VERTEXAI=false)
 - VTO_MODEL            -> default 'virtual-try-on-preview-08-04'
-- VTO_BASE_STEPS       -> default '60'
+- VTO_BASE_STEPS       -> default '70'
 - VTO_SEED             -> integer; unset=random
 - VTO_ADD_WATERMARK    -> '1' to enable watermark
-
-Notes:
-- With Vertex (default), auth is via ADC from GOOGLE_APPLICATION_CREDENTIALS.
-- This module accepts raw bytes for both person and garment; download is handled by caller (e.g., whatsapp flow).
+- VTO_NEUTRALIZE_TORSO -> default '1' (enable soft neutralization)
+- VTO_TORSO_ALPHA      -> default 0.70 (how strong to dim inside mask)
+- VTO_TORSO_SOFTEN     -> default 22  (kept for compatibility; not box radius anymore)
+- VTO_GARMENT_MAX_SIDE -> default 1600
+- VTO_NUM_IMAGES       -> default 4
+- VTO_IS_FLARE         -> '1' to keep full silhouette + padding for lehenga/gown/anarkali
 """
 
 import os
@@ -32,9 +34,9 @@ import inspect
 import logging
 from uuid import uuid4
 from dataclasses import dataclass
-from openai import AsyncOpenAI
+
 import numpy as np
-from PIL import Image as PILImage, ImageDraw
+from PIL import Image as PILImage, ImageDraw, ImageFilter, ImageEnhance
 
 from google import genai
 from google.genai.types import (
@@ -77,105 +79,128 @@ def _tight_bbox_from_rgba(img_rgba: PILImage.Image):
             return int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1)
     return None
 
-# --- add near your other helpers ---
-def _pad_canvas(img: PILImage.Image, pad_w=160, pad_h=60) -> PILImage.Image:
+
+def _pad_canvas(img: PILImage.Image, pad_w=180, pad_h=200) -> PILImage.Image:
+    """Pad around the garment so flared hems aren’t clipped after bg-removal."""
     W = img.width + pad_w * 2
     H = img.height + pad_h
     canvas = PILImage.new("RGBA", (W, H), (0, 0, 0, 0))
     canvas.paste(img, (pad_w, 0))
     return canvas
 
-def _is_flare_piece_env() -> bool:
-    return os.getenv("VTO_FLARE", "0").strip().lower() in ("1","true","y","yes")
 
-
-
-# virtual_try_on.py
-
-def prep_garment_bytes(garment_bytes: bytes, is_flare: bool = False) -> str:
+def prep_garment_bytes(garment_bytes: bytes) -> str:
     """
-    Preprocess garment image for recontext:
-    - Always remove background if possible.
-    - If not flare -> crop tight bbox (faster, cleaner).
-    - If flare    -> do NOT crop; keep full silhouette and pad canvas a bit.
+    BG remove (if rembg present) + (tight crop OR keep full silhouette for flare)
+    + safe max-side → temp PNG path.
     """
-    # 1) BG remove first (for both paths)
-    img_rgba = None
+    img = PILImage.open(io.BytesIO(garment_bytes)).convert("RGBA")
+
+    # optional background remove
     if rembg_remove:
         try:
-            removed = rembg_remove(garment_bytes)
-            img_rgba = PILImage.open(io.BytesIO(removed)).convert("RGBA")
-        except Exception:
-            pass
+            garment_bytes = rembg_remove(garment_bytes)
+            img = PILImage.open(io.BytesIO(garment_bytes)).convert("RGBA")
+        except Exception as e:
+            log.debug("rembg failed (non-fatal): %s", e)
 
-    if img_rgba is None:
-        img_rgba = PILImage.open(io.BytesIO(garment_bytes)).convert("RGBA")
+    is_flare = _env_bool("VTO_IS_FLARE", False)
 
-    # 2) Crop vs. keep
-    if not is_flare:
-        box = _tight_bbox_from_rgba(img_rgba)
-        if box:
-            img_rgba = img_rgba.crop(box)
+    if is_flare:
+        # keep full silhouette; just pad so wide hems are preserved
+        img = _pad_canvas(img, pad_w=200, pad_h=260)
     else:
-        # keep the whole shape so the skirt hem and width survive
-        img_rgba = _pad_canvas(img_rgba, pad_w=180, pad_h=200)
+        # tight bbox from alpha (good for straight-fall items like saree)
+        box = _tight_bbox_from_rgba(img)
+        if box:
+            img = img.crop(box)
 
-    b = io.BytesIO()
-    img_rgba.save(b, format="PNG")
-    return _as_temp_png(b.getvalue())
+    # safe max-side (prevents extreme scales that hurt warping)
+    max_side = _env_int("VTO_GARMENT_MAX_SIDE", 1600)
+    w, h = img.size
+    scale = min(1.0, max_side / float(max(w, h)))
+    if scale < 1.0:
+        img = img.resize((int(w * scale), int(h * scale)), PILImage.LANCZOS)
 
-def neutralize_torso_bytes(person_bytes: bytes, alpha=0.7, soften=22) -> str:
+    b2 = io.BytesIO()
+    img.save(b2, format="PNG")
+    return _as_temp_png(b2.getvalue())
+
+
+def neutralize_torso_bytes(
+    person_bytes: bytes,
+    alpha=0.7,
+    soften=22,  # kept for env compatibility; not used as a hard rectangle radius
+) -> typing.Union[str, typing.Tuple[str, typing.Tuple[int, int, int, int]]]:
     """
-    Softly mute torso so the model replaces garment cleanly.
-    Falls back to no-op if mediapipe is unavailable or landmarks missing.
+    Feathered, shape-less neutralization (NO rectangles/polygons).
+    - Desaturates + slightly dims clothing region via a blurred elliptical mask.
+    - Returns (temp_path, torso_box) for light fit scoring.
+    - Falls back to no-op if mediapipe is unavailable.
     """
     img = PILImage.open(io.BytesIO(person_bytes)).convert("RGBA")
     w, h = img.size
+
+    # Default torso_box = whole image (safe fallback)
+    default_box = (0, 0, w, h)
+
     if mp_pose is None:
-        b = io.BytesIO(); img.save(b, format="PNG"); return _as_temp_png(b.getvalue())
+        b = io.BytesIO(); img.save(b, format="PNG")
+        return _as_temp_png(b.getvalue()), default_box
 
     with mp_pose.Pose(static_image_mode=True, model_complexity=1) as pose:
         rgb = np.array(img.convert("RGB"))
         res = pose.process(rgb)
 
     if not getattr(res, "pose_landmarks", None):
-        b = io.BytesIO(); img.save(b, format="PNG"); return _as_temp_png(b.getvalue())
+        b = io.BytesIO(); img.save(b, format="PNG")
+        return _as_temp_png(b.getvalue()), default_box
 
     lm = res.pose_landmarks.landmark
     def dn(p): return (int(p.x * w), int(p.y * h))
-    # shoulders (11,12) + hips (24,23)
-    pts = [dn(lm[11]), dn(lm[12]), dn(lm[24]), dn(lm[23])]
-    xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+    shoulders = [dn(lm[11]), dn(lm[12])]
+    hips      = [dn(lm[24]), dn(lm[23])]
+    xs = [p[0] for p in shoulders + hips]
+    ys = [p[1] for p in shoulders + hips]
 
-    x_mid = int(sum(xs)/len(xs))
-    x_span = max(120, int((max(xs)-min(xs)) * 1.4))  # wider than torso
-    x0 = max(0, x_mid - x_span)
-    x1 = min(w, x_mid + x_span)
+    # Clothing region estimate
+    x_mid = int(sum(xs) / len(xs))
+    half  = max(110, int((max(xs) - min(xs)) * 0.9))
+    x0, x1 = max(0, x_mid - half), min(w, x_mid + half)
+    y0     = max(0, min(ys) - 30)
+    y1     = int(h * 0.98)
+    torso_box = (x0, y0, x1, y1)
 
-    y0 = max(0, min(ys) - 40)     # a bit above shoulders
-    y1 = int(h * 0.98)            # down to shoes
+    # Build a soft mask (white=apply adjustment, black=keep original)
+    mask = PILImage.new("L", (w, h), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.ellipse([x0 - 60, y0, x1 + 60, y1], fill=int(255 * alpha))
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=70))  # feather edges heavily
 
-    overlay = PILImage.new("RGBA", img.size, (0,0,0,0))
-    draw = ImageDraw.Draw(overlay)
+    # Desaturate + dim a bit inside mask
+    base_rgb = img.convert("RGB")
+    sat = ImageEnhance.Color(base_rgb).enhance(0.35)
+    bri = ImageEnhance.Brightness(sat).enhance(0.92)
+    adjusted = PILImage.merge("RGBA", (*bri.split(), img.split()[3]))
 
-    # Stronger mute near torso…
-    draw.rounded_rectangle([x0, max(0, min(ys)-30), x1, max(ys)+60],
-                        radius=28, fill=(180,180,180, int(255*0.78)))
+    out = PILImage.composite(adjusted, img, mask)
 
-    # …and a softer, wider taper for the skirt area
-    draw.polygon([(x0-80, max(ys)+40), (x1+80, max(ys)+40), (x1+40, y1), (x0-40, y1)],
-                fill=(170,170,170, int(255*0.52)))
-
-    out = PILImage.alpha_composite(img, overlay)
-    b = io.BytesIO()
-    out.save(b, format="PNG")
-    return _as_temp_png(b.getvalue())
+    b = io.BytesIO(); out.save(b, format="PNG")
+    return _as_temp_png(b.getvalue()), torso_box
 
 
 # ---------- env helpers ----------
 def _env_bool(name: str, default: bool = False) -> bool:
     v = os.getenv(name, str(int(default))).strip().lower()
     return v in ("1", "true", "t", "yes", "y")
+
+
+def _env_float(name: str, default: float) -> float:
+    v = os.getenv(name)
+    try:
+        return float(v) if v is not None else default
+    except Exception:
+        return default
 
 
 def _env_int(name: str, default: int) -> int:
@@ -201,23 +226,15 @@ def _project_from_adc() -> typing.Optional[str]:
 # ---------- config ----------
 @dataclass
 class VTOConfig:
-    base_steps: int = _env_int("VTO_BASE_STEPS", 60)
+    base_steps: int = _env_int("VTO_BASE_STEPS", 70)
     seed: typing.Optional[int] = (int(os.getenv("VTO_SEED")) if os.getenv("VTO_SEED") else None)
     add_watermark: bool = _env_bool("VTO_ADD_WATERMARK", False)
     model: str = os.getenv("VTO_MODEL", "virtual-try-on-preview-08-04")
 
     # Vertex by default; allow Google-provided env names too
     use_vertex: bool = _env_bool("VTO_USE_VERTEX", _env_bool("GOOGLE_GENAI_USE_VERTEXAI", True))
-    project: typing.Optional[str] = (
-        os.getenv("GOOGLE_PROJECT_ID")
-        or os.getenv("GOOGLE_CLOUD_PROJECT")
-        or _project_from_adc()
-    )
-    location: str = (
-        os.getenv("GOOGLE_LOCATION")
-        or os.getenv("GOOGLE_CLOUD_LOCATION")
-        or "us-central1"
-    )
+    project: typing.Optional[str] = os.getenv("GOOGLE_PROJECT_ID")
+    location: str = os.getenv("GOOGLE_LOCATION")
 
 
 def _validate_adc_or_die():
@@ -280,9 +297,8 @@ def _to_png_bytes_from_unknown(obj: typing.Any) -> bytes:
         obj.save(buf, format="PNG")
         return buf.getvalue()
 
-    # 3) google.genai.types.Image (the class we imported as Image)
+    # 3) google.genai.types.Image
     if isinstance(obj, Image):
-        # Try a direct .as_pil_image()
         as_pil = getattr(obj, "as_pil_image", None)
         if callable(as_pil):
             try:
@@ -292,7 +308,6 @@ def _to_png_bytes_from_unknown(obj: typing.Any) -> bytes:
             except Exception as e:
                 log.debug("as_pil_image() failed: %s", e)
 
-        # Known byte-like fields
         for attr in ("bytes", "image_bytes", "data", "content"):
             val = getattr(obj, attr, None)
             if isinstance(val, (bytes, bytearray)):
@@ -302,26 +317,19 @@ def _to_png_bytes_from_unknown(obj: typing.Any) -> bytes:
                 if decoded:
                     return decoded
 
-        # Last resort: an object-level .save that takes only a file-like param
         save_fn = getattr(obj, "save", None)
         if callable(save_fn):
             try:
                 buf = io.BytesIO()
-                # Do NOT pass 'format' — some SDK versions don't accept it
-                save_fn(buf)
+                save_fn(buf)  # some SDK versions don’t accept format=
                 return buf.getvalue()
             except TypeError:
-                # try with a positional "PNG" just in case
-                try:
-                    buf = io.BytesIO()
-                    save_fn(buf, "PNG")
-                    return buf.getvalue()
-                except Exception as e:
-                    log.debug("obj.save fallback failed: %s", e)
+                buf = io.BytesIO()
+                save_fn(buf, "PNG")
+                return buf.getvalue()
 
     # 4) dict-like predictions (Vertex REST shapes)
     if isinstance(obj, dict):
-        # common keys: bytesBase64Encoded, imageBytes, image, content
         for k in ("bytesBase64Encoded", "imageBytes", "image", "content"):
             if k in obj:
                 b = _decode_base64_field(obj[k])
@@ -330,71 +338,60 @@ def _to_png_bytes_from_unknown(obj: typing.Any) -> bytes:
 
     # 5) iterable/sequence of candidates
     if isinstance(obj, (list, tuple)):
-        for item in reversed(obj):   # ← prefer the last (usually the generated result)
+        for item in obj:
             try:
                 return _to_png_bytes_from_unknown(item)
             except Exception:
                 continue
+
     raise RuntimeError("Unsupported image output type (cannot convert to PNG bytes)")
 
 
-async def detect_presenting_gender_openai(person_bytes: bytes) -> str:
+def _score_fit_against_torso(img_bytes: bytes, ref_box: typing.Tuple[int, int, int, int]) -> float:
     """
-    Auto-detect gender from person image using GPT Vision.
-    Returns 'male' | 'female' | 'unknown'.
+    Very light heuristic: more non-background pixels inside the torso rectangle == better fit.
     """
     try:
-        api_key = os.getenv("GPT_API_KEY")
-        model = os.getenv("GPT_MODEL", "gpt-4o")  # must be vision-capable
-        if not api_key:
-            return "unknown"
-
-        client = AsyncOpenAI(api_key=api_key)
-        b64 = base64.b64encode(person_bytes).decode("ascii")
-
-        resp = await client.chat.completions.create(
-            model=model,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": "You are a strict JSON classifier."},
-                {"role": "user", "content": [
-                    {"type": "text", "text": "Classify presenting gender. Only JSON: {\"gender\":\"male|female|unknown\"}."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                ]}
-            ],
-            temperature=0
-        )
-        data = json.loads(resp.choices[0].message.content)
-        g = str(data.get("gender", "unknown")).lower()
-        return g if g in {"male", "female"} else "unknown"
+        pil = PILImage.open(io.BytesIO(img_bytes)).convert("RGBA")
+        x0, y0, x1, y1 = ref_box
+        crop = pil.crop((x0, y0, x1, y1))
+        arr = np.array(crop)
+        if arr.shape[2] == 4:
+            alpha = arr[..., 3]
+            return float((alpha > 10).sum()) / float(alpha.size)
     except Exception:
-        return "unknown"
+        pass
+    return 0.0
+
 
 # ---------- main API ----------
 async def generate_vto_image(
     person_bytes: bytes,
     garment_bytes: bytes,
     cfg: typing.Optional[VTOConfig] = None,
-    is_flare: bool = False, 
 ) -> bytes:
     """
     Returns PNG bytes of the try-on result. Fully env-driven; no hardcoded paths/keys.
     """
-    if not person_bytes:
-        raise ValueError("VTO: person_bytes is empty or None. Provide a person photo first.")
-    if not garment_bytes:
-        raise ValueError("VTO: garment_bytes is empty or None. Provide a garment image.")
     cfg = cfg or VTOConfig()
     client = _make_client(cfg)
 
     # Prep inputs
-    person_tmp = neutralize_torso_bytes(person_bytes)
-    garment_tmp = prep_garment_bytes(garment_bytes, is_flare=is_flare)
+    torso_box = None
+    if _env_bool("VTO_NEUTRALIZE_TORSO", True):
+        person_tmp, torso_box = neutralize_torso_bytes(
+            person_bytes,
+            alpha=_env_float("VTO_TORSO_ALPHA", 0.70),
+            soften=int(_env_int("VTO_TORSO_SOFTEN", 22)),
+        )
+    else:
+        # no-op neutralization path
+        pil = PILImage.open(io.BytesIO(person_bytes)).convert("RGBA")
+        b = io.BytesIO(); pil.save(b, format="PNG")
+        person_tmp = _as_temp_png(b.getvalue())
+        torso_box = (0, 0, pil.size[0], pil.size[1])
 
-    if not person_tmp or not os.path.isfile(person_tmp):
-        raise RuntimeError("VTO: failed to prepare person image (temp path missing).")
-    if not garment_tmp or not os.path.isfile(garment_tmp):
-        raise RuntimeError("VTO: failed to prepare garment image (temp path missing).")
+    garment_tmp = prep_garment_bytes(garment_bytes)
 
     person_img = Image.from_file(location=person_tmp)
     garment_img = Image.from_file(location=garment_tmp)
@@ -402,7 +399,7 @@ async def generate_vto_image(
     # Recontext config
     try:
         re_cfg = RecontextImageConfig(
-            number_of_images=1,
+            number_of_images=_env_int("VTO_NUM_IMAGES", 4),
             base_steps=cfg.base_steps,
             seed=(cfg.seed or random.randint(1, 10_000_000)),
             add_watermark=cfg.add_watermark,
@@ -439,11 +436,7 @@ async def generate_vto_image(
 
     resp = await asyncio.to_thread(_call_recontext)
 
-    # --- Extract first image-like artifact from response ---
-    # Common shapes:
-    #   - resp.generated_images -> [GeneratedImage(image=Image(...)), ...]
-    #   - resp.images -> [Image | PIL.Image | bytes, ...]
-    #   - resp.predictions -> [ { bytesBase64Encoded: ... }, ... ]
+    # --- Extract candidates ---
     images = (
         getattr(resp, "generated_images", None)
         or getattr(resp, "images", None)
@@ -453,31 +446,24 @@ async def generate_vto_image(
     )
 
     if not images:
-        # dict response with predictions
         if isinstance(resp, dict) and "predictions" in resp:
             images = resp["predictions"]
         else:
             raise RuntimeError("VTO returned no image")
 
-    # Prefer nested .image field if present (GeneratedImage)
-    candidate = images[0]
-    if hasattr(candidate, "image"):
-        candidate = candidate.image
+    # Score & select best candidate
+    scored: typing.List[typing.Tuple[float, bytes]] = []
+    for cand in images:
+        obj = cand.image if hasattr(cand, "image") else cand
+        try:
+            b = _to_png_bytes_from_unknown(obj)
+            score = _score_fit_against_torso(b, torso_box) if torso_box else 0.0
+            scored.append((score, b))
+        except Exception as e:
+            log.debug("candidate decode failed: %s", e)
 
-    png = _to_png_bytes_from_unknown(candidate)
+    if not scored:
+        raise RuntimeError("VTO returned images but none were decodable")
 
-    # --- sanity check: don’t accidentally return the neutralized person frame ---
-    try:
-        with open(person_tmp, "rb") as fh:
-            person_png = fh.read()
-        if len(person_png) == len(png):
-            # Same size → likely just echoed the input; prefer last candidate if available
-            if isinstance(images, (list, tuple)) and len(images) > 1:
-                last = images[-1]
-                if hasattr(last, "image"):
-                    last = last.image
-                png = _to_png_bytes_from_unknown(last)
-    except Exception:
-        pass
-
-    return png
+    scored.sort(key=lambda t: t[0], reverse=True)
+    return scored[0][1]
