@@ -84,13 +84,14 @@ def _normalize_type_gender(val: str | None) -> str | None:
     if not val:
         return None
     v = val.strip().lower()
-    if v in {"Male", "Man", "Men", "Gents", "Boys"}:
-        return "Male"
-    if v in {"Female", "Woman", "Women", "Ladies", "Girls"}:
-        return "Female"
-    if v == "Unisex":
-        return "Unisex"
+    if v in {"male", "man", "men", "gents", "boys"}:
+        return "male"
+    if v in {"female", "woman", "women", "ladies", "girls"}:
+        return "female"
+    if v == "unisex":
+        return "unisex"
     return None
+
 
 async def get_tenant_id_by_phone(phone_number: str, db):
     """
@@ -1555,7 +1556,7 @@ async def receive_cloud_webhook(request: Request):
                     if occasion: seed_entities["occasion"] = occasion
                     if color: seed_entities["color"] = color
                     if required_gender in {"men", "women"}:
-                        seed_entities["type"] = required_gender
+                        seed_entities["type"] = "male" if required_gender == "men" else "female"
                     if is_rental is not None:
                         seed_entities["is_rental"] = bool(is_rental)
 
