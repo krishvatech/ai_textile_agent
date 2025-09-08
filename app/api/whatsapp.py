@@ -1044,8 +1044,10 @@ async def _handle_vto_flow(
                         garment_bytes = await _resolve_garment_bytes(vto_state)
                         # --- GENDER GUARD (explicit outfit type vs detected person) ---
                         required_gender = _normalize_type_gender(((vto_state.get("seed") or {}).get("type")))
+                        logging.info(f"==================  required_gender ==  {required_gender}=========================")
                         if required_gender in {"male", "female"}:
                             person_gender = await detect_presenting_gender_openai(vto_state["person_image"])
+                            logging.info(f"==================  person_gender ==  {person_gender}=========================")
                             if person_gender in {"male", "female"} and person_gender != required_gender:
                                 msg = f"❌ This outfit is for {required_gender}, but the photo looks {person_gender}. Please send a {required_gender} person photo or pick a {person_gender} outfit."
                                 mid = await send_whatsapp_reply_cloud(
