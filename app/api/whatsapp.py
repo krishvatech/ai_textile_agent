@@ -84,12 +84,12 @@ def _normalize_type_gender(val: str | None) -> str | None:
     if not val:
         return None
     v = val.strip().lower()
-    if v in {"male", "man", "men", "gents", "boys"}:
-        return "male"
-    if v in {"female", "woman", "women", "ladies", "girls"}:
-        return "female"
-    if v == "unisex":
-        return "unisex"
+    if v in {"Male", "Man", "Men", "Gents", "Boys"}:
+        return "Male"
+    if v in {"Female", "Woman", "Women", "Ladies", "Girls"}:
+        return "Female"
+    if v == "Unisex":
+        return "Unisex"
     return None
 
 async def get_tenant_id_by_phone(phone_number: str, db):
