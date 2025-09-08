@@ -6,8 +6,8 @@ Required env:
 - GOOGLE_APPLICATION_CREDENTIALS -> path to service-account JSON (e.g. D:\ai_textile_agent\credentials.json)
 
 Optional env:
-- GOOGLE_PROJECT_ID / GOOGLE_CLOUD_PROJECT  -> if absent, auto-read from the JSON's project_id
-- GOOGLE_LOCATION / GOOGLE_CLOUD_LOCATION   -> set to your Vertex location (e.g. 'us-central1')
+- GOOGLE_PROJECT_ID / GOOGLE_CLOUD_PROJECT  -> set your Vertex project
+- GOOGLE_LOCATION / GOOGLE_CLOUD_LOCATION   -> set your Vertex location (e.g. 'us-central1')
 - VTO_USE_VERTEX / GOOGLE_GENAI_USE_VERTEXAI -> default True (use Vertex with ADC)
 - GOOGLE_API_KEY (only if VTO_USE_VERTEX=0 / GOOGLE_GENAI_USE_VERTEXAI=false)
 - VTO_MODEL            -> default 'virtual-try-on-preview-08-04'
@@ -15,11 +15,13 @@ Optional env:
 - VTO_SEED             -> integer; unset=random
 - VTO_ADD_WATERMARK    -> '1' to enable watermark
 - VTO_NEUTRALIZE_TORSO -> default '1' (enable soft neutralization)
-- VTO_TORSO_ALPHA      -> default 0.70 (how strong to dim inside mask)
-- VTO_TORSO_SOFTEN     -> default 22  (kept for compatibility; not box radius anymore)
+- VTO_TORSO_ALPHA      -> default 0.70
+- VTO_TORSO_SOFTEN     -> default 22 (kept for env compatibility)
 - VTO_GARMENT_MAX_SIDE -> default 1600
 - VTO_NUM_IMAGES       -> default 4
-- VTO_IS_FLARE         -> '1' to keep full silhouette + padding for lehenga/gown/anarkali
+- VTO_IS_FLARE         -> '1' to keep full silhouette for lehenga/gown/anarkali
+- GPT_API_KEY          -> for detect_presenting_gender_openai()
+- GPT_MODEL            -> default 'gpt-4o' (must be vision-capable)
 """
 
 import os
@@ -46,6 +48,12 @@ from google.genai.types import (
     ProductImage,
     Image,  # google.genai.types.Image (not PIL)
 )
+
+# for gender detection (kept for backward-compat with whatsapp.py)
+try:
+    from openai import AsyncOpenAI
+except Exception:
+    AsyncOpenAI = None  # handled in function
 
 log = logging.getLogger(__name__)
 
@@ -96,7 +104,6 @@ def prep_garment_bytes(garment_bytes: bytes) -> str:
     """
     img = PILImage.open(io.BytesIO(garment_bytes)).convert("RGBA")
 
-    # optional background remove
     if rembg_remove:
         try:
             garment_bytes = rembg_remove(garment_bytes)
@@ -110,12 +117,12 @@ def prep_garment_bytes(garment_bytes: bytes) -> str:
         # keep full silhouette; just pad so wide hems are preserved
         img = _pad_canvas(img, pad_w=200, pad_h=260)
     else:
-        # tight bbox from alpha (good for straight-fall items like saree)
+        # tight bbox (good for straight-fall items like saree)
         box = _tight_bbox_from_rgba(img)
         if box:
             img = img.crop(box)
 
-    # safe max-side (prevents extreme scales that hurt warping)
+    # safe max-side
     max_side = _env_int("VTO_GARMENT_MAX_SIDE", 1600)
     w, h = img.size
     scale = min(1.0, max_side / float(max(w, h)))
@@ -130,18 +137,16 @@ def prep_garment_bytes(garment_bytes: bytes) -> str:
 def neutralize_torso_bytes(
     person_bytes: bytes,
     alpha=0.7,
-    soften=22,  # kept for env compatibility; not used as a hard rectangle radius
+    soften=22,  # kept for env compatibility; not a hard rectangle now
 ) -> typing.Union[str, typing.Tuple[str, typing.Tuple[int, int, int, int]]]:
     """
-    Feathered, shape-less neutralization (NO rectangles/polygons).
+    Feathered, shape-less neutralization (NO visible boxes).
     - Desaturates + slightly dims clothing region via a blurred elliptical mask.
     - Returns (temp_path, torso_box) for light fit scoring.
     - Falls back to no-op if mediapipe is unavailable.
     """
     img = PILImage.open(io.BytesIO(person_bytes)).convert("RGBA")
     w, h = img.size
-
-    # Default torso_box = whole image (safe fallback)
     default_box = (0, 0, w, h)
 
     if mp_pose is None:
@@ -163,7 +168,6 @@ def neutralize_torso_bytes(
     xs = [p[0] for p in shoulders + hips]
     ys = [p[1] for p in shoulders + hips]
 
-    # Clothing region estimate
     x_mid = int(sum(xs) / len(xs))
     half  = max(110, int((max(xs) - min(xs)) * 0.9))
     x0, x1 = max(0, x_mid - half), min(w, x_mid + half)
@@ -171,13 +175,13 @@ def neutralize_torso_bytes(
     y1     = int(h * 0.98)
     torso_box = (x0, y0, x1, y1)
 
-    # Build a soft mask (white=apply adjustment, black=keep original)
+    # soft mask
     mask = PILImage.new("L", (w, h), 0)
     draw = ImageDraw.Draw(mask)
     draw.ellipse([x0 - 60, y0, x1 + 60, y1], fill=int(255 * alpha))
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=70))  # feather edges heavily
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=70))
 
-    # Desaturate + dim a bit inside mask
+    # subtle desaturate + dim
     base_rgb = img.convert("RGB")
     sat = ImageEnhance.Color(base_rgb).enhance(0.35)
     bri = ImageEnhance.Brightness(sat).enhance(0.92)
@@ -230,8 +234,6 @@ class VTOConfig:
     seed: typing.Optional[int] = (int(os.getenv("VTO_SEED")) if os.getenv("VTO_SEED") else None)
     add_watermark: bool = _env_bool("VTO_ADD_WATERMARK", False)
     model: str = os.getenv("VTO_MODEL", "virtual-try-on-preview-08-04")
-
-    # Vertex by default; allow Google-provided env names too
     use_vertex: bool = _env_bool("VTO_USE_VERTEX", _env_bool("GOOGLE_GENAI_USE_VERTEXAI", True))
     project: typing.Optional[str] = os.getenv("GOOGLE_PROJECT_ID")
     location: str = os.getenv("GOOGLE_LOCATION")
@@ -258,7 +260,6 @@ def _make_client(cfg: VTOConfig) -> genai.Client:
             location=cfg.location,
             http_options=HttpOptions(api_version="v1"),
         )
-    # Non-Vertex path
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
         raise EnvironmentError("VTO_USE_VERTEX=0 requires GOOGLE_API_KEY in the environment.")
@@ -278,26 +279,17 @@ def _decode_base64_field(val: typing.Any) -> typing.Optional[bytes]:
 
 
 def _to_png_bytes_from_unknown(obj: typing.Any) -> bytes:
-    """
-    Robustly convert various image objects to PNG bytes.
-
-    Handles:
-      - PIL.Image.Image
-      - google.genai.types.Image (via .as_pil_image() / .bytes / .data / .save)
-      - dict-like Vertex 'predictions' payloads (bytesBase64Encoded, imageBytes, etc.)
-      - plain bytes
-    """
-    # 1) Already PNG/raw bytes?
+    # raw bytes
     if isinstance(obj, (bytes, bytearray)):
         return bytes(obj)
 
-    # 2) PIL Image
+    # PIL
     if isinstance(obj, PILImage.Image):
         buf = io.BytesIO()
         obj.save(buf, format="PNG")
         return buf.getvalue()
 
-    # 3) google.genai.types.Image
+    # google.genai Image
     if isinstance(obj, Image):
         as_pil = getattr(obj, "as_pil_image", None)
         if callable(as_pil):
@@ -321,14 +313,14 @@ def _to_png_bytes_from_unknown(obj: typing.Any) -> bytes:
         if callable(save_fn):
             try:
                 buf = io.BytesIO()
-                save_fn(buf)  # some SDK versions don’t accept format=
+                save_fn(buf)
                 return buf.getvalue()
             except TypeError:
                 buf = io.BytesIO()
                 save_fn(buf, "PNG")
                 return buf.getvalue()
 
-    # 4) dict-like predictions (Vertex REST shapes)
+    # dict predictions
     if isinstance(obj, dict):
         for k in ("bytesBase64Encoded", "imageBytes", "image", "content"):
             if k in obj:
@@ -336,7 +328,7 @@ def _to_png_bytes_from_unknown(obj: typing.Any) -> bytes:
                 if b:
                     return b
 
-    # 5) iterable/sequence of candidates
+    # sequences
     if isinstance(obj, (list, tuple)):
         for item in obj:
             try:
@@ -348,9 +340,6 @@ def _to_png_bytes_from_unknown(obj: typing.Any) -> bytes:
 
 
 def _score_fit_against_torso(img_bytes: bytes, ref_box: typing.Tuple[int, int, int, int]) -> float:
-    """
-    Very light heuristic: more non-background pixels inside the torso rectangle == better fit.
-    """
     try:
         pil = PILImage.open(io.BytesIO(img_bytes)).convert("RGBA")
         x0, y0, x1, y1 = ref_box
@@ -364,7 +353,47 @@ def _score_fit_against_torso(img_bytes: bytes, ref_box: typing.Tuple[int, int, i
     return 0.0
 
 
+# ---------- backward-compat API used by whatsapp.py ----------
+async def detect_presenting_gender_openai(person_bytes: bytes) -> str:
+    """
+    Auto-detect gender from person image using GPT Vision.
+    Returns 'male' | 'female' | 'unknown'.
+    Uses env: GPT_API_KEY, GPT_MODEL (default 'gpt-4o').
+    """
+    try:
+        api_key = os.getenv("GPT_API_KEY")
+        model = os.getenv("GPT_MODEL", "gpt-4o")
+        if not api_key or AsyncOpenAI is None:
+            return "unknown"
+
+        client = AsyncOpenAI(api_key=api_key)
+        b64 = base64.b64encode(person_bytes).decode("ascii")
+
+        resp = await client.chat.completions.create(
+            model=model,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "You are a strict JSON classifier."},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Classify presenting gender. Only JSON: {\"gender\":\"male|female|unknown\"}."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                ]}
+            ],
+            temperature=0
+        )
+        data = json.loads(resp.choices[0].message.content)
+        g = str(data.get("gender", "unknown")).lower()
+        return g if g in {"male", "female"} else "unknown"
+    except Exception:
+        return "unknown"
+
+
 # ---------- main API ----------
+@dataclass
+class _Dummy:  # just to allow type hints grouping above
+    pass
+
+
 async def generate_vto_image(
     person_bytes: bytes,
     garment_bytes: bytes,
@@ -385,7 +414,6 @@ async def generate_vto_image(
             soften=int(_env_int("VTO_TORSO_SOFTEN", 22)),
         )
     else:
-        # no-op neutralization path
         pil = PILImage.open(io.BytesIO(person_bytes)).convert("RGBA")
         b = io.BytesIO(); pil.save(b, format="PNG")
         person_tmp = _as_temp_png(b.getvalue())
@@ -414,29 +442,22 @@ async def generate_vto_image(
         product_images=[ProductImage(product_image=garment_img)],
     )
 
-    # ---- Robust call across SDK versions ----
+    # Robust call across SDK versions
     def _call_recontext():
         fn = client.models.recontext_image
         params = tuple(inspect.signature(fn).parameters.keys())
-
-        # Preferred (newer SDKs)
         if "model" in params and "source" in params:
             return fn(model=cfg.model, source=src, config=re_cfg)
-
-        # Some early previews used 'image' instead of 'source'
         if "model" in params and "image" in params:
             return fn(model=cfg.model, image=src, config=re_cfg)
-
-        # Fallback to positional (older, undocumented shapes)
         try:
             return fn(cfg.model, src, re_cfg)
         except TypeError:
-            # last resort: try without config
             return fn(cfg.model, src)
 
     resp = await asyncio.to_thread(_call_recontext)
 
-    # --- Extract candidates ---
+    # Collect candidates
     images = (
         getattr(resp, "generated_images", None)
         or getattr(resp, "images", None)
@@ -451,7 +472,7 @@ async def generate_vto_image(
         else:
             raise RuntimeError("VTO returned no image")
 
-    # Score & select best candidate
+    # Score & select best
     scored: typing.List[typing.Tuple[float, bytes]] = []
     for cand in images:
         obj = cand.image if hasattr(cand, "image") else cand
