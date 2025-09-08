@@ -1549,7 +1549,9 @@ async def receive_cloud_webhook(request: Request):
                     is_rental = attrs_db.get("is_rental")
                     if is_rental is None:
                         is_rental = attrs_text.get("is_rental")
-                    required_gender = (attrs_db.get("type") or  attrs_text.get("type")).strip().lower()
+                    required_gender = (attrs_db.get("type") or attrs_text.get("type"))
+                    logging.info(f"f----set required_gender={required_gender}----")
+                    required_gender = required_gender.strip().lower() 
                     seed_entities = {"name": resolved_name}
                     if category: seed_entities["category"] = category
                     if fabric: seed_entities["fabric"] = fabric
