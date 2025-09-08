@@ -359,29 +359,60 @@ async def generate_vto_image(
 
     resp = await asyncio.to_thread(_call_recontext)
 
-    # --- Extract first image-like artifact from response ---
-    # Common shapes:
-    #   - resp.generated_images -> [GeneratedImage(image=Image(...)), ...]
-    #   - resp.images -> [Image | PIL.Image | bytes, ...]
-    #   - resp.predictions -> [ { bytesBase64Encoded: ... }, ... ]
-    images = (
-        getattr(resp, "generated_images", None)
-        or getattr(resp, "images", None)
-        or getattr(resp, "predictions", None)
-        or (resp if isinstance(resp, (list, tuple)) else None)
-        or []
-    )
+    # Prefer REST-style base64 predictions first (most reliable),
+    # then generated_images.image, then images.
+    def _iter_candidates(r):
+        # dict response (REST)
+        if isinstance(r, dict):
+            preds = r.get("predictions") or []
+            for p in preds:
+                if isinstance(p, dict):
+                    # common base64 keys
+                    for k in ("bytesBase64Encoded", "imageBytes", "image", "content"):
+                        b = _decode_base64_field(p.get(k))
+                        if b:
+                            yield b
+                    # nested "image" object
+                    img = p.get("image")
+                    if img:
+                        yield img
+            # some previews used 'generated_images' as dicts
+            gens = r.get("generated_images") or []
+            for g in gens:
+                # same base64 scan
+                if isinstance(g, dict):
+                    for k in ("bytesBase64Encoded", "imageBytes", "image", "content"):
+                        b = _decode_base64_field(g.get(k))
+                        if b:
+                            yield b
+                    if "image" in g:
+                        yield g["image"]
 
-    if not images:
-        # dict response with predictions
-        if isinstance(resp, dict) and "predictions" in resp:
-            images = resp["predictions"]
-        else:
-            raise RuntimeError("VTO returned no image")
+        # object with attributes
+        for attr in ("predictions", "generated_images", "images"):
+            items = getattr(r, attr, None)
+            if items:
+                for it in items:
+                    # GeneratedImage(image=...)
+                    img = getattr(it, "image", None)
+                    yield img or it
 
-    # Prefer nested .image field if present (GeneratedImage)
-    candidate = images[0]
-    if hasattr(candidate, "image"):
-        candidate = candidate.image
+        # raw list/tuple
+        if isinstance(r, (list, tuple)):
+            for it in r:
+                yield it
 
-    return _to_png_bytes_from_unknown(candidate)
+        # last resort: whole object
+        yield r
+
+    last_err = None
+    for cand in _iter_candidates(resp):
+        try:
+            return _to_png_bytes_from_unknown(cand)
+        except Exception as e:
+            last_err = e
+            # keep trying next candidate
+            continue
+
+    # If we got here, nothing was convertible
+    raise RuntimeError(f"VTO returned no usable image bytes (last error: {last_err})")
