@@ -77,24 +77,47 @@ def _tight_bbox_from_rgba(img_rgba: PILImage.Image):
             return int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1)
     return None
 
+# --- add near your other helpers ---
+def _pad_canvas(img: PILImage.Image, pad_w=160, pad_h=60) -> PILImage.Image:
+    W = img.width + pad_w * 2
+    H = img.height + pad_h
+    canvas = PILImage.new("RGBA", (W, H), (0, 0, 0, 0))
+    canvas.paste(img, (pad_w, 0))
+    return canvas
 
-def prep_garment_bytes(garment_bytes: bytes) -> str:
+def _is_flare_piece_env() -> bool:
+    return os.getenv("VTO_FLARE", "0").strip().lower() in ("1","true","y","yes")
+
+
+
+def prep_garment_bytes(garment_bytes: bytes, is_flare: bool = False) -> str:
     """
-    BG remove (if rembg present) + tight crop → temp PNG path.
+    Preprocess garment:
+    - If is_flare = False → remove BG + crop tight
+    - If is_flare = True  → skip crop, keep full shape (optionally pad canvas)
     """
     img = PILImage.open(io.BytesIO(garment_bytes)).convert("RGBA")
-    if rembg_remove:
-        try:
-            garment_bytes = rembg_remove(garment_bytes)
-            img = PILImage.open(io.BytesIO(garment_bytes)).convert("RGBA")
-        except Exception as e:
-            log.debug("rembg failed (non-fatal): %s", e)
-    # box = _tight_bbox_from_rgba(img)
-    # if box:
-    #     img = img.crop(box)
+
+    if not is_flare:
+        if rembg_remove:
+            try:
+                garment_bytes = rembg_remove(garment_bytes)
+                img = PILImage.open(io.BytesIO(garment_bytes)).convert("RGBA")
+            except Exception as e:
+                log.debug("rembg failed (non-fatal): %s", e)
+        box = _tight_bbox_from_rgba(img)
+        if box:
+            img = img.crop(box)
+    else:
+        # flare gowns/lehenga/choli — don’t crop
+        # you can also add padding if needed
+        pass
+
     b2 = io.BytesIO()
     img.save(b2, format="PNG")
     return _as_temp_png(b2.getvalue())
+
+
 
 
 def neutralize_torso_bytes(person_bytes: bytes, alpha=0.7, soften=22) -> str:
@@ -119,15 +142,27 @@ def neutralize_torso_bytes(person_bytes: bytes, alpha=0.7, soften=22) -> str:
     # shoulders (11,12) + hips (24,23)
     pts = [dn(lm[11]), dn(lm[12]), dn(lm[24]), dn(lm[23])]
     xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
-    x0, x1 = max(0, min(xs) - 20), min(w, max(xs) + 20)
-    y0, y1 = max(0, min(ys) - 30), min(h, max(ys) + 40)
 
-    overlay = PILImage.new("RGBA", img.size, (0, 0, 0, 0))
+    x_mid = int(sum(xs)/len(xs))
+    x_span = max(120, int((max(xs)-min(xs)) * 1.4))  # wider than torso
+    x0 = max(0, x_mid - x_span)
+    x1 = min(w, x_mid + x_span)
+
+    y0 = max(0, min(ys) - 40)     # a bit above shoulders
+    y1 = int(h * 0.98)            # down to shoes
+
+    overlay = PILImage.new("RGBA", img.size, (0,0,0,0))
     draw = ImageDraw.Draw(overlay)
-    draw.rounded_rectangle([x0, y0, x1, y1], radius=soften, fill=(180, 180, 180, int(255 * alpha)))
+
+    # Stronger mute near torso…
+    draw.rounded_rectangle([x0, max(0, min(ys)-30), x1, max(ys)+60],
+                        radius=28, fill=(180,180,180, int(255*0.78)))
+
+    # …and a softer, wider taper for the skirt area
+    draw.polygon([(x0-80, max(ys)+40), (x1+80, max(ys)+40), (x1+40, y1), (x0-40, y1)],
+                fill=(170,170,170, int(255*0.52)))
+
     out = PILImage.alpha_composite(img, overlay)
-    b = io.BytesIO(); out.save(b, format="PNG")
-    return _as_temp_png(b.getvalue())
 
 
 # ---------- env helpers ----------
@@ -334,6 +369,7 @@ async def generate_vto_image(
     person_bytes: bytes,
     garment_bytes: bytes,
     cfg: typing.Optional[VTOConfig] = None,
+    is_flare: bool = False, 
 ) -> bytes:
     """
     Returns PNG bytes of the try-on result. Fully env-driven; no hardcoded paths/keys.
@@ -343,7 +379,7 @@ async def generate_vto_image(
 
     # Prep inputs
     person_tmp = neutralize_torso_bytes(person_bytes)
-    garment_tmp = prep_garment_bytes(garment_bytes)
+    garment_tmp = prep_garment_bytes(garment_bytes, is_flare=is_flare)
 
     person_img = Image.from_file(location=person_tmp)
     garment_img = Image.from_file(location=garment_tmp)

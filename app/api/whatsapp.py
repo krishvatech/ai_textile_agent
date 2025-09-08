@@ -1067,11 +1067,17 @@ async def _handle_vto_flow(
                                 _set(vto_state)
                                 return True, out_msgs
                         # --- END GUARD ---
+                        seed = vto_state.get("seed") or {}
+                        cat = (seed.get("category") or seed.get("type") or "").strip().lower()
+
+                        FLARE_SET = {"gown", "lehenga", "choli", "lehenga choli", "ghaghra", "ghagra"}
+                        is_flare = cat in FLARE_SET   # boolean True/False
 
                         result_bytes = await generate_vto_image(
                             person_bytes=vto_state["person_image"],
                             garment_bytes=garment_bytes,
                             cfg=VTOConfig(base_steps=60, add_watermark=False),
+                            is_flare=is_flare,   # ← here it’s passed as a bool
                         )
                         logging.info("="*100)
                         
