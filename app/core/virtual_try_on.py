@@ -97,18 +97,14 @@ def prep_garment_bytes(garment_bytes: bytes) -> str:
     return _as_temp_png(b2.getvalue())
 
 
-def neutralize_full_garment_area_bytes(person_bytes: bytes, alpha=0.7, soften=22) -> str:
+def neutralize_torso_bytes(person_bytes: bytes, alpha=0.7, soften=22) -> str:
     """
-    Softly mute the area for a full-length garment (lehenga/gown)
-    so the model replaces it cleanly.
-    Masks from shoulders down to the ankles.
+    Softly mute torso so the model replaces garment cleanly.
+    Falls back to no-op if mediapipe is unavailable or landmarks missing.
     """
     img = PILImage.open(io.BytesIO(person_bytes)).convert("RGBA")
     w, h = img.size
-    
-    # Fallback if mediapipe is not installed
     if mp_pose is None:
-        log.warning("Mediapipe not found, returning original image. Gown VTO may be poor.")
         b = io.BytesIO(); img.save(b, format="PNG"); return _as_temp_png(b.getvalue())
 
     with mp_pose.Pose(static_image_mode=True, model_complexity=1) as pose:
@@ -116,47 +112,19 @@ def neutralize_full_garment_area_bytes(person_bytes: bytes, alpha=0.7, soften=22
         res = pose.process(rgb)
 
     if not getattr(res, "pose_landmarks", None):
-        log.warning("No pose landmarks found, returning original image. Gown VTO may be poor.")
         b = io.BytesIO(); img.save(b, format="PNG"); return _as_temp_png(b.getvalue())
 
     lm = res.pose_landmarks.landmark
-    
-    # Helper to denormalize coordinates
-    def dn(p): 
-        # Add visibility check to use the point only if it's detected with high confidence
-        return (int(p.x * w), int(p.y * h)) if p.visibility > 0.5 else None
-
-    # Define keypoints for the polygon mask
-    # Shoulders (11, 12), Hips (23, 24), Ankles (27, 28)
-    shoulder_l = dn(lm[11])
-    shoulder_r = dn(lm[12])
-    hip_l = dn(lm[23])
-    hip_r = dn(lm[24])
-    ankle_l = dn(lm[27])
-    ankle_r = dn(lm[28])
-
-    # Filter out points that were not visible
-    points = [p for p in [shoulder_l, shoulder_r, hip_r, ankle_r, ankle_l, hip_l] if p is not None]
-
-    # If we don't have enough points to draw a polygon, we can't proceed.
-    if len(points) < 3:
-        log.warning("Not enough landmarks to create a gown mask. Using original image.")
-        b = io.BytesIO(); img.save(b, format="PNG"); return _as_temp_png(b.getvalue())
-
-    # Create a bounding box from the valid points to be safe
-    xs = [p[0] for p in points]
-    ys = [p[1] for p in points]
-    
-    # Add some padding to the bounding box
+    def dn(p): return (int(p.x * w), int(p.y * h))
+    # shoulders (11,12) + hips (24,23)
+    pts = [dn(lm[11]), dn(lm[12]), dn(lm[24]), dn(lm[23])]
+    xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
     x0, x1 = max(0, min(xs) - 20), min(w, max(xs) + 20)
-    y0, y1 = max(0, min(ys) - 30), min(h, max(ys) + 40) # Use shoulder Y as top
+    y0, y1 = max(0, min(ys) - 30), min(h, max(ys) + 40)
 
     overlay = PILImage.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    
-    # Draw a rounded rectangle covering the entire area
     draw.rounded_rectangle([x0, y0, x1, y1], radius=soften, fill=(180, 180, 180, int(255 * alpha)))
-    
     out = PILImage.alpha_composite(img, overlay)
     b = io.BytesIO(); out.save(b, format="PNG")
     return _as_temp_png(b.getvalue())
@@ -208,6 +176,7 @@ class VTOConfig:
         or os.getenv("GOOGLE_CLOUD_LOCATION")
         or "us-central1"
     )
+    raw_garment: bool = _env_bool("VTO_RAW_GARMENT", False)
 
 
 def _validate_adc_or_die():
@@ -250,9 +219,15 @@ def _decode_base64_field(val: typing.Any) -> typing.Optional[bytes]:
     return None
 
 
-def _to_png_bytes_from_unknown(obj: typing.Any) -> typing.Optional[bytes]:
+def _to_png_bytes_from_unknown(obj: typing.Any) -> bytes:
     """
-    Robustly convert various image objects to PNG bytes. Returns None on failure.
+    Robustly convert various image objects to PNG bytes.
+
+    Handles:
+      - PIL.Image.Image
+      - google.genai.types.Image (via .as_pil_image() / .bytes / .data / .save)
+      - dict-like Vertex 'predictions' payloads (bytesBase64Encoded, imageBytes, etc.)
+      - plain bytes
     """
     # 1) Already PNG/raw bytes?
     if isinstance(obj, (bytes, bytearray)):
@@ -291,16 +266,17 @@ def _to_png_bytes_from_unknown(obj: typing.Any) -> typing.Optional[bytes]:
         if callable(save_fn):
             try:
                 buf = io.BytesIO()
+                # Do NOT pass 'format' — some SDK versions don't accept it
                 save_fn(buf)
-                # Check if save actually wrote bytes
-                content = buf.getvalue()
-                if content:
-                    return content
-            except ValueError as e:
-                # This is the specific error we are catching!
-                log.debug("obj.save() raised ValueError (likely empty image from API): %s", e)
-            except Exception as e:
-                log.debug("obj.save() failed unexpectedly: %s", e)
+                return buf.getvalue()
+            except TypeError:
+                # try with a positional "PNG" just in case
+                try:
+                    buf = io.BytesIO()
+                    save_fn(buf, "PNG")
+                    return buf.getvalue()
+                except Exception as e:
+                    log.debug("obj.save fallback failed: %s", e)
 
     # 4) dict-like predictions (Vertex REST shapes)
     if isinstance(obj, dict):
@@ -315,14 +291,11 @@ def _to_png_bytes_from_unknown(obj: typing.Any) -> typing.Optional[bytes]:
     if isinstance(obj, (list, tuple)):
         for item in obj:
             try:
-                result = _to_png_bytes_from_unknown(item)
-                if result:
-                    return result
+                return _to_png_bytes_from_unknown(item)
             except Exception:
                 continue
 
-    # If we've reached this point, conversion has failed
-    return None
+    raise RuntimeError("Unsupported image output type (cannot convert to PNG bytes)")
 
 
 # ---------- main API ----------
@@ -338,9 +311,15 @@ async def generate_vto_image(
     client = _make_client(cfg)
 
     # Prep inputs
-    # NOTE: Ensure you are calling neutralize_full_garment_area_bytes for gowns as we discussed
-    person_tmp = neutralize_full_garment_area_bytes(person_bytes)
-    garment_tmp = prep_garment_bytes(garment_bytes)
+    # Prep inputs
+    person_tmp = neutralize_torso_bytes(person_bytes)
+
+    if cfg.raw_garment:
+        # save garment as-is, no crop/rembg
+        gpath = _as_temp_png(garment_bytes)
+        garment_tmp = gpath
+    else:
+        garment_tmp = prep_garment_bytes(garment_bytes)
 
     person_img = Image.from_file(location=person_tmp)
     garment_img = Image.from_file(location=garment_tmp)
@@ -365,23 +344,31 @@ async def generate_vto_image(
 
     # ---- Robust call across SDK versions ----
     def _call_recontext():
-        # ... (This inner function does not need changes) ...
         fn = client.models.recontext_image
         params = tuple(inspect.signature(fn).parameters.keys())
 
+        # Preferred (newer SDKs)
         if "model" in params and "source" in params:
             return fn(model=cfg.model, source=src, config=re_cfg)
+
+        # Some early previews used 'image' instead of 'source'
         if "model" in params and "image" in params:
             return fn(model=cfg.model, image=src, config=re_cfg)
+
+        # Fallback to positional (older, undocumented shapes)
         try:
             return fn(cfg.model, src, re_cfg)
         except TypeError:
+            # last resort: try without config
             return fn(cfg.model, src)
 
     resp = await asyncio.to_thread(_call_recontext)
-    log.debug("VTO API Raw Response: %s", resp) # Added for better debugging
 
     # --- Extract first image-like artifact from response ---
+    # Common shapes:
+    #   - resp.generated_images -> [GeneratedImage(image=Image(...)), ...]
+    #   - resp.images -> [Image | PIL.Image | bytes, ...]
+    #   - resp.predictions -> [ { bytesBase64Encoded: ... }, ... ]
     images = (
         getattr(resp, "generated_images", None)
         or getattr(resp, "images", None)
@@ -391,24 +378,15 @@ async def generate_vto_image(
     )
 
     if not images:
+        # dict response with predictions
         if isinstance(resp, dict) and "predictions" in resp:
             images = resp["predictions"]
         else:
-            # More descriptive error
-            raise RuntimeError(f"VTO returned no image candidates. Full API response: {resp}")
+            raise RuntimeError("VTO returned no image")
 
+    # Prefer nested .image field if present (GeneratedImage)
     candidate = images[0]
     if hasattr(candidate, "image"):
         candidate = candidate.image
 
-    # --- NEW: Final check for valid image bytes ---
-    result_bytes = _to_png_bytes_from_unknown(candidate)
-    
-    if result_bytes is None:
-        raise RuntimeError(
-            "Failed to extract image bytes from VTO response. The API likely returned an empty "
-            "image object, possibly due to a safety filter or an internal generation error. "
-            f"Response candidate: {candidate}"
-        )
-
-    return result_bytes
+    return _to_png_bytes_from_unknown(candidate)
