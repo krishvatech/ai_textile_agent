@@ -1225,6 +1225,25 @@ async def _handle_vto_flow(
                             _set(vto_state)
                             return True, out_msgs
                     # --- END GUARD ---
+                    seed = vto_state.get("seed") or {}
+                    cat  = (seed.get("category") or seed.get("type") or "").strip().lower()
+                    name = (seed.get("name") or seed.get("product_name") or seed.get("url") or "").lower()
+
+                    FLARE_SET = {
+                        "gown", "gowns",
+                        "lehenga", "lehengas",
+                        "choli", "cholis",
+                        "lehenga choli", "lehenga-choli",
+                        "ghaghra", "ghagras", "ghagra", "ghaghras",
+                    }
+
+                    # 1) primary: exact category match
+                    is_flare = (cat in FLARE_SET)
+
+                    # 2) fallback: infer from product name/url
+                    if not is_flare and not cat:
+                        if re.search(r"\b(gown|lehenga|choli|lehenga[-\s]?choli|ghag(h)?ra(s)?)\b", name):
+                            is_flare = True
                     result_bytes = await generate_vto_image(
                         person_bytes=person,
                         garment_bytes=garment,
