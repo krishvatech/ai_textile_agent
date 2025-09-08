@@ -419,7 +419,7 @@ async def get_attrs_for_product_async(product_id: int | None,
     async with SessionLocal() as db:
         attrs = await _lookup_basic_attrs_by_ids(db, product_id, variant_id)
         out = {}
-        for k in ("category", "fabric", "occasion", "color", "is_rental"):
+        for k in ("category", "fabric", "occasion", "color", "is_rental","type"):
             v = (attrs or {}).get(k)
             if isinstance(v, str) and not v.strip():
                 v = None
