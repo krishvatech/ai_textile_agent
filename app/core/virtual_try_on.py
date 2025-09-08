@@ -374,12 +374,21 @@ async def generate_vto_image(
     """
     Returns PNG bytes of the try-on result. Fully env-driven; no hardcoded paths/keys.
     """
+    if not person_bytes:
+        raise ValueError("VTO: person_bytes is empty or None. Provide a person photo first.")
+    if not garment_bytes:
+        raise ValueError("VTO: garment_bytes is empty or None. Provide a garment image.")
     cfg = cfg or VTOConfig()
     client = _make_client(cfg)
 
     # Prep inputs
     person_tmp = neutralize_torso_bytes(person_bytes)
     garment_tmp = prep_garment_bytes(garment_bytes, is_flare=is_flare)
+
+    if not person_tmp or not os.path.isfile(person_tmp):
+        raise RuntimeError("VTO: failed to prepare person image (temp path missing).")
+    if not garment_tmp or not os.path.isfile(garment_tmp):
+        raise RuntimeError("VTO: failed to prepare garment image (temp path missing).")
 
     person_img = Image.from_file(location=person_tmp)
     garment_img = Image.from_file(location=garment_tmp)
