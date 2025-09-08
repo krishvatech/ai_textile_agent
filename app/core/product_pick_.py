@@ -247,26 +247,39 @@ async def _lookup_basic_attrs_by_ids(db, product_id: int | None, variant_id: int
                     "type": resolved_ptype,
                 }
 
-        # A2) Fall back to raw variant row to learn product_id, etc.
+        # A2) Fall back to raw variant row, but also join products to get category/type
         vrow = await _fetch_one_or_rollback(db, """
-            SELECT * FROM product_variants pv
+            SELECT
+                pv.*,
+                p.id        AS p_id,
+                p.category  AS p_category,
+                p.type      AS p_type
+            FROM product_variants pv
+            JOIN products p ON p.id = pv.product_id
             WHERE pv.id = :vid
             LIMIT 1
         """, {"vid": variant_id})
+
         if vrow:
             m = dict(vrow._mapping)
-            color = _first_nonempty(m, ["color", "colour", "primary_color", "colors"])
-            attached_product_id = attached_product_id or m.get("product_id")
 
+            # prefer variant’s color/fabric/size if you keep them there
+            color   = _first_nonempty(m, ["color", "colour", "primary_color", "colors"])
+            fabric  = _first_nonempty(m, ["fabric"])
+            size    = _first_nonempty(m, ["size"])
+
+            attached_product_id = attached_product_id or m.get("p_id")
+
+            # rental inference (same as before)
             rental_flag  = _first_nonempty(m, ["is_rental", "for_rent", "is_for_rent", "rental_available", "rentable"])
             rental_price = _first_nonempty(m, ["rental_price", "rent_price", "price_rent"])
             is_rental = _norm_bool(rental_flag)
             if is_rental is None and rental_price not in (None, "", 0, "0"):
                 is_rental = True
 
-            category = _first_nonempty(m, ["category"])
-            fabric   = _first_nonempty(m, ["fabric"])
-            occasion = _first_nonempty(m, ["occasion"])
+            # *** key change: pull category from product if variant doesn’t have it (normally it won’t) ***
+            category = _first_nonempty(m, ["category", "p_category"])  # pv.category (rare) → p.category
+            occasion = _first_nonempty(m, ["occasion"])  # keep your current logic below too
 
             if not occasion:
                 occ_row = await _fetch_one_or_rollback(db, """
@@ -279,7 +292,8 @@ async def _lookup_basic_attrs_by_ids(db, product_id: int | None, variant_id: int
                 if occ_row and occ_row.occ:
                     occasion = occ_row.occ
 
-            resolved_ptype = await _fetch_product_type_from_pid(attached_product_id)
+            # *** type always comes from products.type ***
+            resolved_ptype = m.get("p_type") or await _fetch_product_type_from_pid(attached_product_id)
 
             if any([category, fabric, occasion, color, is_rental is not None, resolved_ptype]):
                 return {
