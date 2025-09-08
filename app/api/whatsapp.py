@@ -1515,7 +1515,7 @@ async def receive_cloud_webhook(request: Request):
                         f"✅ Resolved swipe → name='{resolved_name}', product_id={resolved_product_id}, "
                         f"variant_id={resolved_variant_id}, url={resolved_url}"
                     )
-
+                    
                     # Language
                     SUPPORTED_LANGUAGES = ["gu-IN", "hi-IN", "en-IN", "en-US"]
                     current_language = customer.preferred_language or "en-IN"
@@ -1548,12 +1548,14 @@ async def receive_cloud_webhook(request: Request):
                     is_rental = attrs_db.get("is_rental")
                     if is_rental is None:
                         is_rental = attrs_text.get("is_rental")
-
+                    required_gender = (attrs_db.get("type") or "").strip().lower()
                     seed_entities = {"name": resolved_name}
                     if category: seed_entities["category"] = category
                     if fabric: seed_entities["fabric"] = fabric
                     if occasion: seed_entities["occasion"] = occasion
                     if color: seed_entities["color"] = color
+                    if required_gender in {"men", "women"}:
+                        seed_entities["type"] = required_gender
                     if is_rental is not None:
                         seed_entities["is_rental"] = bool(is_rental)
 
@@ -1595,7 +1597,7 @@ async def receive_cloud_webhook(request: Request):
                             "person_image": None,
                             "garment_image": None,
                             "garment_image_url": garment_image_url,
-                            "seed": entities,
+                            "seed": seed_entities,
                         })
                         logging.info(f"[VTO][START] via SWIPE | session={session_key} | garment_image_url={garment_image_url}")
                         _log_vto_state_snapshot(session_key, "after start (swipe)")
