@@ -189,13 +189,39 @@ async def resolve_product_from_caption_async(caption: str | None):
 
 async def _lookup_basic_attrs_by_ids(db, product_id: int | None, variant_id: int | None):
     """
-    Returns {"category": ..., "fabric": ..., "occasion": ..., "color": ..., "is_rental": ...}
-    Tries several schema patterns; safe even if columns don't exist.
-    Order: variant JSON → variant row (*) → product JSON → product row (*).
+    Returns {"category", "fabric", "occasion", "color", "is_rental", "type"}
+    Variant attrs first, then product attrs. `type` is ONLY from products.
     """
+
+    async def _fetch_product_type_from_pid(pid: int | None):
+        if not pid:
+            return None
+        row = await _fetch_one_or_rollback(db, """
+            SELECT p.type AS type
+            FROM products p
+            WHERE p.id = :pid
+            LIMIT 1
+        """, {"pid": pid})
+        return row.type if row and row.type else None
+
+    async def _fetch_product_type_from_vid(vid: int | None):
+        if not vid:
+            return None
+        row = await _fetch_one_or_rollback(db, """
+            SELECT p.type AS type
+            FROM product_variants pv
+            JOIN products p ON p.id = pv.product_id
+            WHERE pv.id = :vid
+            LIMIT 1
+        """, {"vid": vid})
+        return row.type if row and row.type else None
+
     # ---------- A) VARIANT-LEVEL ----------
+    resolved_ptype = None
+    attached_product_id = product_id
+
     if variant_id:
-        # A1) Try JSON columns on variants
+        # A1) Try JSON-like columns on variants (NO type here)
         for json_col in ["metadata", "meta", "attrs", "attributes"]:
             row = await _fetch_one_or_rollback(db, f"""
                 SELECT
@@ -209,15 +235,19 @@ async def _lookup_basic_attrs_by_ids(db, product_id: int | None, variant_id: int
                 LIMIT 1
             """, {"vid": variant_id})
             if row and any([row.category, row.fabric, row.occasion, row.color, row.is_rental]):
+                # `type` must come from products; prefer product_id if provided else join via variant_id
+                resolved_ptype = await _fetch_product_type_from_pid(product_id) \
+                                  if product_id else await _fetch_product_type_from_vid(variant_id)
                 return {
                     "category": row.category,
                     "fabric": row.fabric,
                     "occasion": row.occasion,
                     "color": row.color,
                     "is_rental": _norm_bool(row.is_rental),
+                    "type": resolved_ptype,
                 }
 
-        # A2) Schema-safe: fetch the whole row and pick available columns
+        # A2) Fall back to raw variant row to learn product_id, etc.
         vrow = await _fetch_one_or_rollback(db, """
             SELECT * FROM product_variants pv
             WHERE pv.id = :vid
@@ -226,38 +256,44 @@ async def _lookup_basic_attrs_by_ids(db, product_id: int | None, variant_id: int
         if vrow:
             m = dict(vrow._mapping)
             color = _first_nonempty(m, ["color", "colour", "primary_color", "colors"])
-            # rental flags we might see on variants
-            rental_flag = _first_nonempty(m, ["is_rental", "for_rent", "is_for_rent", "rental_available", "rentable"])
+            attached_product_id = attached_product_id or m.get("product_id")
+
+            rental_flag  = _first_nonempty(m, ["is_rental", "for_rent", "is_for_rent", "rental_available", "rentable"])
             rental_price = _first_nonempty(m, ["rental_price", "rent_price", "price_rent"])
             is_rental = _norm_bool(rental_flag)
             if is_rental is None and rental_price not in (None, "", 0, "0"):
                 is_rental = True
 
-            # category/fabric/occasion direct columns if present
             category = _first_nonempty(m, ["category"])
             fabric   = _first_nonempty(m, ["fabric"])
             occasion = _first_nonempty(m, ["occasion"])
-            occ_row = await _fetch_one_or_rollback(db, """
-               SELECT LOWER(TRIM(o.name)) AS occ
-               FROM product_variant_occasions pvo
-               JOIN occasions o ON o.id = pvo.occasion_id
-               WHERE pvo.variant_id = :vid
-               LIMIT 1
-           """, {"vid": variant_id})
-            if occ_row and occ_row.occ:
-               occasion = occasion or occ_row.occ
-            if any([category, fabric, occasion, color, is_rental is not None]):
+
+            if not occasion:
+                occ_row = await _fetch_one_or_rollback(db, """
+                    SELECT LOWER(TRIM(o.name)) AS occ
+                    FROM product_variant_occasions pvo
+                    JOIN occasions o ON o.id = pvo.occasion_id
+                    WHERE pvo.variant_id = :vid
+                    LIMIT 1
+                """, {"vid": variant_id})
+                if occ_row and occ_row.occ:
+                    occasion = occ_row.occ
+
+            resolved_ptype = await _fetch_product_type_from_pid(attached_product_id)
+
+            if any([category, fabric, occasion, color, is_rental is not None, resolved_ptype]):
                 return {
                     "category": category,
                     "fabric": fabric,
                     "occasion": occasion,
                     "color": color,
                     "is_rental": is_rental,
+                    "type": resolved_ptype,
                 }
 
     # ---------- B) PRODUCT-LEVEL ----------
     if product_id:
-        # B1) Try JSON columns on products
+        # B1) Try JSON-like fields on products if you might have them (safe even if absent)
         for json_col in ["metadata", "meta", "attrs", "attributes"]:
             row = await _fetch_one_or_rollback(db, f"""
                 SELECT
@@ -265,21 +301,23 @@ async def _lookup_basic_attrs_by_ids(db, product_id: int | None, variant_id: int
                     {json_col}->>'fabric'    AS fabric,
                     {json_col}->>'occasion'  AS occasion,
                     {json_col}->>'color'     AS color,
+                    p.type                   AS type,
                     {json_col}->>'is_rental' AS is_rental
                 FROM products p
                 WHERE p.id = :pid
                 LIMIT 1
             """, {"pid": product_id})
-            if row and any([row.category, row.fabric, row.occasion, row.color, row.is_rental]):
+            if row and any([row.category, row.fabric, row.occasion, row.color, row.is_rental, row.type]):
                 return {
                     "category": row.category,
                     "fabric": row.fabric,
                     "occasion": row.occasion,
                     "color": row.color,
                     "is_rental": _norm_bool(row.is_rental),
+                    "type": row.type,  # <-- from products.type
                 }
 
-        # B2) Schema-safe: fetch the whole product row
+        # B2) Plain product row
         prow = await _fetch_one_or_rollback(db, """
             SELECT * FROM products p
             WHERE p.id = :pid
@@ -288,7 +326,8 @@ async def _lookup_basic_attrs_by_ids(db, product_id: int | None, variant_id: int
         if prow:
             m = dict(prow._mapping)
             color = _first_nonempty(m, ["color", "colour", "primary_color", "colors"])
-            rental_flag = _first_nonempty(m, ["is_rental", "for_rent", "is_for_rent", "rental_available", "rentable"])
+            # rentals are per-variant, but keep your existing inference
+            rental_flag  = _first_nonempty(m, ["is_rental", "for_rent", "is_for_rent", "rental_available", "rentable"])
             rental_price = _first_nonempty(m, ["rental_price", "rent_price", "price_rent"])
             is_rental = _norm_bool(rental_flag)
             if is_rental is None and rental_price not in (None, "", 0, "0"):
@@ -297,27 +336,32 @@ async def _lookup_basic_attrs_by_ids(db, product_id: int | None, variant_id: int
             category = _first_nonempty(m, ["category"])
             fabric   = _first_nonempty(m, ["fabric"])
             occasion = _first_nonempty(m, ["occasion"])
+            ptype    = m.get("type")  # <-- exact column on products
+
             if not occasion:
-               occ_row = await _fetch_one_or_rollback(db, """
-                   SELECT LOWER(TRIM(o.name)) AS occ
-                   FROM product_variants pv
-                   JOIN product_variant_occasions pvo ON pvo.variant_id = pv.id
-                   JOIN occasions o ON o.id = pvo.occasion_id
-                   WHERE pv.product_id = :pid
-                   LIMIT 1
-               """, {"pid": product_id})
-               if occ_row and occ_row.occ:
-                   occasion = occ_row.occ
-            if any([category, fabric, occasion, color, is_rental is not None]):
+                occ_row = await _fetch_one_or_rollback(db, """
+                    SELECT LOWER(TRIM(o.name)) AS occ
+                    FROM product_variants pv
+                    JOIN product_variant_occasions pvo ON pvo.variant_id = pv.id
+                    JOIN occasions o ON o.id = pvo.occasion_id
+                    WHERE pv.product_id = :pid
+                    LIMIT 1
+                """, {"pid": product_id})
+                if occ_row and occ_row.occ:
+                    occasion = occ_row.occ
+
+            if any([category, fabric, occasion, color, ptype, is_rental is not None]):
                 return {
                     "category": category,
                     "fabric": fabric,
                     "occasion": occasion,
                     "color": color,
                     "is_rental": is_rental,
+                    "type": ptype,  # <-- from products.type
                 }
 
     return {}
+
 
 
 
