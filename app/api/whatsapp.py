@@ -905,21 +905,6 @@ def _get_vto_messages(lang: str = "en-IN") -> dict:
             "invalid_image": "Please send a clear photo."
         }
 
-
-def _detect_garment_type(vto_state: dict) -> str | None:
-    # Look at whatever you already have in state
-    cand = " ".join([
-        str(vto_state.get("garment_type", "")),
-        str(vto_state.get("category", "")),
-        str(vto_state.get("product_name", "")),
-        str(vto_state.get("title", "")),
-    ]).lower()
-
-    if any(k in cand for k in ["lehenga", "ghaghra", "ghagra", "chaniya", "choli gown", "choli-gown"]):
-        return "lehenga"   # treat all these as flared bottom
-    if any(k in cand for k in ["gown"]):
-        return "gown"
-    return None 
 # --- inside whatsapp.py ---
 
 async def _handle_vto_flow(
@@ -1048,11 +1033,9 @@ async def _handle_vto_flow(
                     # Run VTO
                     try:
                         garment_bytes = await _resolve_garment_bytes(vto_state)
-                        gtype = _detect_garment_type(vto_state) 
                         result_bytes = await generate_vto_image(
                             person_bytes=vto_state["person_image"],
                             garment_bytes=garment_bytes,
-                            garment_type=gtype,   
                             cfg=VTOConfig(base_steps=60, add_watermark=False),
                         )
                         logging.info("="*100)
@@ -1154,11 +1137,9 @@ async def _handle_vto_flow(
                 try:
                     person = vto_state.get("person_image")
                     garment = vto_state.get("garment_image")
-                    gtype = _detect_garment_type(vto_state) 
                     result_bytes = await generate_vto_image(
                         person_bytes=person,
                         garment_bytes=garment,
-                        garment_type=gtype,   
                         cfg=VTOConfig(base_steps=60, add_watermark=False),
                     )
                     logging.info("="*100)
