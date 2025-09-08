@@ -32,7 +32,7 @@ import inspect
 import logging
 from uuid import uuid4
 from dataclasses import dataclass
-
+from openai import AsyncOpenAI
 import numpy as np
 from PIL import Image as PILImage, ImageDraw
 
@@ -296,6 +296,38 @@ def _to_png_bytes_from_unknown(obj: typing.Any) -> bytes:
 
     raise RuntimeError("Unsupported image output type (cannot convert to PNG bytes)")
 
+
+async def detect_presenting_gender_openai(person_bytes: bytes) -> str:
+    """
+    Auto-detect gender from person image using GPT Vision.
+    Returns 'male' | 'female' | 'unknown'.
+    """
+    try:
+        api_key = os.getenv("GPT_API_KEY")
+        model = os.getenv("GPT_MODEL", "gpt-4o")  # must be vision-capable
+        if not api_key:
+            return "unknown"
+
+        client = AsyncOpenAI(api_key=api_key)
+        b64 = base64.b64encode(person_bytes).decode("ascii")
+
+        resp = await client.chat.completions.create(
+            model=model,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "You are a strict JSON classifier."},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Classify presenting gender. Only JSON: {\"gender\":\"male|female|unknown\"}."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                ]}
+            ],
+            temperature=0
+        )
+        data = json.loads(resp.choices[0].message.content)
+        g = str(data.get("gender", "unknown")).lower()
+        return g if g in {"male", "female"} else "unknown"
+    except Exception:
+        return "unknown"
 
 # ---------- main API ----------
 async def generate_vto_image(

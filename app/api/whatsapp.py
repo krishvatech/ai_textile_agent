@@ -32,7 +32,7 @@ from app.core.product_pick_ import (
 
 from uuid import uuid4
 # ADD VTO IMPORT
-from app.core.virtual_try_on import generate_vto_image, VTOConfig
+from app.core.virtual_try_on import generate_vto_image,detect_presenting_gender_openai, VTOConfig
 import re
 from sqlalchemy import text
 from app.db.session import SessionLocal # ensure this is imported
@@ -80,7 +80,17 @@ def _is_vto_flow_active(session_key: str) -> bool:
     state = _get_vto_state(session_key)
     return state.get("active", False)
 
-
+def _normalize_type_gender(val: str | None) -> str | None:
+    if not val:
+        return None
+    v = val.strip().lower()
+    if v in {"male", "man", "men", "gents", "boys"}:
+        return "male"
+    if v in {"female", "woman", "women", "ladies", "girls"}:
+        return "female"
+    if v == "unisex":
+        return "unisex"
+    return None
 
 async def get_tenant_id_by_phone(phone_number: str, db):
     """
@@ -1021,7 +1031,6 @@ async def _handle_vto_flow(
                         "[VTO][READY] Both images present for session=%s (person=bytes; garment=%s)",
                         session_key, "bytes" if vto_state.get("garment_image") else "url"
                     )
-
                     # Tell user we’re generating right away
                     mid = await send_whatsapp_reply_cloud(
                         to_waid=from_waid,
@@ -1033,6 +1042,21 @@ async def _handle_vto_flow(
                     # Run VTO
                     try:
                         garment_bytes = await _resolve_garment_bytes(vto_state)
+                        # --- GENDER GUARD (explicit outfit type vs detected person) ---
+                        required_gender = _normalize_type_gender(((vto_state.get("seed") or {}).get("type")))
+                        if required_gender in {"male", "female"}:
+                            person_gender = await detect_presenting_gender_openai(vto_state["person_image"])
+                            if person_gender in {"male", "female"} and person_gender != required_gender:
+                                msg = f"❌ This outfit is for {required_gender}, but the photo looks {person_gender}. Please send a {required_gender} person photo or pick a {person_gender} outfit."
+                                mid = await send_whatsapp_reply_cloud(
+                                    to_waid=from_waid, body=msg, phone_number_id=outbound_pnid
+                                )
+                                out_msgs.append(("text", msg, mid))
+                                vto_state["step"] = "need_person"  # ask again
+                                _set(vto_state)
+                                return True, out_msgs
+                        # --- END GUARD ---
+
                         result_bytes = await generate_vto_image(
                             person_bytes=vto_state["person_image"],
                             garment_bytes=garment_bytes,
@@ -1137,6 +1161,20 @@ async def _handle_vto_flow(
                 try:
                     person = vto_state.get("person_image")
                     garment = vto_state.get("garment_image")
+                    # --- GENDER GUARD (explicit outfit type vs detected person) ---
+                    required_gender = _normalize_type_gender(((vto_state.get("seed") or {}).get("type")))
+                    if required_gender in {"male", "female"}:
+                        person_gender = await detect_presenting_gender_openai(person or b"")
+                        if person_gender in {"male", "female"} and person_gender != required_gender:
+                            msg = f"❌ This outfit is for {required_gender}, but the photo looks {person_gender}. Please send a {required_gender} person photo or pick a {person_gender} outfit."
+                            mid = await send_whatsapp_reply_cloud(
+                                to_waid=from_waid, body=msg, phone_number_id=outbound_pnid
+                            )
+                            out_msgs.append(("text", msg, mid))
+                            vto_state["step"] = "need_person"
+                            _set(vto_state)
+                            return True, out_msgs
+                    # --- END GUARD ---
                     result_bytes = await generate_vto_image(
                         person_bytes=person,
                         garment_bytes=garment,
