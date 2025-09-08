@@ -389,4 +389,37 @@ async def generate_vto_image(
     if hasattr(candidate, "image"):
         candidate = candidate.image
 
-    return _to_png_bytes_from_unknown(candidate)
+    # Try the primary candidate first
+    try:
+        return _to_png_bytes_from_unknown(candidate)
+    except Exception as e:
+        log.debug("primary candidate decode failed: %s", e)
+
+    # ---- Robust fallbacks ----
+    # A) If the SDK put bytes under a dict predictions[] shape, try all of them
+    preds = getattr(resp, "predictions", None)
+    if isinstance(resp, dict) and not preds:
+        preds = resp.get("predictions")
+    if preds and isinstance(preds, (list, tuple)):
+        for p in preds:
+            if isinstance(p, dict):
+                for k in ("bytesBase64Encoded", "imageBytes", "image", "content"):
+                    b64 = p.get(k)
+                    if isinstance(b64, (bytes, bytearray)):
+                        return bytes(b64)
+                    if isinstance(b64, str):
+                        try:
+                            return base64.b64decode(b64)
+                        except Exception:
+                            pass
+
+    # B) If there are multiple images, try decoding them one by one
+    if isinstance(images, (list, tuple)) and len(images) > 1:
+        for item in images[1:]:
+            try:
+                cand = item.image if hasattr(item, "image") else item
+                return _to_png_bytes_from_unknown(cand)
+            except Exception:
+                continue
+
+    raise RuntimeError("VTO returned an image handle without bytes; could not decode")
