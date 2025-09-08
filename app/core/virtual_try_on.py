@@ -298,6 +298,73 @@ def _to_png_bytes_from_unknown(obj: typing.Any) -> bytes:
 
     raise RuntimeError("Unsupported image output type (cannot convert to PNG bytes)")
 
+def _maybe_b64_to_bytes(val):
+    # try raw bytes first
+    if isinstance(val, (bytes, bytearray)):
+        return bytes(val)
+    # try base64 strings
+    if isinstance(val, str):
+        try:
+            b = base64.b64decode(val, validate=True)
+            # heuristic: ignore tiny blobs
+            if len(b) > 1000:
+                return b
+        except Exception:
+            return None
+    return None
+
+
+_IMAGE_KEYS = {
+    "bytesBase64Encoded", "imageBytes", "image", "content", "data", "bytes",
+    # preview/GenAI shapes
+    "inline_data", "inlineData", "b64", "base64", "image_base64",
+}
+
+def _yield_all_image_candidates(obj):
+    """
+    Recursively walk any dict/list/object and yield anything that could be an
+    image (bytes, PIL.Image, google.genai Image-like, or dicts with base64).
+    """
+    # direct usable types first
+    if isinstance(obj, (bytes, bytearray, PILImage.Image, Image, dict, list, tuple)):
+        pass
+    else:
+        # Try attributes on SDK objects (e.g., resp.generated_images)
+        for name in ("predictions", "generated_images", "images", "candidates"):
+            if hasattr(obj, name):
+                yield from _yield_all_image_candidates(getattr(obj, name))
+        return
+
+    # dict: scan keys + recurse
+    if isinstance(obj, dict):
+        # 1) common base64/bytes locations (flat)
+        for k in _IMAGE_KEYS:
+            if k in obj:
+                # inline_data may be like {"mime_type": "...", "data": "..."}
+                if k in ("inline_data", "inlineData") and isinstance(obj[k], dict):
+                    b = _maybe_b64_to_bytes(obj[k].get("data"))
+                    if b: yield b
+                else:
+                    b = _maybe_b64_to_bytes(obj[k])
+                    if b: yield b
+        # 2) nested content parts (PaLM/GenAI style)
+        parts = obj.get("parts") or obj.get("content") or []
+        if isinstance(parts, (list, tuple)):
+            for p in parts:
+                yield from _yield_all_image_candidates(p)
+        # 3) generic recurse over all values
+        for v in obj.values():
+            yield from _yield_all_image_candidates(v)
+        return
+
+    # list/tuple: recurse
+    if isinstance(obj, (list, tuple)):
+        for it in obj:
+            yield from _yield_all_image_candidates(it)
+        return
+
+    # PIL / google.genai Image objects or raw bytes: pass through
+    yield obj
 
 # ---------- main API ----------
 async def generate_vto_image(
@@ -359,60 +426,20 @@ async def generate_vto_image(
 
     resp = await asyncio.to_thread(_call_recontext)
 
-    # Prefer REST-style base64 predictions first (most reliable),
-    # then generated_images.image, then images.
-    def _iter_candidates(r):
-        # dict response (REST)
-        if isinstance(r, dict):
-            preds = r.get("predictions") or []
-            for p in preds:
-                if isinstance(p, dict):
-                    # common base64 keys
-                    for k in ("bytesBase64Encoded", "imageBytes", "image", "content"):
-                        b = _decode_base64_field(p.get(k))
-                        if b:
-                            yield b
-                    # nested "image" object
-                    img = p.get("image")
-                    if img:
-                        yield img
-            # some previews used 'generated_images' as dicts
-            gens = r.get("generated_images") or []
-            for g in gens:
-                # same base64 scan
-                if isinstance(g, dict):
-                    for k in ("bytesBase64Encoded", "imageBytes", "image", "content"):
-                        b = _decode_base64_field(g.get(k))
-                        if b:
-                            yield b
-                    if "image" in g:
-                        yield g["image"]
-
-        # object with attributes
-        for attr in ("predictions", "generated_images", "images"):
-            items = getattr(r, attr, None)
-            if items:
-                for it in items:
-                    # GeneratedImage(image=...)
-                    img = getattr(it, "image", None)
-                    yield img or it
-
-        # raw list/tuple
-        if isinstance(r, (list, tuple)):
-            for it in r:
-                yield it
-
-        # last resort: whole object
-        yield r
-
     last_err = None
-    for cand in _iter_candidates(resp):
+    for cand in _yield_all_image_candidates(resp):
         try:
             return _to_png_bytes_from_unknown(cand)
         except Exception as e:
             last_err = e
-            # keep trying next candidate
             continue
 
-    # If we got here, nothing was convertible
+    # Optional one-line breadcrumb to see the top-level keys when it fails again
+    try:
+        log.warning("[VTO][DEBUG] resp-top=%s keys=%s",
+                    type(resp).__name__,
+                    list(resp.keys())[:10] if isinstance(resp, dict) else dir(resp)[:10])
+    except Exception:
+        pass
+
     raise RuntimeError(f"VTO returned no usable image bytes (last error: {last_err})")
