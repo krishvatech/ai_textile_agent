@@ -163,6 +163,9 @@ def neutralize_torso_bytes(person_bytes: bytes, alpha=0.7, soften=22) -> str:
                 fill=(170,170,170, int(255*0.52)))
 
     out = PILImage.alpha_composite(img, overlay)
+    b = io.BytesIO()
+    out.save(b, format="PNG")
+    return _as_temp_png(b.getvalue())
 
 
 # ---------- env helpers ----------
