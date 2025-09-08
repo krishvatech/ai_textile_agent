@@ -80,37 +80,24 @@ def _tight_bbox_from_rgba(img_rgba: PILImage.Image):
 
 def prep_garment_bytes(garment_bytes: bytes) -> str:
     """
-    BG remove (if rembg present) + tight crop + safe max-side → temp PNG path.
+    BG remove (if rembg present) + tight crop → temp PNG path.
     """
     img = PILImage.open(io.BytesIO(garment_bytes)).convert("RGBA")
-
-    # optional background remove
     if rembg_remove:
         try:
             garment_bytes = rembg_remove(garment_bytes)
             img = PILImage.open(io.BytesIO(garment_bytes)).convert("RGBA")
         except Exception as e:
             log.debug("rembg failed (non-fatal): %s", e)
-
-    # tight bbox from alpha
     box = _tight_bbox_from_rgba(img)
     if box:
         img = img.crop(box)
-
-    # safe max-side (prevents extreme scales that hurt warping)
-    max_side = _env_int("VTO_GARMENT_MAX_SIDE", 1600)
-    w, h = img.size
-    scale = min(1.0, max_side / float(max(w, h)))
-    if scale < 1.0:
-        img = img.resize((int(w * scale), int(h * scale)), PILImage.LANCZOS)
-
     b2 = io.BytesIO()
     img.save(b2, format="PNG")
     return _as_temp_png(b2.getvalue())
 
 
-
-def neutralize_torso_bytes(person_bytes: bytes, alpha=0.7, soften=22) -> typing.Union[str, typing.Tuple[str, typing.Tuple[int,int,int,int]]]:
+def neutralize_torso_bytes(person_bytes: bytes, alpha=0.7, soften=22) -> str:
     """
     Softly mute torso so the model replaces garment cleanly.
     Falls back to no-op if mediapipe is unavailable or landmarks missing.
@@ -118,14 +105,14 @@ def neutralize_torso_bytes(person_bytes: bytes, alpha=0.7, soften=22) -> typing.
     img = PILImage.open(io.BytesIO(person_bytes)).convert("RGBA")
     w, h = img.size
     if mp_pose is None:
-        b = io.BytesIO(); img.save(b, format="PNG"); return _as_temp_png(b.getvalue()), (0,0,img.size[0], img.size[1])
+        b = io.BytesIO(); img.save(b, format="PNG"); return _as_temp_png(b.getvalue())
 
     with mp_pose.Pose(static_image_mode=True, model_complexity=1) as pose:
         rgb = np.array(img.convert("RGB"))
         res = pose.process(rgb)
 
     if not getattr(res, "pose_landmarks", None):
-        b = io.BytesIO(); img.save(b, format="PNG"); return _as_temp_png(b.getvalue()), (0,0,img.size[0], img.size[1])
+        b = io.BytesIO(); img.save(b, format="PNG"); return _as_temp_png(b.getvalue())
 
     lm = res.pose_landmarks.landmark
     def dn(p): return (int(p.x * w), int(p.y * h))
@@ -140,63 +127,7 @@ def neutralize_torso_bytes(person_bytes: bytes, alpha=0.7, soften=22) -> typing.
     draw.rounded_rectangle([x0, y0, x1, y1], radius=soften, fill=(180, 180, 180, int(255 * alpha)))
     out = PILImage.alpha_composite(img, overlay)
     b = io.BytesIO(); out.save(b, format="PNG")
-    return _as_temp_png(b.getvalue()), (x0, y0, x1, y1)
-
-def _safe_pose_landmarks(img_rgba: PILImage.Image):
-    if mp_pose is None:
-        return None, img_rgba.size
-    w, h = img_rgba.size
-    with mp_pose.Pose(static_image_mode=True, model_complexity=1) as pose:
-        rgb = np.array(img_rgba.convert("RGB"))
-        res = pose.process(rgb)
-    return getattr(res, "pose_landmarks", None), (w, h)
-
-def _draw_arm_mask(mask_draw: ImageDraw.ImageDraw, lm, w, h, width_px: int):
-    def pt(idx): 
-        p = lm.landmark[idx]
-        return (int(p.x * w), int(p.y * h))
-    # left arm: 11-13-15, right arm: 12-14-16
-    for a,b,c in ((11,13,15), (12,14,16)):
-        p1, p2, p3 = pt(a), pt(b), pt(c)
-        mask_draw.line([p1, p2], width=width_px, fill=255)
-        mask_draw.line([p2, p3], width=width_px, fill=255)
-
-def _preserve_face_and_arms(person_bytes: bytes, gen_bytes: bytes,
-                            keep_face=True, keep_arms=True) -> bytes:
-    """Paste original face/arms back on top of generated try-on."""
-    orig = PILImage.open(io.BytesIO(person_bytes)).convert("RGBA")
-    gen  = PILImage.open(io.BytesIO(gen_bytes)).convert("RGBA").resize(orig.size, PILImage.LANCZOS)
-
-    lm, (w, h) = _safe_pose_landmarks(orig)
-    if lm is None or (not keep_face and not keep_arms):
-        # nothing to preserve
-        buf = io.BytesIO(); gen.save(buf, format="PNG"); return buf.getvalue()
-
-    mask = PILImage.new("L", (w, h), 0)
-    draw = ImageDraw.Draw(mask)
-
-    # Arms mask (thick lines shoulder→elbow→wrist)
-    if keep_arms:
-        # width ~1.5% of image diagonal; min 16px, max 48px
-        diag = (w**2 + h**2) ** 0.5
-        width_px = max(16, min(48, int(diag * 0.015)))
-        _draw_arm_mask(draw, lm, w, h, width_px)
-
-    # Face mask (disc around nose; radius from shoulder span)
-    if keep_face:
-        # shoulders 11,12
-        sx = (lm.landmark[11].x + lm.landmark[12].x) * 0.5 * w
-        sy = (lm.landmark[11].y + lm.landmark[12].y) * 0.5 * h
-        nose = lm.landmark[0]
-        nx, ny = int(nose.x * w), int(nose.y * h)
-        r = max(24, int(abs(nx - sx) * 0.7))  # approx face radius
-        draw.ellipse([nx - r, ny - r, nx + r, ny + r], fill=255)
-
-    # Paste original pixels where mask=1
-    out = gen.copy()
-    out.paste(orig, (0, 0), mask)
-    buf = io.BytesIO(); out.save(buf, format="PNG")
-    return buf.getvalue()
+    return _as_temp_png(b.getvalue())
 
 
 # ---------- env helpers ----------
@@ -204,13 +135,6 @@ def _env_bool(name: str, default: bool = False) -> bool:
     v = os.getenv(name, str(int(default))).strip().lower()
     return v in ("1", "true", "t", "yes", "y")
 
-
-def _env_float(name: str, default: float) -> float:
-    v = os.getenv(name)
-    try:
-        return float(v) if v is not None else default
-    except Exception:
-        return default
 
 def _env_int(name: str, default: int) -> int:
     v = os.getenv(name)
@@ -235,7 +159,7 @@ def _project_from_adc() -> typing.Optional[str]:
 # ---------- config ----------
 @dataclass
 class VTOConfig:
-    base_steps: int = _env_int("VTO_BASE_STEPS", 70)
+    base_steps: int = _env_int("VTO_BASE_STEPS", 60)
     seed: typing.Optional[int] = (int(os.getenv("VTO_SEED")) if os.getenv("VTO_SEED") else None)
     add_watermark: bool = _env_bool("VTO_ADD_WATERMARK", False)
     model: str = os.getenv("VTO_MODEL", "virtual-try-on-preview-08-04")
@@ -244,9 +168,13 @@ class VTOConfig:
     use_vertex: bool = _env_bool("VTO_USE_VERTEX", _env_bool("GOOGLE_GENAI_USE_VERTEXAI", True))
     project: typing.Optional[str] = (
         os.getenv("GOOGLE_PROJECT_ID")
+        or os.getenv("GOOGLE_CLOUD_PROJECT")
+        or _project_from_adc()
     )
     location: str = (
         os.getenv("GOOGLE_LOCATION")
+        or os.getenv("GOOGLE_CLOUD_LOCATION")
+        or "us-central1"
     )
 
 
@@ -368,21 +296,6 @@ def _to_png_bytes_from_unknown(obj: typing.Any) -> bytes:
 
     raise RuntimeError("Unsupported image output type (cannot convert to PNG bytes)")
 
-def _score_fit_against_torso(img_bytes: bytes, ref_box: typing.Tuple[int,int,int,int]) -> float:
-    """
-    Very light heuristic: more non-background pixels inside the torso rectangle == better fit.
-    """
-    try:
-        pil = PILImage.open(io.BytesIO(img_bytes)).convert("RGBA")
-        x0, y0, x1, y1 = ref_box
-        crop = pil.crop((x0, y0, x1, y1))
-        arr = np.array(crop)
-        if arr.shape[2] == 4:
-            alpha = arr[..., 3]
-            return float((alpha > 10).sum()) / float(alpha.size)
-    except Exception:
-        pass
-    return 0.0
 
 # ---------- main API ----------
 async def generate_vto_image(
@@ -397,18 +310,7 @@ async def generate_vto_image(
     client = _make_client(cfg)
 
     # Prep inputs
-    torso_box = None
-    if _env_bool("VTO_NEUTRALIZE_TORSO", True):
-       person_tmp, torso_box = neutralize_torso_bytes(
-            person_bytes,
-            alpha=_env_float("VTO_TORSO_ALPHA", 0.70),
-            soften=int(_env_int("VTO_TORSO_SOFTEN", 22)),
-        )
-    else:
-        b = io.BytesIO(); PILImage.open(io.BytesIO(person_bytes)).convert("RGBA").save(b, format="PNG")
-        person_tmp = _as_temp_png(b.getvalue())
-        pil = PILImage.open(io.BytesIO(person_bytes)).convert("RGBA")
-        torso_box = (0, 0, pil.size[0], pil.size[1])
+    person_tmp = neutralize_torso_bytes(person_bytes)
     garment_tmp = prep_garment_bytes(garment_bytes)
 
     person_img = Image.from_file(location=person_tmp)
@@ -417,7 +319,7 @@ async def generate_vto_image(
     # Recontext config
     try:
         re_cfg = RecontextImageConfig(
-            number_of_images=_env_int("VTO_NUM_IMAGES", 4),
+            number_of_images=1,
             base_steps=cfg.base_steps,
             seed=(cfg.seed or random.randint(1, 10_000_000)),
             add_watermark=cfg.add_watermark,
@@ -475,29 +377,8 @@ async def generate_vto_image(
             raise RuntimeError("VTO returned no image")
 
     # Prefer nested .image field if present (GeneratedImage)
-    scored: typing.List[typing.Tuple[float, bytes]] = []
-    for cand in images:
-        obj = cand.image if hasattr(cand, "image") else cand
-        try:
-            b = _to_png_bytes_from_unknown(obj)
-            score = _score_fit_against_torso(b, torso_box) if torso_box else 0.0
-            scored.append((score, b))
-        except Exception as e:
-            log.debug("candidate decode failed: %s", e)
+    candidate = images[0]
+    if hasattr(candidate, "image"):
+        candidate = candidate.image
 
-    if not scored:
-        raise RuntimeError("VTO returned images but none were decodable")
-
-    scored.sort(key=lambda t: t[0], reverse=True)
-    best_png = scored[0][1]
-
-    # --- NEW: restore original arms/face on top to avoid "third hand"
-    if _env_bool("VTO_PRESERVE_ARMS", True) or _env_bool("VTO_PRESERVE_FACE", True):
-        best_png = _preserve_face_and_arms(
-            person_bytes,
-            best_png,
-            keep_face=_env_bool("VTO_PRESERVE_FACE", True),
-            keep_arms=_env_bool("VTO_PRESERVE_ARMS", True),
-        )
-
-    return best_png
+    return _to_png_bytes_from_unknown(candidate)
