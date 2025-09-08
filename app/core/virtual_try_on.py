@@ -142,6 +142,62 @@ def neutralize_torso_bytes(person_bytes: bytes, alpha=0.7, soften=22) -> typing.
     b = io.BytesIO(); out.save(b, format="PNG")
     return _as_temp_png(b.getvalue()), (x0, y0, x1, y1)
 
+def _safe_pose_landmarks(img_rgba: PILImage.Image):
+    if mp_pose is None:
+        return None, img_rgba.size
+    w, h = img_rgba.size
+    with mp_pose.Pose(static_image_mode=True, model_complexity=1) as pose:
+        rgb = np.array(img_rgba.convert("RGB"))
+        res = pose.process(rgb)
+    return getattr(res, "pose_landmarks", None), (w, h)
+
+def _draw_arm_mask(mask_draw: ImageDraw.ImageDraw, lm, w, h, width_px: int):
+    def pt(idx): 
+        p = lm.landmark[idx]
+        return (int(p.x * w), int(p.y * h))
+    # left arm: 11-13-15, right arm: 12-14-16
+    for a,b,c in ((11,13,15), (12,14,16)):
+        p1, p2, p3 = pt(a), pt(b), pt(c)
+        mask_draw.line([p1, p2], width=width_px, fill=255)
+        mask_draw.line([p2, p3], width=width_px, fill=255)
+
+def _preserve_face_and_arms(person_bytes: bytes, gen_bytes: bytes,
+                            keep_face=True, keep_arms=True) -> bytes:
+    """Paste original face/arms back on top of generated try-on."""
+    orig = PILImage.open(io.BytesIO(person_bytes)).convert("RGBA")
+    gen  = PILImage.open(io.BytesIO(gen_bytes)).convert("RGBA").resize(orig.size, PILImage.LANCZOS)
+
+    lm, (w, h) = _safe_pose_landmarks(orig)
+    if lm is None or (not keep_face and not keep_arms):
+        # nothing to preserve
+        buf = io.BytesIO(); gen.save(buf, format="PNG"); return buf.getvalue()
+
+    mask = PILImage.new("L", (w, h), 0)
+    draw = ImageDraw.Draw(mask)
+
+    # Arms mask (thick lines shoulder→elbow→wrist)
+    if keep_arms:
+        # width ~1.5% of image diagonal; min 16px, max 48px
+        diag = (w**2 + h**2) ** 0.5
+        width_px = max(16, min(48, int(diag * 0.015)))
+        _draw_arm_mask(draw, lm, w, h, width_px)
+
+    # Face mask (disc around nose; radius from shoulder span)
+    if keep_face:
+        # shoulders 11,12
+        sx = (lm.landmark[11].x + lm.landmark[12].x) * 0.5 * w
+        sy = (lm.landmark[11].y + lm.landmark[12].y) * 0.5 * h
+        nose = lm.landmark[0]
+        nx, ny = int(nose.x * w), int(nose.y * h)
+        r = max(24, int(abs(nx - sx) * 0.7))  # approx face radius
+        draw.ellipse([nx - r, ny - r, nx + r, ny + r], fill=255)
+
+    # Paste original pixels where mask=1
+    out = gen.copy()
+    out.paste(orig, (0, 0), mask)
+    buf = io.BytesIO(); out.save(buf, format="PNG")
+    return buf.getvalue()
+
 
 # ---------- env helpers ----------
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -421,16 +477,27 @@ async def generate_vto_image(
     # Prefer nested .image field if present (GeneratedImage)
     scored: typing.List[typing.Tuple[float, bytes]] = []
     for cand in images:
-       obj = cand.image if hasattr(cand, "image") else cand
-       try:
-           b = _to_png_bytes_from_unknown(obj)
-           score = _score_fit_against_torso(b, torso_box) if torso_box else 0.0
-           scored.append((score, b))
-       except Exception as e:
-           log.debug("candidate decode failed: %s", e)
+        obj = cand.image if hasattr(cand, "image") else cand
+        try:
+            b = _to_png_bytes_from_unknown(obj)
+            score = _score_fit_against_torso(b, torso_box) if torso_box else 0.0
+            scored.append((score, b))
+        except Exception as e:
+            log.debug("candidate decode failed: %s", e)
 
     if not scored:
-       raise RuntimeError("VTO returned images but none were decodable")
+        raise RuntimeError("VTO returned images but none were decodable")
 
     scored.sort(key=lambda t: t[0], reverse=True)
-    return scored[0][1]
+    best_png = scored[0][1]
+
+    # --- NEW: restore original arms/face on top to avoid "third hand"
+    if _env_bool("VTO_PRESERVE_ARMS", True) or _env_bool("VTO_PRESERVE_FACE", True):
+        best_png = _preserve_face_and_arms(
+            person_bytes,
+            best_png,
+            keep_face=_env_bool("VTO_PRESERVE_FACE", True),
+            keep_arms=_env_bool("VTO_PRESERVE_ARMS", True),
+        )
+
+    return best_png
