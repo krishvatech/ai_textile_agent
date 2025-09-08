@@ -89,9 +89,9 @@ def prep_garment_bytes(garment_bytes: bytes) -> str:
             img = PILImage.open(io.BytesIO(garment_bytes)).convert("RGBA")
         except Exception as e:
             log.debug("rembg failed (non-fatal): %s", e)
-    box = _tight_bbox_from_rgba(img)
-    if box:
-        img = img.crop(box)
+    # box = _tight_bbox_from_rgba(img)
+    # if box:
+    #     img = img.crop(box)
     b2 = io.BytesIO()
     img.save(b2, format="PNG")
     return _as_temp_png(b2.getvalue())
