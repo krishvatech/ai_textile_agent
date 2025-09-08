@@ -20,8 +20,9 @@
     <div id="chatScroll" class="chat-thread">
       {% if messages and messages|length %}
         {% for m in messages %}
-          {# --- per-message DOM id used for jumping --- #}
-          {% set dom_id = 'msg-' ~ m.msg_id|replace(':','-')|replace('.','-') %}
+          {# Stable DOM id (fallback to index if msg_id missing) #}
+          {% set _id = m.msg_id if m.msg_id is defined else ('idx-' ~ loop.index0) %}
+          {% set dom_id = 'msg-' ~ _id|string|replace(':','-')|replace('.','-') %}
 
           {% set is_in = (m.direction == 'in') %}
           {% set same_sender = (not loop.first and loop.previtem.role == m.role and loop.previtem.direction == m.direction) %}
@@ -36,8 +37,28 @@
             {% endif %}
 
             <div class="bubble-group">
-              {% set has_img = m.meta and (m.meta.image_url or (m.meta.image and m.meta.image.url)) %}
-              {% set imgurl = (m.meta.image_url if has_img else None) or (m.meta.image.url if has_img and m.meta.image else None) %}
+              {# --------- IMAGE SOURCE (per side) ---------
+                 - User (in): use backend-provided Meta proxy at m.meta.resolved_image
+                 - Assistant (out): use DB fields (image_url / image.url / image string)
+              #}
+              {% if is_in %}
+                {% set imgurl = m.meta.resolved_image if m.meta and m.meta.resolved_image else None %}
+              {% else %}
+                {% if m.meta %}
+                  {% if m.meta.image_url %}
+                    {% set imgurl = m.meta.image_url %}
+                  {% elif m.meta.image and m.meta.image.url %}
+                    {% set imgurl = m.meta.image.url %}
+                  {% elif m.meta.image is string %}
+                    {% set imgurl = m.meta.image %}
+                  {% else %}
+                    {% set imgurl = None %}
+                  {% endif %}
+                {% else %}
+                  {% set imgurl = None %}
+                {% endif %}
+              {% endif %}
+              {% set has_img = imgurl is not none %}
 
               <div class="bubble {{ 'photo' if has_img else '' }}">
                 {# ---------- Reply preview (tap to jump) ---------- #}
@@ -45,12 +66,31 @@
                   {% set replied = (messages | selectattr("msg_id","equalto", m.meta.reply_to) | list) %}
                   {% if replied and replied[0] %}
                     {% set r = replied[0] %}
-                    {% set r_id = 'msg-' ~ r.msg_id|replace(':','-')|replace('.','-') %}
+                    {% set r_id = 'msg-' ~ (r.msg_id if r.msg_id is defined else ('idx-' ~ loop.index0))|replace(':','-')|replace('.','-') %}
+                    {# Preview image uses same side-specific logic #}
+                    {% if r.direction == 'in' %}
+                      {% set r_thumb = r.meta.resolved_image if r.meta and r.meta.resolved_image else None %}
+                    {% else %}
+                      {% if r.meta %}
+                        {% if r.meta.image_url %}
+                          {% set r_thumb = r.meta.image_url %}
+                        {% elif r.meta.image and r.meta.image.url %}
+                          {% set r_thumb = r.meta.image.url %}
+                        {% elif r.meta.image is string %}
+                          {% set r_thumb = r.meta.image %}
+                        {% else %}
+                          {% set r_thumb = None %}
+                        {% endif %}
+                      {% else %}
+                        {% set r_thumb = None %}
+                      {% endif %}
+                    {% endif %}
+
                     <a href="#{{ r_id }}" class="reply-preview" data-target="{{ r_id }}">
                       <div class="rp-author">{{ 'You' if r.direction == 'in' else 'Assistant' }}</div>
                       <div class="rp-row">
-                        {% if r.meta and (r.meta.image_url or (r.meta.image and r.meta.image.url)) %}
-                          <img class="rp-thumb" src="{{ r.meta.image_url or r.meta.image.url }}" alt="preview">
+                        {% if r_thumb %}
+                          <img class="rp-thumb" src="{{ r_thumb }}" alt="preview" referrerpolicy="no-referrer">
                         {% endif %}
                         <div class="rp-text">
                           {{ (r.text or '')[:120] }}{% if r.text and r.text|length > 120 %}…{% endif %}
@@ -66,14 +106,18 @@
                     <img src="{{ imgurl }}" alt="shared image" class="msg-img" loading="lazy" referrerpolicy="no-referrer" />
                   {% endif %}
 
-                  {% if m.text %}
+                  {# Hide long WA link text if we rendered its image #}
+                  {% set text_lower = (m.text or '')|lower %}
+                  {% set hide_media_link = has_img and ('lookaside.fbsbx.com' in text_lower or 'graph.facebook.com' in text_lower) %}
+
+                  {% if m.text and m.text|trim and not hide_media_link %}
                     <div class="{{ 'caption' if m.direction == 'out' else '' }}">
                       {{ m.text
-                         | replace('\\n','\n') 
-                         | replace('&lt;br&gt;','\n') 
-                         | replace('<br>','\n')    
+                         | replace('\\n','\n')
+                         | replace('&lt;br&gt;','\n')
+                         | replace('<br>','\n')
                          | urlize(40, true)
-                         | safe                    
+                         | safe
                       }}
                     </div>
                   {% endif %}
@@ -96,21 +140,19 @@
     </div>
   </div>
 
-  {# ---------- Smooth scroll + highlight on reply-preview click ---------- #}
   <script>
+    // Smooth scroll + highlight for reply-preview links
     document.addEventListener('DOMContentLoaded', function () {
       const thread = document.getElementById('chatScroll');
 
       function scrollToMessage(target) {
         if (!target) return;
-        // Prefer smooth scroll inside chat thread container if it exists
         if (thread && thread.contains(target)) {
-          const top = target.offsetTop - thread.offsetTop - 60; // adjust if you change paddings
+          const top = target.offsetTop - thread.offsetTop - 60;
           thread.scrollTo({ top, behavior: 'smooth' });
         } else {
           target.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
-        // flash highlight
         target.classList.add('ping');
         setTimeout(() => target.classList.remove('ping'), 1600);
       }
@@ -126,7 +168,7 @@
 
         e.preventDefault();
         scrollToMessage(target);
-        history.replaceState(null, '', `#${id}`); // optional: keep hash
+        history.replaceState(null, '', `#${id}`);
       });
     });
   </script>

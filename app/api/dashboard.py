@@ -1,12 +1,19 @@
 # app/api/dashboard.py
 from __future__ import annotations
 
-from fastapi import APIRouter, Request, HTTPException, Depends
-from fastapi.responses import HTMLResponse, RedirectResponse
+import os
+import json
+import re
+from io import BytesIO
+from urllib.parse import urlparse, quote_plus
+from typing import List, Dict, Any, Optional
+
+import httpx
+from fastapi import APIRouter, Request, HTTPException, Depends, Query
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from typing import List, Dict, Any
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # Use the same get_db that admin.py relies on
 from app.db.session import get_db  # <-- same pattern as admin.py
@@ -14,6 +21,9 @@ from app.db.session import get_db  # <-- same pattern as admin.py
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates/tenants")
 
+# ---------------------------------------------------------------------
+# Auth: only tenant_admins can use the tenant dashboard
+# ---------------------------------------------------------------------
 ALLOWED_DASHBOARD_ROLES = {"tenant_admin"}
 
 def require_auth(request: Request):
@@ -23,7 +33,6 @@ def require_auth(request: Request):
         nxt = request.url.path or "/dashboard"
         return RedirectResponse(url=f"/login?next={nxt}", status_code=303)
     return int(tid)
-
 
 async def get_tenant_name(tenant_id: int, db: AsyncSession) -> str:
     res = await db.execute(
@@ -36,6 +45,87 @@ async def get_tenant_name(tenant_id: int, db: AsyncSession) -> str:
     name = row[0]
     return (name.strip() if isinstance(name, str) else name) or "Unknown"
 
+# ---------------------------------------------------------------------
+# Meta / WhatsApp media proxy (server-side fetch using your token)
+# ---------------------------------------------------------------------
+ALLOWED_WA_HOSTS = {
+    "lookaside.fbsbx.com",
+    "graph.facebook.com",
+    "scontent.xx.fbcdn.net",
+    "scontent.cdninstagram.com",
+}
+MID_RE = re.compile(r"[?&]mid=([0-9A-Za-z_-]+)")
+
+def get_waba_token_for_tenant(tenant_id: int) -> Optional[str]:
+    """
+    Prefer per-tenant secret; fall back to a global one.
+    .env examples:
+      WABA_TOKEN=EAAG...           (global)
+      WABA_TOKEN_4=EAAG...         (tenant_id=4)
+    """
+    return (
+        os.getenv("WHATSAPP_TOKEN")
+    )
+
+@router.get("/media/wa/{media_id}")
+async def wa_media_by_id(request: Request, media_id: str):
+    """Stream a WhatsApp media file by media_id using the Graph API."""
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    tenant_id = guard
+
+    token = get_waba_token_for_tenant(tenant_id)
+    if not token:
+        return HTMLResponse("WABA token missing on server", status_code=500)
+
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        # 1) Lookup the media URL
+        meta = await client.get(
+            f"https://graph.facebook.com/v20.0/{media_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if meta.status_code >= 400:
+            return HTMLResponse(f"Meta lookup failed: {meta.text}", status_code=meta.status_code)
+        info = meta.json() or {}
+        url = info.get("url")
+        if not url:
+            return HTMLResponse("Media URL missing", status_code=502)
+
+        # 2) Download using the same auth
+        file_res = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+        if file_res.status_code >= 400:
+            return HTMLResponse(f"Media download failed: {file_res.text}", status_code=file_res.status_code)
+
+        return StreamingResponse(BytesIO(file_res.content),
+                                 media_type=file_res.headers.get("Content-Type", "application/octet-stream"))
+
+@router.get("/media/wa")
+async def wa_media_by_url(request: Request, url: str = Query(...)):
+    """Stream a WhatsApp media file by a full (lookaside/graph) URL."""
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    tenant_id = guard
+
+    token = get_waba_token_for_tenant(tenant_id)
+    if not token:
+        return HTMLResponse("WABA token missing on server", status_code=500)
+
+    parsed = urlparse(url)
+    if parsed.hostname not in ALLOWED_WA_HOSTS:
+        return HTMLResponse("Host not allowed", status_code=400)
+
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        r = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+        if r.status_code >= 400:
+            return HTMLResponse(f"Download failed: {r.text}", status_code=r.status_code)
+        return StreamingResponse(BytesIO(r.content),
+                                 media_type=r.headers.get("Content-Type", "application/octet-stream"))
+
+# ---------------------------------------------------------------------
+# Dashboard home
+# ---------------------------------------------------------------------
 @router.get("/", response_class=HTMLResponse, name="dashboard_home")
 async def dashboard_home(request: Request, db: AsyncSession = Depends(get_db)):
     guard = require_auth(request)
@@ -124,7 +214,9 @@ async def dashboard_home(request: Request, db: AsyncSession = Depends(get_db)):
         },
     )
 
-# ---------- Customers ----------
+# ---------------------------------------------------------------------
+# Customers
+# ---------------------------------------------------------------------
 @router.get("/customer", response_class=HTMLResponse)
 async def customers_list(request: Request, db: AsyncSession = Depends(get_db)):
     guard = require_auth(request)
@@ -246,7 +338,9 @@ async def customer_detail(request: Request, customer_id: int, db: AsyncSession =
         },
     )
 
-# ---------- Products ----------
+# ---------------------------------------------------------------------
+# Products
+# ---------------------------------------------------------------------
 @router.get("/product", response_class=HTMLResponse)
 async def products_list(request: Request, db: AsyncSession = Depends(get_db)):
     guard = require_auth(request)
@@ -372,38 +466,9 @@ async def product_detail(request: Request, product_id: int, db: AsyncSession = D
         },
     )
 
-# --- Chat history page ---
-@router.get("/chat/{customer_id}", response_class=HTMLResponse)
-async def chat_history(request: Request, customer_id: int, db: AsyncSession = Depends(get_db)):
-    guard = require_auth(request)
-    if isinstance(guard, RedirectResponse):
-        return guard
-    tenant_id = guard
-
-    res = await db.execute(text("""
-        SELECT id, started_at, ended_at, transcript
-        FROM chat_sessions
-        WHERE customer_id = :cid
-        ORDER BY started_at DESC
-        LIMIT 1
-    """), {"cid": customer_id})
-    row = res.fetchone()
-
-    if not row:
-        session = None
-        messages: List[Dict[str, Any]] = []
-    else:
-        session = {"id": row[0], "started_at": row[1], "ended_at": row[2]}
-        transcript = row[3]
-        messages = transcript or []
-
-    tenant_name = request.session.get("tenant_name") or await get_tenant_name(tenant_id, db)
-
-    return templates.TemplateResponse(
-        "chat_history.html",
-        {"request": request, "tenant_id": tenant_id, "tenant_name": tenant_name, "customer_id": customer_id, "session": session, "messages": messages},
-    )
-
+# ---------------------------------------------------------------------
+# Orders & Rentals
+# ---------------------------------------------------------------------
 @router.get("/orders", response_class=HTMLResponse)
 async def orders_list(request: Request, db: AsyncSession = Depends(get_db)):
     guard = require_auth(request)
@@ -556,5 +621,103 @@ async def rentals_list(request: Request, db: AsyncSession = Depends(get_db)):
             "tenant_name": tenant_name,
             "rentals": rentals,
             "current_status": current_status,
+        },
+    )
+
+# ---------------------------------------------------------------------
+# Chat history — ONLY user images fetch via Meta; assistant uses DB
+# ---------------------------------------------------------------------
+def _normalize_user_media(m: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    For incoming ('in') messages only:
+    - Resolve a working image URL through our proxy (preferred),
+      or from meta.image_url / meta.image.url / meta.image.
+    - If text is just a lookaside/graph URL and we show an image,
+      hide that text to avoid duplicate long links.
+    """
+    if not isinstance(m, dict) or m.get("direction") != "in":
+        return m
+
+    meta = (m.get("meta") or {})
+    txt  = (m.get("text") or "").strip()
+
+    # 1) already resolved?
+    img = meta.get("proxy_url")
+
+    # 2) DB-style fields
+    if not img:
+        if isinstance(meta.get("image_url"), str):
+            img = meta["image_url"]
+        elif isinstance(meta.get("image"), dict) and isinstance(meta["image"].get("url"), str):
+            img = meta["image"]["url"]
+        elif isinstance(meta.get("image"), str):
+            img = meta["image"]
+
+    # 3) Extract media_id from pasted lookaside link if needed
+    if not img and txt:
+        mm = MID_RE.search(txt)
+        if mm:
+            meta["proxy_url"] = f"/dashboard/media/wa/{mm.group(1)}"
+            img = meta["proxy_url"]
+
+    # 4) If it's a WA URL and no explicit proxy yet, use proxy-by-url
+    if img and not meta.get("proxy_url"):
+        low = img.lower()
+        if "lookaside.fbsbx.com" in low or "graph.facebook.com" in low:
+            meta["proxy_url"] = f"/dashboard/media/wa?url={quote_plus(img)}"
+            img = meta["proxy_url"]
+
+    meta["resolved_image"] = img
+    m["meta"] = meta
+
+    # Hide the long WA link if we rendered its image
+    if img and txt:
+        low = txt.lower()
+        if "lookaside.fbsbx.com" in low or "graph.facebook.com" in low:
+            m["text"] = ""
+
+    return m
+
+@router.get("/chat/{customer_id}", response_class=HTMLResponse)
+async def chat_history(request: Request, customer_id: int, db: AsyncSession = Depends(get_db)):
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    tenant_id = guard
+
+    res = await db.execute(text("""
+        SELECT id, started_at, ended_at, transcript
+        FROM chat_sessions
+        WHERE customer_id = :cid
+        ORDER BY started_at DESC
+        LIMIT 1
+    """), {"cid": customer_id})
+    row = res.fetchone()
+
+    if not row:
+        session = None
+        messages: List[Dict[str, Any]] = []
+    else:
+        session = {"id": row[0], "started_at": row[1], "ended_at": row[2]}
+        transcript = row[3]
+        # transcript may be JSONB (list) or a JSON string
+        if isinstance(transcript, str):
+            try:
+                transcript = json.loads(transcript)
+            except Exception:
+                transcript = []
+        messages = [_normalize_user_media(m) if isinstance(m, dict) else m for m in (transcript or [])]
+
+    tenant_name = request.session.get("tenant_name") or await get_tenant_name(tenant_id, db)
+
+    return templates.TemplateResponse(
+        "chat_history.html",
+        {
+            "request": request,
+            "tenant_id": tenant_id,
+            "tenant_name": tenant_name,
+            "customer_id": customer_id,
+            "session": session,
+            "messages": messages,
         },
     )
