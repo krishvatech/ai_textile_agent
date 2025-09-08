@@ -54,6 +54,11 @@ except Exception:
     rembg_remove = None
 
 try:
+    import cv2
+except Exception:
+    cv2 = None
+
+try:
     import mediapipe as mp
     mp_pose = mp.solutions.pose
 except Exception:
@@ -141,6 +146,75 @@ def neutralize_torso_bytes(person_bytes: bytes, alpha=0.7, soften=22) -> typing.
     out = PILImage.alpha_composite(img, overlay)
     b = io.BytesIO(); out.save(b, format="PNG")
     return _as_temp_png(b.getvalue()), (x0, y0, x1, y1)
+
+def _inpaint_objects_near_hands(person_bytes: bytes,
+                                dilate_px: int = 20,
+                                strength: int = 35) -> bytes:
+    """
+    Detect hands (MediaPipe), expand palm/hand regions, and inpaint inside them.
+    Removes objects being held without relying on color.
+    """
+    if mp_pose is None or cv2 is None:
+        # if mediapipe or opencv missing, return original
+        return person_bytes
+
+    img_rgba = PILImage.open(io.BytesIO(person_bytes)).convert("RGBA")
+    w, h = img_rgba.size
+    # work in BGR for OpenCV
+    bgr = cv2.cvtColor(np.array(img_rgba.convert("RGB")), cv2.COLOR_RGB2BGR)
+
+    # Use MediaPipe Hands (lightweight) if available; else fallback to Pose wrists
+    try:
+        import mediapipe as mp
+        mp_hands = mp.solutions.hands
+    except Exception:
+        mp_hands = None
+
+    mask = np.zeros((h, w), dtype=np.uint8)
+
+    if mp_hands is not None:
+        with mp_hands.Hands(static_image_mode=True,
+                            max_num_hands=2,
+                            model_complexity=0) as hands:
+            res = hands.process(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+        if res.multi_hand_landmarks:
+            for hand in res.multi_hand_landmarks:
+                pts = []
+                for lm in hand.landmark:
+                    pts.append((int(lm.x * w), int(lm.y * h)))
+                # convex hull around all hand keypoints
+                hull = cv2.convexHull(np.array(pts, dtype=np.int32))
+                cv2.fillConvexPoly(mask, hull, 255)
+    else:
+        # Fallback: use wrists+elbows from Pose to approximate a small circular area at wrists
+        with mp_pose.Pose(static_image_mode=True, model_complexity=1) as pose:
+            res = pose.process(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+        if getattr(res, "pose_landmarks", None):
+            lm = res.pose_landmarks.landmark
+            for idx in (15, 16):  # left/right wrist
+                x = int(lm[idx].x * w); y = int(lm[idx].y * h)
+                cv2.circle(mask, (x, y), 40, 255, -1)
+
+    if mask.max() == 0:
+        # nothing detected
+        return person_bytes
+
+    # dilate to cover phone/objects around the palm
+    if dilate_px > 0:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_px, dilate_px))
+        mask = cv2.dilate(mask, k, iterations=1)
+
+    # inpaint (Telea) on the RGB image
+    inpainted = cv2.inpaint(bgr, mask, strength, cv2.INPAINT_TELEA)
+
+    # keep original alpha
+    rgba = cv2.cvtColor(inpainted, cv2.COLOR_BGR2RGB)
+    out = PILImage.fromarray(rgba).convert("RGBA")
+    out.putalpha(img_rgba.split()[-1])
+
+    buf = io.BytesIO()
+    out.save(buf, format="PNG")
+    return buf.getvalue()
 
 def _safe_pose_landmarks(img_rgba: PILImage.Image):
     if mp_pose is None:
@@ -397,9 +471,17 @@ async def generate_vto_image(
     client = _make_client(cfg)
 
     # Prep inputs
+    if _env_bool("VTO_REMOVE_HAND_OBJECTS", True):
+        person_bytes = _inpaint_objects_near_hands(
+            person_bytes,
+            dilate_px=_env_int("VTO_HAND_DILATION", 22),
+            strength=_env_int("VTO_INPAINT_STRENGTH", 35),
+        )
+
+    # Continue with your existing flow:
     torso_box = None
     if _env_bool("VTO_NEUTRALIZE_TORSO", True):
-       person_tmp, torso_box = neutralize_torso_bytes(
+        person_tmp, torso_box = neutralize_torso_bytes(
             person_bytes,
             alpha=_env_float("VTO_TORSO_ALPHA", 0.70),
             soften=int(_env_int("VTO_TORSO_SOFTEN", 22)),
