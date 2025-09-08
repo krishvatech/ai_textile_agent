@@ -90,34 +90,39 @@ def _is_flare_piece_env() -> bool:
 
 
 
+# virtual_try_on.py
+
 def prep_garment_bytes(garment_bytes: bytes, is_flare: bool = False) -> str:
     """
-    Preprocess garment:
-    - If is_flare = False → remove BG + crop tight
-    - If is_flare = True  → skip crop, keep full shape (optionally pad canvas)
+    Preprocess garment image for recontext:
+    - Always remove background if possible.
+    - If not flare -> crop tight bbox (faster, cleaner).
+    - If flare    -> do NOT crop; keep full silhouette and pad canvas a bit.
     """
-    img = PILImage.open(io.BytesIO(garment_bytes)).convert("RGBA")
+    # 1) BG remove first (for both paths)
+    img_rgba = None
+    if rembg_remove:
+        try:
+            removed = rembg_remove(garment_bytes)
+            img_rgba = PILImage.open(io.BytesIO(removed)).convert("RGBA")
+        except Exception:
+            pass
 
+    if img_rgba is None:
+        img_rgba = PILImage.open(io.BytesIO(garment_bytes)).convert("RGBA")
+
+    # 2) Crop vs. keep
     if not is_flare:
-        if rembg_remove:
-            try:
-                garment_bytes = rembg_remove(garment_bytes)
-                img = PILImage.open(io.BytesIO(garment_bytes)).convert("RGBA")
-            except Exception as e:
-                log.debug("rembg failed (non-fatal): %s", e)
-        box = _tight_bbox_from_rgba(img)
+        box = _tight_bbox_from_rgba(img_rgba)
         if box:
-            img = img.crop(box)
+            img_rgba = img_rgba.crop(box)
     else:
-        # flare gowns/lehenga/choli — don’t crop
-        # you can also add padding if needed
-        img = _pad_canvas(img, pad_w=180, pad_h=200)
-    b2 = io.BytesIO()
-    img.save(b2, format="PNG")
-    return _as_temp_png(b2.getvalue())
+        # keep the whole shape so the skirt hem and width survive
+        img_rgba = _pad_canvas(img_rgba, pad_w=180, pad_h=200)
 
-
-
+    b = io.BytesIO()
+    img_rgba.save(b, format="PNG")
+    return _as_temp_png(b.getvalue())
 
 def neutralize_torso_bytes(person_bytes: bytes, alpha=0.7, soften=22) -> str:
     """
