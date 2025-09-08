@@ -1084,17 +1084,43 @@ async def _handle_vto_flow(
                                     phone_number_id=outbound_pnid,
                                 )
                             return
+                        # --- decide flare garments (gown/lehenga/choli buckets) ---
                         seed = vto_state.get("seed") or {}
-                        cat = (seed.get("category") or seed.get("type") or "").strip().lower()
 
-                        FLARE_SET = {"gown", "lehenga", "choli", "lehenga choli", "ghaghra", "ghagra"}
-                        is_flare = cat in FLARE_SET   # boolean True/False
+                        # prefer category → fall back to type → finally scan name text
+                        raw_cat  = (seed.get("category") or seed.get("type") or "").strip().lower()
+                        raw_name = (seed.get("name") or "").lower()
 
+                        # normalize plurals & synonyms
+                        _alias = {
+                            "gowns": "gown",
+                            "lehenga choli": "lehenga-choli",
+                            "lehengas": "lehenga",
+                            "cholis": "choli",
+                            "ghaghra": "lehenga",   # treat as lehenga
+                            "ghagras": "lehenga",
+                            "ghaghra choli": "lehenga-choli",
+                        }
+                        cat = _alias.get(raw_cat, raw_cat)
+
+                        # if category is missing/unclear, infer from product name
+                        if not cat:
+                            if any(k in raw_name for k in ("gown", "ball gown", "evening gown")):
+                                cat = "gown"
+                            elif any(k in raw_name for k in ("lehenga", "ghaghra", "ghagra")):
+                                cat = "lehenga"
+                            elif "choli" in raw_name:
+                                cat = "choli"
+
+                        FLARE_SET = {"gown", "lehenga", "choli", "lehenga-choli"}
+                        is_flare = cat in FLARE_SET  # ← boolean
+
+                        # call VTO
                         result_bytes = await generate_vto_image(
                             person_bytes=vto_state["person_image"],
                             garment_bytes=garment_bytes,
                             cfg=VTOConfig(base_steps=60, add_watermark=False),
-                            is_flare=is_flare,   # ← here it’s passed as a bool
+                            is_flare=is_flare,  # ← passes True/False
                         )
                         logging.info("="*100)
                         
