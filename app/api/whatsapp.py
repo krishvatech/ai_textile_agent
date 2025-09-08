@@ -1069,12 +1069,20 @@ async def _handle_vto_flow(
                         # --- END GUARD ---
                         person_bytes = vto_state.get("person_image")
                         if not person_bytes:
-                            await send_whatsapp_text(user_id, "Please send a clear front photo of the person first.")
+                            await send_whatsapp_reply_cloud(
+                                    to_waid=from_waid,
+                                    body=f"Please send a clear front photo of the person first.",
+                                    phone_number_id=outbound_pnid,
+                                )
                             # keep session active & return gracefully
                             return
 
                         if not garment_bytes:
-                            await send_whatsapp_text(user_id, "Please send the outfit image (catalog/product photo).")
+                            await send_whatsapp_reply_cloud(
+                                    to_waid=from_waid,
+                                    body=f"Please send the outfit image (catalog/product photo).",
+                                    phone_number_id=outbound_pnid,
+                                )
                             return
                         seed = vto_state.get("seed") or {}
                         cat = (seed.get("category") or seed.get("type") or "").strip().lower()

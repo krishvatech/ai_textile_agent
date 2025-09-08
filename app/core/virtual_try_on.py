@@ -326,12 +326,11 @@ def _to_png_bytes_from_unknown(obj: typing.Any) -> bytes:
 
     # 5) iterable/sequence of candidates
     if isinstance(obj, (list, tuple)):
-        for item in obj:
+        for item in reversed(obj):   # ← prefer the last (usually the generated result)
             try:
                 return _to_png_bytes_from_unknown(item)
             except Exception:
                 continue
-
     raise RuntimeError("Unsupported image output type (cannot convert to PNG bytes)")
 
 
@@ -461,4 +460,20 @@ async def generate_vto_image(
     if hasattr(candidate, "image"):
         candidate = candidate.image
 
-    return _to_png_bytes_from_unknown(candidate)
+    png = _to_png_bytes_from_unknown(candidate)
+
+    # --- sanity check: don’t accidentally return the neutralized person frame ---
+    try:
+        with open(person_tmp, "rb") as fh:
+            person_png = fh.read()
+        if len(person_png) == len(png):
+            # Same size → likely just echoed the input; prefer last candidate if available
+            if isinstance(images, (list, tuple)) and len(images) > 1:
+                last = images[-1]
+                if hasattr(last, "image"):
+                    last = last.image
+                png = _to_png_bytes_from_unknown(last)
+    except Exception:
+        pass
+
+    return png
