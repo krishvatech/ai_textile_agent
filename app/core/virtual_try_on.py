@@ -250,15 +250,9 @@ def _decode_base64_field(val: typing.Any) -> typing.Optional[bytes]:
     return None
 
 
-def _to_png_bytes_from_unknown(obj: typing.Any) -> bytes:
+def _to_png_bytes_from_unknown(obj: typing.Any) -> typing.Optional[bytes]:
     """
-    Robustly convert various image objects to PNG bytes.
-
-    Handles:
-      - PIL.Image.Image
-      - google.genai.types.Image (via .as_pil_image() / .bytes / .data / .save)
-      - dict-like Vertex 'predictions' payloads (bytesBase64Encoded, imageBytes, etc.)
-      - plain bytes
+    Robustly convert various image objects to PNG bytes. Returns None on failure.
     """
     # 1) Already PNG/raw bytes?
     if isinstance(obj, (bytes, bytearray)):
@@ -297,17 +291,16 @@ def _to_png_bytes_from_unknown(obj: typing.Any) -> bytes:
         if callable(save_fn):
             try:
                 buf = io.BytesIO()
-                # Do NOT pass 'format' — some SDK versions don't accept it
                 save_fn(buf)
-                return buf.getvalue()
-            except TypeError:
-                # try with a positional "PNG" just in case
-                try:
-                    buf = io.BytesIO()
-                    save_fn(buf, "PNG")
-                    return buf.getvalue()
-                except Exception as e:
-                    log.debug("obj.save fallback failed: %s", e)
+                # Check if save actually wrote bytes
+                content = buf.getvalue()
+                if content:
+                    return content
+            except ValueError as e:
+                # This is the specific error we are catching!
+                log.debug("obj.save() raised ValueError (likely empty image from API): %s", e)
+            except Exception as e:
+                log.debug("obj.save() failed unexpectedly: %s", e)
 
     # 4) dict-like predictions (Vertex REST shapes)
     if isinstance(obj, dict):
@@ -322,11 +315,14 @@ def _to_png_bytes_from_unknown(obj: typing.Any) -> bytes:
     if isinstance(obj, (list, tuple)):
         for item in obj:
             try:
-                return _to_png_bytes_from_unknown(item)
+                result = _to_png_bytes_from_unknown(item)
+                if result:
+                    return result
             except Exception:
                 continue
 
-    raise RuntimeError("Unsupported image output type (cannot convert to PNG bytes)")
+    # If we've reached this point, conversion has failed
+    return None
 
 
 # ---------- main API ----------
@@ -342,6 +338,7 @@ async def generate_vto_image(
     client = _make_client(cfg)
 
     # Prep inputs
+    # NOTE: Ensure you are calling neutralize_full_garment_area_bytes for gowns as we discussed
     person_tmp = neutralize_full_garment_area_bytes(person_bytes)
     garment_tmp = prep_garment_bytes(garment_bytes)
 
@@ -368,31 +365,23 @@ async def generate_vto_image(
 
     # ---- Robust call across SDK versions ----
     def _call_recontext():
+        # ... (This inner function does not need changes) ...
         fn = client.models.recontext_image
         params = tuple(inspect.signature(fn).parameters.keys())
 
-        # Preferred (newer SDKs)
         if "model" in params and "source" in params:
             return fn(model=cfg.model, source=src, config=re_cfg)
-
-        # Some early previews used 'image' instead of 'source'
         if "model" in params and "image" in params:
             return fn(model=cfg.model, image=src, config=re_cfg)
-
-        # Fallback to positional (older, undocumented shapes)
         try:
             return fn(cfg.model, src, re_cfg)
         except TypeError:
-            # last resort: try without config
             return fn(cfg.model, src)
 
     resp = await asyncio.to_thread(_call_recontext)
+    log.debug("VTO API Raw Response: %s", resp) # Added for better debugging
 
     # --- Extract first image-like artifact from response ---
-    # Common shapes:
-    #   - resp.generated_images -> [GeneratedImage(image=Image(...)), ...]
-    #   - resp.images -> [Image | PIL.Image | bytes, ...]
-    #   - resp.predictions -> [ { bytesBase64Encoded: ... }, ... ]
     images = (
         getattr(resp, "generated_images", None)
         or getattr(resp, "images", None)
@@ -402,15 +391,24 @@ async def generate_vto_image(
     )
 
     if not images:
-        # dict response with predictions
         if isinstance(resp, dict) and "predictions" in resp:
             images = resp["predictions"]
         else:
-            raise RuntimeError("VTO returned no image")
+            # More descriptive error
+            raise RuntimeError(f"VTO returned no image candidates. Full API response: {resp}")
 
-    # Prefer nested .image field if present (GeneratedImage)
     candidate = images[0]
     if hasattr(candidate, "image"):
         candidate = candidate.image
 
-    return _to_png_bytes_from_unknown(candidate)
+    # --- NEW: Final check for valid image bytes ---
+    result_bytes = _to_png_bytes_from_unknown(candidate)
+    
+    if result_bytes is None:
+        raise RuntimeError(
+            "Failed to extract image bytes from VTO response. The API likely returned an empty "
+            "image object, possibly due to a safety filter or an internal generation error. "
+            f"Response candidate: {candidate}"
+        )
+
+    return result_bytes
