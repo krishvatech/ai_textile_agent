@@ -97,7 +97,7 @@ def _pad_canvas(img: PILImage.Image, pad_w=180, pad_h=200) -> PILImage.Image:
     return canvas
 
 
-def prep_garment_bytes(garment_bytes: bytes) -> str:
+def prep_garment_bytes(garment_bytes: bytes, is_flare: bool = False) -> str:
     """
     BG remove (if rembg present) + (tight crop OR keep full silhouette for flare)
     + safe max-side → temp PNG path.
@@ -110,8 +110,6 @@ def prep_garment_bytes(garment_bytes: bytes) -> str:
             img = PILImage.open(io.BytesIO(garment_bytes)).convert("RGBA")
         except Exception as e:
             log.debug("rembg failed (non-fatal): %s", e)
-
-    is_flare = _env_bool("VTO_IS_FLARE", False)
 
     if is_flare:
         # keep full silhouette; just pad so wide hems are preserved
@@ -398,6 +396,7 @@ async def generate_vto_image(
     person_bytes: bytes,
     garment_bytes: bytes,
     cfg: typing.Optional[VTOConfig] = None,
+    is_flare: bool = False,
 ) -> bytes:
     """
     Returns PNG bytes of the try-on result. Fully env-driven; no hardcoded paths/keys.
@@ -419,7 +418,8 @@ async def generate_vto_image(
         person_tmp = _as_temp_png(b.getvalue())
         torso_box = (0, 0, pil.size[0], pil.size[1])
 
-    garment_tmp = prep_garment_bytes(garment_bytes)
+    garment_tmp = prep_garment_bytes(garment_bytes, is_flare=is_flare)
+
 
     person_img = Image.from_file(location=person_tmp)
     garment_img = Image.from_file(location=garment_tmp)
