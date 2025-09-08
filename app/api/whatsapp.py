@@ -17,7 +17,8 @@ from app.core.chat_persistence import (
     get_or_open_active_session,
     append_transcript_message,
 )
-
+from PIL import Image
+import io
 import tempfile
 import typing
 
@@ -1086,24 +1087,32 @@ async def _handle_vto_flow(
                             return
                         # --- decide flare garments (gown/lehenga/choli buckets) ---
                         seed = vto_state.get("seed") or {}
-                        cat = (seed.get("category") or seed.get("type") or "").strip().lower()
+                        cat  = (seed.get("category") or seed.get("type") or "").strip().lower()
+                        name = (seed.get("name") or seed.get("product_name") or seed.get("url") or "").lower()
 
                         FLARE_SET = {
-                            "gown","gowns",
-                            "lehenga","lehengas",
-                            "choli","cholis",
-                            "lehenga choli","lehenga-choli",
-                            "ghaghra","ghagras","ghagra","ghagras"
+                            "gown", "gowns",
+                            "lehenga", "lehengas",
+                            "choli", "cholis",
+                            "lehenga choli", "lehenga-choli",
+                            "ghaghra", "ghagras", "ghagra", "ghaghras",
                         }
-                        is_flare = cat in FLARE_SET
+
+                        # 1) primary: exact category match (so saree/shirt/kurta won't trigger flare)
+                        is_flare = (cat in FLARE_SET)
+
+                        # 2) fallback: if category is empty/unknown, infer from name/url tokens
+                        if not is_flare and not cat:
+                            if re.search(r"\b(gown|lehenga|choli|lehenga[-\s]?choli|ghag(h)?ra(s)?)\b", name):
+                                is_flare = True
 
                         result_bytes = await generate_vto_image(
                             person_bytes=vto_state["person_image"],
                             garment_bytes=garment_bytes,
                             cfg=VTOConfig(base_steps=60, add_watermark=False),
-                            is_flare=is_flare,
+                            is_flare=is_flare,  # <- boolean flag to virtual_try_on.py
                         )
-                        logging.info("="*100)
+                        logging.info("=" * 100)
                         
                         logging.info("="*100)
                         # Send result
