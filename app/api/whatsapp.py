@@ -1535,6 +1535,7 @@ async def receive_cloud_webhook(request: Request):
 
                     # 3) Attributes seed
                     attrs_db = await get_attrs_for_product_async(resolved_product_id, resolved_variant_id)
+                    logging.info(f"f----set attrs_db={attrs_db}----")
                     attrs_text = extract_attrs_from_text(
                         caption,
                         allowed_categories=tenant_categories,
@@ -1542,6 +1543,7 @@ async def receive_cloud_webhook(request: Request):
                         allowed_occasions=tenant_occasion,
                         allowed_colors=tenant_color,
                     )
+                    logging.info(f"f----attrs_text={attrs_text}----")
                     category = attrs_db.get("category") or attrs_text.get("category")
                     fabric = attrs_db.get("fabric") or attrs_text.get("fabric")
                     occasion = attrs_db.get("occasion") or attrs_text.get("occasion")
