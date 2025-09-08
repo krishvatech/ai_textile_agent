@@ -92,6 +92,14 @@ def _normalize_type_gender(val: str | None) -> str | None:
         return "unisex"
     return None
 
+def _get_vto_gender_mismatch_message(lang: str, required_gender: str, person_gender: str) -> str:
+    lr = (lang or "en-IN").split('-')[0].lower()
+    if lr == "hi":
+        return f"❌ यह परिधान {required_gender} के लिए है, लेकिन फोटो {person_gender} जैसा लग रहा है। कृपया {required_gender} व्यक्ति की फोटो भेजें या {person_gender} परिधान चुनें।"
+    elif lr == "gu":
+        return f"❌ આ કપડાં {required_gender} માટે છે, પરંતુ ફોટો {person_gender} લાગે છે. કૃપા કરીને {required_gender} વ્યક્તિનો ફોટો મોકલો અથવા {person_gender} માટેનું કપડું પસંદ કરો."
+    else:  # default English
+        return f"❌ This outfit is for {required_gender}, but the photo looks {person_gender}. Please send a {required_gender} person photo or pick a {person_gender} outfit."
 
 async def get_tenant_id_by_phone(phone_number: str, db):
     """
@@ -1050,7 +1058,7 @@ async def _handle_vto_flow(
                             person_gender = await detect_presenting_gender_openai(vto_state["person_image"])
                             logging.info(f"==================  person_gender ==  {person_gender}=========================")
                             if person_gender in {"male", "female"} and person_gender != required_gender:
-                                msg = f"❌ This outfit is for {required_gender}, but the photo looks {person_gender}. Please send a {required_gender} person photo or pick a {person_gender} outfit."
+                                msg = _get_vto_gender_mismatch_message(current_language, required_gender, person_gender)
                                 mid = await send_whatsapp_reply_cloud(
                                     to_waid=from_waid, body=msg, phone_number_id=outbound_pnid
                                 )
@@ -1169,7 +1177,7 @@ async def _handle_vto_flow(
                     if required_gender in {"male", "female"}:
                         person_gender = await detect_presenting_gender_openai(person or b"")
                         if person_gender in {"male", "female"} and person_gender != required_gender:
-                            msg = f"❌ This outfit is for {required_gender}, but the photo looks {person_gender}. Please send a {required_gender} person photo or pick a {person_gender} outfit."
+                            msg = _get_vto_gender_mismatch_message(current_language, required_gender, person_gender)
                             mid = await send_whatsapp_reply_cloud(
                                 to_waid=from_waid, body=msg, phone_number_id=outbound_pnid
                             )
