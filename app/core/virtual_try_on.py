@@ -80,28 +80,50 @@ def _tight_bbox_from_rgba(img_rgba: PILImage.Image):
 
 def prep_garment_bytes(garment_bytes: bytes) -> str:
     """
-    BG remove (if rembg present) + tight crop → temp PNG path.
+    BG remove (if rembg present) + padded tight crop → temp PNG path.
+    Padding helps preserve lehenga/gown flare.
     """
+    pad_pct = float(os.getenv("VTO_CROP_PADDING", "0.10"))  # default 10%
     img = PILImage.open(io.BytesIO(garment_bytes)).convert("RGBA")
+
+    # Optional background removal
     if rembg_remove:
         try:
             garment_bytes = rembg_remove(garment_bytes)
             img = PILImage.open(io.BytesIO(garment_bytes)).convert("RGBA")
         except Exception as e:
             log.debug("rembg failed (non-fatal): %s", e)
+
+    # Compute tight bbox on alpha then expand by padding
     box = _tight_bbox_from_rgba(img)
     if box:
-        img = img.crop(box)
+        x0, y0, x1, y1 = box
+        w, h = img.size
+        px = int((x1 - x0) * pad_pct)
+        py = int((y1 - y0) * pad_pct)
+        x0 = max(0, x0 - px)
+        y0 = max(0, y0 - py)
+        x1 = min(w, x1 + px)
+        y1 = min(h, y1 + py)
+        img = img.crop((x0, y0, x1, y1))
+
     b2 = io.BytesIO()
     img.save(b2, format="PNG")
     return _as_temp_png(b2.getvalue())
 
 
-def neutralize_torso_bytes(person_bytes: bytes, alpha=0.7, soften=22) -> str:
+
+def neutralize_torso_bytes(person_bytes: bytes, alpha=None, soften=None) -> str:
     """
-    Softly mute torso so the model replaces garment cleanly.
-    Falls back to no-op if mediapipe is unavailable or landmarks missing.
+    Softly mute regions so the model replaces garment cleanly.
+    Modes:
+      - VTO_NEUTRALIZE=torso        (shoulders↔hips)
+      - VTO_NEUTRALIZE=torso+lower  (shoulders↔ankles)  # best for lehenga/gown
     """
+    mode = os.getenv("VTO_NEUTRALIZE", "torso").strip().lower()
+    alpha = float(os.getenv("VTO_NEUTRALIZE_ALPHA", "0.70")) if alpha is None else alpha
+    soften = int(os.getenv("VTO_NEUTRALIZE_SOFTEN", "22")) if soften is None else soften
+
     img = PILImage.open(io.BytesIO(person_bytes)).convert("RGBA")
     w, h = img.size
     if mp_pose is None:
@@ -116,15 +138,34 @@ def neutralize_torso_bytes(person_bytes: bytes, alpha=0.7, soften=22) -> str:
 
     lm = res.pose_landmarks.landmark
     def dn(p): return (int(p.x * w), int(p.y * h))
-    # shoulders (11,12) + hips (24,23)
-    pts = [dn(lm[11]), dn(lm[12]), dn(lm[24]), dn(lm[23])]
-    xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
-    x0, x1 = max(0, min(xs) - 20), min(w, max(xs) + 20)
-    y0, y1 = max(0, min(ys) - 30), min(h, max(ys) + 40)
+
+    # Torso box: shoulders (11,12) and hips (24,23)
+    sh_l, sh_r, hip_r, hip_l = lm[11], lm[12], lm[24], lm[23]
+    sx0, sy0 = dn(sh_l); sx1, sy1 = dn(sh_r)
+    hx0, hy0 = dn(hip_l); hx1, hy1 = dn(hip_r)
+    x_min = max(0, min(sx0, sx1, hx0, hx1) - 20)
+    x_max = min(w, max(sx0, sx1, hx0, hx1) + 20)
+    y_min = max(0, min(sy0, sy1) - 30)
+    y_max = min(h, max(hy0, hy1) + 40)
 
     overlay = PILImage.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    draw.rounded_rectangle([x0, y0, x1, y1], radius=soften, fill=(180, 180, 180, int(255 * alpha)))
+    draw.rounded_rectangle([x_min, y_min, x_max, y_max], radius=soften, fill=(180,180,180,int(255*alpha)))
+
+    if mode == "torso+lower":
+        # Extend neutralization down to ankles so lehenga can expand
+        # knees (26,25), ankles (28,27)
+        knee_r, knee_l = lm[26], lm[25]
+        ank_r, ank_l = lm[28], lm[27]
+        _, hy_mid = int((hy0 + hy1) / 2), int((hy0 + hy1) / 2)
+        kx0, ky0 = dn(knee_l); kx1, ky1 = dn(knee_r)
+        ax0, ay0 = dn(ank_l);  ax1, ay1 = dn(ank_r)
+        x0 = max(0, min(x_min, kx0, kx1, ax0, ax1) - 25)
+        x1 = min(w, max(x_max, kx0, kx1, ax0, ax1) + 25)
+        y0 = y_max - 10
+        y1 = min(h, max(ky0, ky1, ay0, ay1) + 20)
+        draw.rounded_rectangle([x0, y0, x1, y1], radius=soften, fill=(180,180,180,int(255*alpha)))
+
     out = PILImage.alpha_composite(img, overlay)
     b = io.BytesIO(); out.save(b, format="PNG")
     return _as_temp_png(b.getvalue())
