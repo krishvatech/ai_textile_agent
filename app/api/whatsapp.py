@@ -1101,7 +1101,6 @@ async def _handle_vto_flow(
                             person_bytes=vto_state["person_image"],
                             garment_bytes=garment_bytes,
                             cfg=VTOConfig(base_steps=60, add_watermark=False),
-                            is_flare=is_flare,
                         )
                         logging.info("="*100)
                         
