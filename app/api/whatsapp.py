@@ -894,36 +894,36 @@ def _detect_vto_keywords(text: str) -> bool:
     return any(keyword in text_lower for keyword in all_keywords)
 
 def _get_vto_messages(lang: str = "en-IN") -> dict:
-    """Get localized VTO messages"""
     lr = lang.split('-')[0].lower()
     
     if lr == "hi":
         return {
-            "need_person": "वर्चुअल ट्राई-ऑन के लिए कृपया अपनी एक स्पष्ट, सामने से ली गई पूरे शरीर की या कमर तक की फोटो भेजें। अच्छी रोशनी और सादे बैकग्राउंड के साथ।",
-            "need_garment": "कृपया उस कपड़े की फोटो भेजें जिसे आप ट्राई करना चाहते हैं।",
-            "processing": "🔄 वर्चुअल ट्राई-ऑन तैयार कर रहे हैं... कृपया थोड़ा इंतजार करें।",
+            "need_person": "वर्चुअल ट्राई-ऑन के लिए कृपया अपनी एक स्पष्ट, सामने से ली गई पूरे शरीर की या कमर तक की फोटो भेजें।",
+            "need_garment": "पहले प्रोडक्ट चुनें/उसका फोटो भेजें, फिर मैं आपका फोटो माँगूँगा और ट्राई-ऑन करूँगा।",
+            "processing": "🔄 वर्चुअल ट्राई-ऑन तैयार कर रहे हैं...",
             "ready": "✨ आपका वर्चुअल ट्राई-ऑन तैयार है!",
-            "error": "❌ वर्चुअल ट्राई-ऑन में कोई समस्या हुई। कृपया फिर से कोशिश करें।",
+            "error": "❌ वर्चुअल ट्राई-ऑन में समस्या आई। कृपया फिर से कोशिश करें।",
             "invalid_image": "कृपया एक स्पष्ट फोटो भेजें।"
         }
-    elif lr == "gu":
+    elif lr == "gu":  # Gujarati
         return {
-            "need_person": "વર્ચ્યુઅલ ટ્રાય-ઓન માટે કૃપા કરીને તમારો એક સ્પષ્ટ, આગળથી લેવાયેલો પૂરા શરીરનો અથવા કમર સુધીનો ફોટો મોકલો. સારા પ્રકાશ અને સાદા બેકગ્રાઉન્ડ સાથે.",
-            "need_garment": "કૃપા કરીને તે કપડાંનો ફોટો મોકલો જેને તમે ટ્રાય કરવા માગો છો.",
-            "processing": "🔄 વર્ચ્યુઅલ ટ્રાય-ઓન તૈયાર કરી રહ્યા છીએ... કૃપા કરી થોડી રાહ જુઓ.",
-            "ready": "✨ તમારો વર્ચ્યુઅલ ટ્રાય-ઓન તૈયાર છે!",
-            "error": "❌ વર્ચ્યુઅલ ટ્રાય-ઓનમાં કોઈ સમસ્યા થઈ. કૃપા કરી ફરીથી પ્રયાસ કરો.",
-            "invalid_image": "કૃપા કરીને એક સ્પષ્ટ ફોટો મોકલો."
+            "need_person": "વર્ચ્યુઅલ ટ્રાય-ઓન માટે કૃપા કરીને તમારો સ્પષ્ટ, આગળથી લેવાયેલ ફોટો મોકલો.",
+            "need_garment": "પહેલા પ્રોડક્ટ પસંદ કરો/તેનો ફોટો મોકલો. પછી હું તમારો ફોટો માંગી ટ્રાય-ઓન કરીશ.",
+            "processing": "🔄 વર્ચ્યુઅલ ટ્રાય-ઓન તૈયાર કરી રહ્યા છીએ...",
+            "ready": "✨ તમારું વર્ચ્યુઅલ ટ્રાય-ઓન તૈયાર છે!",
+            "error": "❌ વર્ચ્યુઅલ ટ્રાય-ઓનમાં સમસ્યા આવી. ફરી પ્રયાસ કરો.",
+            "invalid_image": "કૃપા કરીને સ્પષ્ટ ફોટો મોકલો."
         }
     else:  # English
         return {
-            "need_person": "For virtual try-on, please send a clear, front-facing full-body or waist-up photo of yourself with good lighting and plain background.",
-            "need_garment": "Please send the photo of the garment you want to try on.",
-            "processing": "🔄 Generating your virtual try-on... please wait a moment.",
+            "need_person": "For virtual try-on, please send a clear, front-facing photo of yourself.",
+            "need_garment": "First select a product or send its photo, then I’ll ask for your photo to start the try-on.",
+            "processing": "🔄 Generating your virtual try-on...",
             "ready": "✨ Your virtual try-on is ready!",
             "error": "❌ Something went wrong with the virtual try-on. Please try again.",
             "invalid_image": "Please send a clear photo."
         }
+
 
 # --- inside whatsapp.py ---
 
@@ -1659,89 +1659,52 @@ async def receive_cloud_webhook(request: Request):
                         logging.exception("[CLOUD] AI pipeline (intent) failed")
                         intent_type, confidence = "other", 0.0
 
-                    # -------------------- VTO START (Swipe Reply) --------------------
+                    # -------------------- VTO START (no raw_message) --------------------
                     session_key = f"{tenant_id}:whatsapp:wa:{from_waid}"
-
-                    # snapshot before handling VTO (for debugging)
                     _log_vto_state_snapshot(session_key, "pre-handle (normal flow)")
 
-                    # === START VTO FLOW (insert right after intent resolution) ===
                     if intent_type == "virtual_try_on":
-                        # try to pick a garment from the product card the user replied to
-                        replied_id = None
+                        # Try to reuse the last bot-sent product image as the garment (no swipe reply needed)
+                        garment_image_url = None
                         try:
-                            replied_id = (raw_msg.get("context") or {}).get("id")  # WA replied-to id
+                            garment_image_url = await find_prev_assistant_image_caption(db, chat_session.id)
                         except Exception:
                             pass
 
-                        garment_image_url = await _get_replied_bot_image_url(db, chat_session.id, replied_id)
-                        vto_messages = _get_vto_messages(language or "en-IN")
+                        vto_messages = _get_vto_messages(current_language or "en-IN")
 
                         if garment_image_url:
-                            # we have a garment already → ask for the person photo next
+                            # Garment is ready → ask for the person photo next
                             _set_vto_state(session_key, {
                                 "active": True,
                                 "step": "need_person",
                                 "person_image": None,
                                 "garment_image": None,
                                 "garment_image_url": garment_image_url,
-                                "seed": seed_entities,   # keep anything useful like category/type
+                                "seed": entities,  # keep any useful filters
                             })
                             msg = vto_messages["need_person"]
-                            logging.info(f"[VTO][START] with garment | session={session_key} | garment_image_url={garment_image_url}")
+                            logging.info(f"[VTO][START] with garment | session={session_key} | url={garment_image_url}")
                         else:
-                            # no garment yet → ask for garment first
+                            # No garment in context → ask for the garment first
                             _set_vto_state(session_key, {
                                 "active": True,
                                 "step": "need_garment",
                                 "person_image": None,
                                 "garment_image": None,
                                 "garment_image_url": None,
-                                "seed": seed_entities,
+                                "seed": entities,
                             })
                             msg = vto_messages["need_garment"]
                             logging.info(f"[VTO][START] need garment first | session={session_key}")
 
-                        # send the prompt now and SHORT-CIRCUIT normal flow
-                        mid = await send_whatsapp_reply_cloud(
-                            to_waid=from_waid, body=msg, phone_number_id=outbound_pnid
-                        )
-                        await append_transcript_message(
-                            db, chat_session,
-                            role="assistant", text=msg, msg_id=mid, direction="out",
-                            meta={"kind": "text", "channel": "cloud_api"}
-                        )
+                        # Send focused prompt and SHORT-CIRCUIT the generic flow
+                        mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=msg, phone_number_id=outbound_pnid)
+                        await append_transcript_message(db, chat_session, role="assistant", text=msg, msg_id=mid,
+                                                        direction="out", meta={"kind": "text", "channel": "cloud_api"})
                         await db.commit()
                         return Response(status_code=200)
-                    # === END VTO FLOW ===
-
-                    # SAFETY GUARD: if we reached here and VTO isn't active on THIS key, force-activate and short-circuit
-                    state = _get_vto_state(session_key)
-                    if not state.get("active"):
-                        vto_messages = _get_vto_messages(language or "en-IN")
-                        _set_vto_state(session_key, {
-                            "active": True,
-                            "step": "need_garment",
-                            "person_image": None,
-                            "garment_image": None,
-                            "garment_image_url": None,
-                            "seed": seed_entities,
-                        })
-                        guard_msg = vto_messages["need_garment"]
-                        logging.info(f"[VTO][GUARD] forced activation | session={session_key} -> need_garment")
-
-                        mid = await send_whatsapp_reply_cloud(
-                            to_waid=from_waid, body=guard_msg, phone_number_id=outbound_pnid
-                        )
-                        await append_transcript_message(
-                            db, chat_session,
-                            role="assistant", text=guard_msg, msg_id=mid, direction="out",
-                            meta={"kind": "text", "channel": "cloud_api"}
-                        )
-                        await db.commit()
-                        return Response(status_code=200)
-                    # -------------------- VTO END (Swipe Reply) --------------------
-
+                    # -------------------- VTO END --------------------
 
                     # -------------------- Fallback: regular product flow on swipe --------------------
                     try:
