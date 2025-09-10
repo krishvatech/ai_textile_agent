@@ -11,7 +11,7 @@ import asyncio
 from app.db.session import get_db
 from app.core.lang_utils import detect_language
 from app.core.intent_utils import detect_textile_intent_openai
-from app.core.ai_reply import analyze_message
+from app.core.ai_reply import analyze_message,FollowUP_Question
 from app.core.chat_persistence import (
     get_or_create_customer,
     get_or_open_active_session,
@@ -1661,24 +1661,64 @@ async def receive_cloud_webhook(request: Request):
                     session_key = f"{tenant_id}:whatsapp:wa:{from_waid}"
 
                     if intent_type == "virtual_try_on":
-                        garment_image_url = _find_assistant_image_url(messages, context_obj.get("id"))
+                        # 0) Pull recent transcript + reply-to context
+                        transcript = await get_transcript_by_phone(_normalize_waid_phone(from_waid), db)
+                        messages = _normalize_messages(transcript)
+                        replied_to_id = _extract_reply_to_id(context_obj or {})  # context_obj is what you already pass around
 
+                        # 1) Try to bind product from the replied assistant card (entities and/or image url)
+                        bound_ents = find_entities_by_msg_id(messages, replied_to_id)
+                        garment_image_url = await _get_replied_bot_image_url(db, chat_session.id, replied_to_id)
+
+                        # 2) Create/Update VTO state first
+                        state = _get_vto_state(session_key)
+                        state.update({
+                            "active": True,
+                            "seed": seed_entities,  # keep your seed
+                        })
+                        if isinstance(bound_ents, dict):
+                            state["product_entities"] = _merge_entities(state.get("product_entities"), bound_ents, override=False)
+                        if garment_image_url:
+                            state["garment_image_url"] = garment_image_url
+                        _set_vto_state(session_key, state)
+
+                        # 3) If we still don't know which product, ask ONE tight question and return early
+                        if not state.get("product_entities") and not state.get("garment_image_url"):
+                            ask = await FollowUP_Question(
+                                intent_type="virtual_try_on",
+                                entities={},                           # only ask product choice now
+                                language=current_language,
+                            )  # ai_reply.FollowUP_Question will produce the Gujarati/Hindi/English prompt you want :contentReference[oaicite:0]{index=0}
+                            mid = await send_whatsapp_reply_cloud(
+                                to_waid=from_waid,
+                                body=ask,
+                                phone_number_id=outbound_pnid,
+                                context_msg_id=(context_obj or {}).get("id"),
+                            )
+                            await append_transcript_message(
+                                db, chat_session,
+                                role="assistant", text=ask, msg_id=mid, direction="out",
+                                meta={"kind": "text", "channel": "cloud_api"}
+                            )
+                            await db.commit()
+                            return {"status": "ok", "mode": "virtual_try_on_need_product"}
+
+                        # 4) Product is identified (via reply-to or state) → now ask for PERSON photo and proceed
                         _set_vto_state(session_key, {
+                            **_get_vto_state(session_key),
                             "active": True,
                             "step": "need_person",
                             "person_image": None,
                             "garment_image": None,
-                            "garment_image_url": garment_image_url,
-                            "seed": seed_entities,
+                            # keep any garment_image_url we already discovered
                         })
-                        logging.info(f"[VTO][START] via SWIPE | session={session_key} | garment_image_url={garment_image_url}")
-                        _log_vto_state_snapshot(session_key, "after start (swipe)")
+                        logging.info(f"[VTO][START] | session={session_key} | garment_image_url={_get_vto_state(session_key).get('garment_image_url')}")
+                        _log_vto_state_snapshot(session_key, "after start (vto)")
 
                         need_person_msg = _get_vto_messages(current_language)["need_person"]
                         mid = await send_whatsapp_reply_cloud(
                             to_waid=from_waid, body=need_person_msg, phone_number_id=outbound_pnid
                         )
-
                         await append_transcript_message(
                             db, chat_session,
                             role="assistant", text=need_person_msg, msg_id=mid, direction="out",

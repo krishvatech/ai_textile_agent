@@ -518,7 +518,16 @@ async def FollowUP_Question(
     Generates a short, merged follow-up question asking ONLY for specific missing fields,
     powered by Sarvam LLM, with strict Gujarati support & localized fallback.
     """
-
+    lr = (language or "en-IN").split("-")[0].lower()
+    if (intent_type or "").strip().lower() == "virtual_try_on":
+        if lr == "gu":
+            return ("કયું પ્રોડક્ટ ટ્રાય કરવું છે? જે ગમે તેના કાર્ડ પર ‘Try this’ લખીને રિપ્લાય કરો, "
+                    "અથવા નંબર/નામ લખો (જેમ 1/2/3), અથવા પ્રોડક્ટનો લિંક/ફોટો મોકલો.")
+        if lr == "hi":
+            return ("कौन-सा प्रोडक्ट ट्राय करना है? जो पसंद आया उसके कार्ड पर ‘Try this’ लिखकर रिप्लाय करें, "
+                    "या नंबर/नाम लिखें (1/2/3), या प्रोडक्ट का लिंक/फोटो भेजें।")
+        return ("Which product do you want to try on? Reply ‘Try this’ to a product card, "
+                "or send its number/name (e.g., 1/2/3), or share the product link/photo.")
     # ---- helpers ----
     def _is_missing(val):
         return (val is None) or (val == "") or (isinstance(val, (list, dict)) and not val)
