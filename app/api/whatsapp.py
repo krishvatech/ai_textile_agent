@@ -1986,7 +1986,8 @@ async def receive_cloud_webhook(request: Request):
                                 allowed_size=tenant_size,
                                 allowed_type=tenant_type,
                             )
-
+                            if intent_type == "greeting":
+                                entities = {k: None for k in entities}
                             if product_entities:
                                 entities = _merge_entities(entities, product_entities)
 
