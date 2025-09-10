@@ -1664,7 +1664,7 @@ async def receive_cloud_webhook(request: Request):
                         garment_image_url = _find_assistant_image_url(messages, context_obj.get("id"))
 
                         if garment_image_url:
-                            # Case 1: Garment already known from swipe → ask for person photo
+                            # Case 1: Garment already chosen (via swipe/reply)
                             _set_vto_state(session_key, {
                                 "active": True,
                                 "step": "need_person",
@@ -1676,10 +1676,7 @@ async def receive_cloud_webhook(request: Request):
                             logging.info(f"[VTO][START] with garment | session={session_key} | garment_image_url={garment_image_url}")
                             _log_vto_state_snapshot(session_key, "after start (with garment)")
 
-                            need_person_msg = _get_vto_messages(current_language)["need_person"]
-                            mid = await send_whatsapp_reply_cloud(
-                                to_waid=from_waid, body=need_person_msg, phone_number_id=outbound_pnid
-                            )
+                            msg = _get_vto_messages(current_language)["need_person"]
 
                         else:
                             # Case 2: No garment yet → ask for garment first
@@ -1694,16 +1691,14 @@ async def receive_cloud_webhook(request: Request):
                             logging.info(f"[VTO][START] need garment first | session={session_key}")
                             _log_vto_state_snapshot(session_key, "after start (need garment)")
 
-                            need_garment_msg = _get_vto_messages(current_language)["need_garment"]
-                            mid = await send_whatsapp_reply_cloud(
-                                to_waid=from_waid, body=need_garment_msg, phone_number_id=outbound_pnid
-                            )
+                            msg = _get_vto_messages(current_language)["need_garment"]
 
-                        # Save transcript for whichever question we asked
+                        mid = await send_whatsapp_reply_cloud(
+                            to_waid=from_waid, body=msg, phone_number_id=outbound_pnid
+                        )
                         await append_transcript_message(
                             db, chat_session,
-                            role="assistant", text=(need_person_msg if garment_image_url else need_garment_msg),
-                            msg_id=mid, direction="out",
+                            role="assistant", text=msg, msg_id=mid, direction="out",
                             meta={"kind": "text", "channel": "cloud_api"}
                         )
                         await db.commit()
