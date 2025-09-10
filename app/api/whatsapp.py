@@ -1992,7 +1992,41 @@ async def receive_cloud_webhook(request: Request):
                                 entities = _merge_entities(entities, product_entities)
 
                             logging.info(f"[ENTITIES] merged with product_entities (normal flow): {entities}")
+                            if intent_type == "virtual_try_on":
+                                # If user typed "I want try" etc. without swiping a product first,
+                                # start VTO but require a garment selection via swipe reply.
+                                vto_messages = _get_vto_messages(current_language)
+                                _set_vto_state(session_key, {
+                                    "active": True,
+                                    "step": "need_garment",   # ask them to pick a garment first
+                                    "person_image": None,
+                                    "garment_image": None,
+                                    "garment_image_url": None,
+                                    "seed": entities or {},   # keep anything we already parsed
+                                })
+                                logging.info(f"[VTO][NORMAL] No garment selected yet → asking for garment | session={session_key}")
 
+                                # You can localize/extend this line if you want to force “swipe reply”
+                                # to one of the product images you send.
+                                msg = vto_messages.get("need_garment") or "Please select a product first, then reply on that image to try it on."
+
+                                mid = await send_whatsapp_reply_cloud(
+                                    to_waid=from_waid,
+                                    body=msg,
+                                    phone_number_id=outbound_pnid,
+                                )
+                                await append_transcript_message(
+                                    db, chat_session,
+                                    role="assistant", text=msg, msg_id=mid, direction="out",
+                                    meta={"kind": "text", "channel": "cloud_api"}
+                                )
+                                await db.commit()
+                                return {
+                                    "status": "ok",
+                                    "mode": "virtual_try_on_requires_garment",
+                                    "message": "Asked user to select a garment via swipe reply"
+                                }
+                            # === END FORCE GARMENT SELECTION ===
                             raw_reply = await analyze_message(
                                 text=text_msg,
                                 tenant_id=tenant_id,
