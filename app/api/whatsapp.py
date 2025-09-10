@@ -1894,22 +1894,21 @@ async def receive_cloud_webhook(request: Request):
                         current_language = detected[0] if isinstance(detected, tuple) else detected
                         await update_customer_language(db, customer.id, current_language)
 
-                    # -------------------- VTO AUTO-START (Heuristic) --------------------
                     if not _is_vto_flow_active(session_key):
-                        last_text = (last_assistant or {}).get("text", "") or ""
-                        try:
-                            need_person_text = _get_vto_messages(current_language)["need_person"]
-                        except Exception:
-                            need_person_text = ""
-                        if need_person_text and need_person_text[:30] in last_text:
+                        # start VTO only if current text clearly asks for try-on
+                        if mtype == "text" and _detect_vto_keywords(text_msg):
+                            last_text = (last_assistant or {}).get("text", "") or ""
+                            try:
+                                need_person_text = _get_vto_messages(current_language)["need_person"]
+                            except Exception:
+                                need_person_text = ""
                             _set_vto_state(session_key, {
                                 "active": True,
                                 "step": "need_person",
                                 "person_image": None,
                                 "garment_image": None,
                             })
-                            logging.info(f"[VTO][START] via HEURISTIC | session={session_key} (last message asked for person photo)")
-                            _log_vto_state_snapshot(session_key, "after start (heuristic)")
+                            logging.info(f"[VTO][START] via KEYWORDS | session={session_key}")
 
                     pre_state = _get_vto_state(session_key)
                     vto_handled, vto_out_msgs = await _handle_vto_flow(
