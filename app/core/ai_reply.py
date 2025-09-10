@@ -15,7 +15,6 @@ from app.core.rental_utils import is_variant_available
 from app.core.product_search import pinecone_fetch_records
 from app.core.phase_ask_inquiry import format_inquiry_reply,fetch_attribute_values,resolve_categories,fetch_attribute_values,format_inquiry_reply
 from app.core.asked_now_detector import detect_requested_attributes_async
-from app.core.asked_now_detector import detect_requested_attributes_async
 import json
 import re
 import calendar
@@ -25,6 +24,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from datetime import date, datetime, timedelta, timezone
 from datetime import date as _date  # avoid touching globals
+def _get_set_vto_state():
+    """Runtime import to avoid circular dependency"""
+    from app.api.whatsapp import _set_vto_state
+    return _set_vto_state
 IST = timezone(timedelta(hours=5, minutes=30))
 
 load_dotenv()
@@ -2357,39 +2360,27 @@ async def analyze_message(
         lr = (language or "en-IN").split("-")[0].lower()
         if not have_person:
             if lr == "hi":
-                reply_text = (
-                    "कृपया एक स्पष्ट, सामने से ली गई *फुल-बॉडी* (या *वेस्ट-अप*) फोटो साझा करें—"
-                    "अच्छी रोशनी और सादा बैकग्राउंड के साथ—ताकि हम आपके फोटो पर virtual try-on कर सकें."
-                )
+                reply_text = "कृपया..."  # your Hindi text
             elif lr == "gu":
-                reply_text = (
-                    "કૃપા કરીને એક સ્પષ્ટ, આગળથી લેવાયેલ *ફુલ-બોડી* (અથવા *વેસ્ટ-અપ*) ફોટો મોકલો—"
-                    "સારો પ્રકાશ અને સાદા બેકગ્રાઉન્ડ સાથે—તેથી અમે તમારા ફોટા પર virtual try-on કરી શકીએ."
-                )
+                reply_text = "કૃપા કરીને..."  # your Gujarati text
             else:
                 reply_text = (
-                    "Please share a clear, front-facing *full-body* (or *waist-up*) photo in good lighting with a plain background, "
-                    "so we can run the virtual try-on on your photo."
+                    "Please share a clear, front-facing *full-body* (or *waist-up*) photo in good lighting "
+                    "with a plain background, so we can run the virtual try-on on your photo."
                 )
+
             acc_entities["vto_need_person_photo"] = True
 
-        history.append({"role": "assistant", "content": reply_text})
-        session_memory[sk] = history
-        session_entities[sk] = acc_entities
-
-        payload = {
-            "input_text": text,
-            "language": language,
-            "intent_type": "virtual_try_on",
-            "history": history,
-            "collected_entities": acc_entities,
-        }
-        if mode == "call":
-            payload["answer"] = reply_text
-        else:
-            payload["reply_text"] = reply_text
-        return payload
-
+            # 🔑 NEW: initialize VTO state so whatsapp.py can continue flow
+            set_vto_state = _get_set_vto_state()
+            set_vto_state(session_key, {
+                "active": True,
+                "step": "need_garment",
+                "person_image": None,
+                "garment_image": None,
+                "garment_image_url": None,
+                "seed": acc_entities,
+            })
     # --- other / fallback
     elif intent_type == "other" or intent_type is None:
         def _is_missing(v): 

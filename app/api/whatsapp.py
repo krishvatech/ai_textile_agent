@@ -985,7 +985,7 @@ async def _handle_vto_flow(
     if not vto_state.get("active"):
         return False, []
 
-    current_step = vto_state.get("step") or "need_person"
+    current_step = vto_state.get("step") or ("need_garment" if not vto_state.get("garment_image_url") else "need_person")
 
     # If text arrives while we're waiting for an image, gently remind once
     if mtype == "text" and ("need_person" in current_step or "need_garment" in current_step):
@@ -1010,6 +1010,8 @@ async def _handle_vto_flow(
 
     # ---- IMAGE upload handling
     if mtype == "image" and "image" in msg:
+        vto_state = _get_vto_state(session_key)
+        current_step = (vto_state or {}).get("step")
         try:
             # Download inbound bytes (works for real webhook & local tester)
             img_obj = msg.get("image", {}) if isinstance(msg, dict) else {}
@@ -1660,26 +1662,35 @@ async def receive_cloud_webhook(request: Request):
                     # -------------------- VTO START (Swipe Reply) --------------------
                     session_key = f"{tenant_id}:whatsapp:wa:{from_waid}"
 
+                    # snapshot before handling VTO (for debugging)
+                    _log_vto_state_snapshot(session_key, "pre-handle (normal flow)")
+
+                    # === START VTO FLOW (insert right after intent resolution) ===
                     if intent_type == "virtual_try_on":
-                        garment_image_url = _find_assistant_image_url(messages, context_obj.get("id"))
+                        # try to pick a garment from the product card the user replied to
+                        replied_id = None
+                        try:
+                            replied_id = (raw_msg.get("context") or {}).get("id")  # WA replied-to id
+                        except Exception:
+                            pass
+
+                        garment_image_url = await _get_replied_bot_image_url(db, chat_session.id, replied_id)
+                        vto_messages = _get_vto_messages(language or "en-IN")
 
                         if garment_image_url:
-                            # Case 1: Garment already chosen (via swipe/reply)
+                            # we have a garment already → ask for the person photo next
                             _set_vto_state(session_key, {
                                 "active": True,
                                 "step": "need_person",
                                 "person_image": None,
                                 "garment_image": None,
                                 "garment_image_url": garment_image_url,
-                                "seed": seed_entities,
+                                "seed": seed_entities,   # keep anything useful like category/type
                             })
+                            msg = vto_messages["need_person"]
                             logging.info(f"[VTO][START] with garment | session={session_key} | garment_image_url={garment_image_url}")
-                            _log_vto_state_snapshot(session_key, "after start (with garment)")
-
-                            msg = _get_vto_messages(current_language)["need_person"]
-
                         else:
-                            # Case 2: No garment yet → ask for garment first
+                            # no garment yet → ask for garment first
                             _set_vto_state(session_key, {
                                 "active": True,
                                 "step": "need_garment",
@@ -1688,11 +1699,10 @@ async def receive_cloud_webhook(request: Request):
                                 "garment_image_url": None,
                                 "seed": seed_entities,
                             })
+                            msg = vto_messages["need_garment"]
                             logging.info(f"[VTO][START] need garment first | session={session_key}")
-                            _log_vto_state_snapshot(session_key, "after start (need garment)")
 
-                            msg = _get_vto_messages(current_language)["need_garment"]
-
+                        # send the prompt now and SHORT-CIRCUIT normal flow
                         mid = await send_whatsapp_reply_cloud(
                             to_waid=from_waid, body=msg, phone_number_id=outbound_pnid
                         )
@@ -1702,8 +1712,35 @@ async def receive_cloud_webhook(request: Request):
                             meta={"kind": "text", "channel": "cloud_api"}
                         )
                         await db.commit()
-                        return {"status": "ok", "mode": "virtual_try_on_started"}
+                        return Response(status_code=200)
+                    # === END VTO FLOW ===
 
+                    # SAFETY GUARD: if we reached here and VTO isn't active on THIS key, force-activate and short-circuit
+                    state = _get_vto_state(session_key)
+                    if not state.get("active"):
+                        vto_messages = _get_vto_messages(language or "en-IN")
+                        _set_vto_state(session_key, {
+                            "active": True,
+                            "step": "need_garment",
+                            "person_image": None,
+                            "garment_image": None,
+                            "garment_image_url": None,
+                            "seed": seed_entities,
+                        })
+                        guard_msg = vto_messages["need_garment"]
+                        logging.info(f"[VTO][GUARD] forced activation | session={session_key} -> need_garment")
+
+                        mid = await send_whatsapp_reply_cloud(
+                            to_waid=from_waid, body=guard_msg, phone_number_id=outbound_pnid
+                        )
+                        await append_transcript_message(
+                            db, chat_session,
+                            role="assistant", text=guard_msg, msg_id=mid, direction="out",
+                            meta={"kind": "text", "channel": "cloud_api"}
+                        )
+                        await db.commit()
+                        return Response(status_code=200)
+                    # -------------------- VTO END (Swipe Reply) --------------------
 
 
                     # -------------------- Fallback: regular product flow on swipe --------------------
