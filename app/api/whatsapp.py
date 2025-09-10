@@ -1030,7 +1030,7 @@ async def _handle_vto_flow(
 
             if not img_bytes:
                 raise RuntimeError("empty-image")
-
+            current_step = vto_state.get("step")
             # Persist into state based on the step we are in
             if current_step == "need_person":
                 vto_state["person_image"] = img_bytes
