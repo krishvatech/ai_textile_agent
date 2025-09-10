@@ -194,16 +194,13 @@ def _hmac_sig(raw_bytes: bytes) -> str:
 
 async def _post_json(url: str, payload: dict):
     """
-    ✅ IMPROVED: Better error handling and logging
+    Robust POST with safe logging (no 'resp' before assignment) and clearer errors.
     """
-    # IMPORTANT: serialize once and reuse the same bytes for HMAC + request body
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
     headers = {"Content-Type": "application/json"}
-    
     if SEND_X_LOCAL_TEST:
         headers["X-LOCAL-TEST"] = "1"
-        
     if SIGN_WITH_HMAC:
         signature = _hmac_sig(raw)
         if signature:
@@ -212,38 +209,48 @@ async def _post_json(url: str, payload: dict):
         else:
             logging.error("❌ Failed to generate HMAC signature!")
 
+    resp = None
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            # Use `content=raw` to ensure signature matches body EXACTLY
+        timeout = httpx.Timeout(connect=10.0, read=60.0, write=15.0, pool=60.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, content=raw, headers=headers)
 
         ok = 200 <= resp.status_code < 300
         body_preview = (resp.text or "")[:400]
-        
-        # ✅ IMPROVED: Better status reporting
         status_emoji = "✅" if ok else "❌"
+
         logging.info(
-            "%s POST %s -> %s (local=%s, signed=%s)", 
+            "%s POST %s -> %s (local=%s, signed=%s)",
             status_emoji, url, resp.status_code, SEND_X_LOCAL_TEST, SIGN_WITH_HMAC
         )
-        
+
         print("─" * 80)
         print(f"Status: {resp.status_code} {status_emoji}")
         print(f"Body  : {body_preview}")
         print("Headers sent:", {k: v for k, v in headers.items() if k.lower() != "content-type"})
-        
-        # ✅ ADDED: Show response headers for debugging
         if not ok:
             print("Response headers:", dict(resp.headers))
-        
         print("─" * 80)
+
         return ok, resp
-        
-    except Exception as e:
-        logging.error("❌ Request failed: %s",resp.status_code)
-        logging.error("❌ Request failed: %s", e)
-        print(f"❌ Request failed: {e}")
+
+    except httpx.ReadTimeout as e:
+        logging.error("❌ ReadTimeout while POSTing %s: %s", url, e)
+        print(f"❌ Request failed (ReadTimeout): {e}")
         return False, None
+
+    except httpx.HTTPError as e:
+        code = getattr(resp, "status_code", "no-response")
+        logging.error("❌ HTTPError while POSTing %s (status=%s): %s", url, code, e)
+        print(f"❌ Request failed (HTTPError, status={code}): {e}")
+        return False, resp  # may be None
+
+    except Exception as e:
+        code = getattr(resp, "status_code", "no-response")
+        logging.exception("❌ Unexpected error while POSTing %s (status=%s)", url, code)
+        print(f"❌ Request failed (Unexpected, status={code}): {e}")
+        return False, resp  # may be None
+
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Flows

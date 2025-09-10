@@ -529,6 +529,7 @@ async def FollowUP_Question(
     # Localized field labels (expand as needed)
     FIELD_LABELS = {
         "en": {
+            "virtual_try_on": "virtual try-on",
             "is_rental": "rent or buy",
             "occasion": "occasion",
             "fabric": "fabric",
@@ -543,6 +544,7 @@ async def FollowUP_Question(
             "rental_price": "rental price",
         },
         "gu": {
+            "virtual_try_on": "વર્ચ્યુઅલ ટ્રાય-ઓન",
             "is_rental": "ભાડે કે ખરીદી",
             "occasion": "પ્રસંગ",
             "fabric": "કાપડ",
@@ -557,6 +559,7 @@ async def FollowUP_Question(
             "rental_price": "ભાડું",
         },
         "hi": {
+            "virtual_try_on": "वर्चुअल ट्राई-ऑन",
             "is_rental": "किराए या खरीद",
             "occasion": "मौका",
             "fabric": "कपड़ा",
@@ -613,7 +616,7 @@ async def FollowUP_Question(
     is_rental_val = entities.get("is_rental", None)
 
     base_keys = [
-        "is_rental", "occasion", "fabric", "size", "color", "category",
+        "virtual_try_on", "is_rental", "occasion", "fabric", "size", "color", "category",
         "quantity",
     ] + (["start_date", "end_date"] if is_rental_val is True else []) + ["confirmation"]
 
@@ -1310,6 +1313,11 @@ async def analyze_message(
             
     logging.info(f"intent_type(detected)..... {detected_intent}")
     logging.info(f"intent_type(resolved)..... {intent_type}")
+    vto_keywords = ["virtual try", "try on", "see how it looks", "try this", "how will it look", "virtual", "try-on"]
+    text_lower = (text or "").lower()
+    if any(keyword in text_lower for keyword in vto_keywords) and intent_type == "product_search":
+        intent_type = "virtual_try_on"
+        logging.info(f"Override: VTO keywords detected → virtual_try_on")
     try:
         if intent_type == "asking_inquiry":
             # do we already have a category in memory?
@@ -1574,7 +1582,13 @@ async def analyze_message(
                     elif lr.startswith("gu"):
                         reply_text += f"\n\nતમે આ કેટેગરી પસંદ કરો:\n{bullets}"
                     else:
-                        reply_text += f"\n\nYou can try these categories:\n{bullets}"
+                        vto_suggestion = "\n\nOr send your photo for virtual try-on!"
+                        if lr.startswith("hi"):
+                            vto_suggestion = "\n\nया virtual try-on के लिए अपनी फोटो भेजें!"
+                        elif lr.startswith("gu"):
+                            vto_suggestion = "\n\nઅથવા virtual try-on માટે તમારો ફોટો મોકલો!"
+                        
+                        reply_text += f"\n\nYou can try these categories:\n{bullets}{vto_suggestion}"
             history.append({"role": "assistant", "content": reply_text})
             _commit()
             return {
@@ -1621,7 +1635,18 @@ async def analyze_message(
             product_lines.append(f"- {name} {tags}" + (f" — {url}" if url else ""))
         products_text = f"{heading}\n" + "\n".join(product_lines)
         # Fixed follow-up text per your earlier requirement
-        followup = await FollowUP_Question(intent_type, acc_entities, language, session_history=history)
+        followup_base = await FollowUP_Question(intent_type, acc_entities, language, session_history=history)
+
+        # Add VTO suggestion
+        lr = (language or "en-IN").split("-")[0].lower()
+        if lr == "hi":
+            vto_option = "\n\nया virtual try-on के लिए अपनी फोटो भेजें!"
+        elif lr == "gu": 
+            vto_option = "\n\nઅથવા virtual try-on માટે તમારો ફોટો મોકલો!"
+        else:
+            vto_option = "\n\nOr send your photo for virtual try-on!"
+
+        followup = followup_base + vto_option
         reply_text = products_text
         if mode == "call":
             spoken_pitch = await generate_product_pitch_prompt(language, acc_entities, pinecone_data)
