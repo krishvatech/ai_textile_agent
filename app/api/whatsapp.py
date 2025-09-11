@@ -945,7 +945,22 @@ async def _handle_vto_flow(
     """
     vto_messages = _get_vto_messages(current_language)
     out_msgs: list[tuple] = []
-
+    if mtype == "text":
+        try:
+            intent_type, _, _ = await detect_textile_intent_openai(
+                text_msg, current_language,
+                allowed_categories=[], allowed_fabric=[], allowed_color=[],
+                allowed_occasion=[], allowed_size=[], allowed_type=[],
+            )
+            
+            # Clear VTO on greeting
+            if intent_type == "greeting":
+                logging.info(f"[VTO][EXIT] greeting detected, clearing state | session={session_key}")
+                _clear_vto_state(session_key)
+                return False, []  # Let normal flow handle the greeting
+                
+        except Exception:
+            pass
     # helpers bound to this session
     def _get(): return _get_vto_state(session_key) or {}
     def _set(s): return _set_vto_state(session_key, s)
@@ -1659,6 +1674,25 @@ async def receive_cloud_webhook(request: Request):
 
                     # -------------------- VTO START (Swipe Reply) --------------------
                     session_key = f"{tenant_id}:whatsapp:wa:{from_waid}"
+                    if _is_vto_flow_active(session_key):
+                        # Exit VTO if user greets OR starts a non-VTO browse (new category/name)
+                        is_greeting = (intent_type or "").lower() == "greeting"
+                        started_new_browse = (
+                            (intent_type or "").lower() in {"product_search", "catalog_request", "asking_inquiry"} and
+                            ((entities or {}).get("category") or (entities or {}).get("name"))
+                        )
+                        if is_greeting or started_new_browse:
+                            _clear_vto_state(session_key)
+                            logging.info(
+                                "[VTO][EXIT] deactivated (intent=%s, category=%s, name=%s)",
+                                intent_type, (entities or {}).get("category"), (entities or {}).get("name")
+                            )
+                    if _is_vto_flow_active(session_key):
+                        is_topic_change = intent_type in {"greeting", "product_search", "website_inquiry", "asking_inquiry"}
+                        has_new_anchor = bool((entities or {}).get("category") or (entities or {}).get("name"))
+                        if is_topic_change or has_new_anchor:
+                            logging.info(f"[VTO][EXIT] clearing state due to intent={intent_type} / new={entities}")
+                            _clear_vto_state(session_key)
 
                     if intent_type == "virtual_try_on":
                         garment_image_url = _find_assistant_image_url(messages, context_obj.get("id"))
@@ -1894,17 +1928,49 @@ async def receive_cloud_webhook(request: Request):
                         current_language = detected[0] if isinstance(detected, tuple) else detected
                         await update_customer_language(db, customer.id, current_language)
 
+                    if mtype == "text" and "text" in msg:
+                        tenant_categories = await get_tenant_category_by_phone(business_number, db)
+                        tenant_fabric = await get_tenant_fabric_by_phone(business_number, db)
+                        tenant_color = await get_tenant_color_by_phone(business_number, db)
+                        tenant_occasion = await get_tenant_occasion_by_phone(business_number, db)
+                        tenant_size = await get_tenant_size_by_phone(business_number, db)
+                        tenant_type = await get_tenant_type_by_phone(business_number, db)
+
+                        try:
+                            intent_type, entities, confidence = await detect_textile_intent_openai(
+                                text_msg, current_language,
+                                allowed_categories=tenant_categories,
+                                allowed_fabric=tenant_fabric,
+                                allowed_color=tenant_color,
+                                allowed_occasion=tenant_occasion,
+                                allowed_size=tenant_size,
+                                allowed_type=tenant_type,
+                            )
+
+                            # ✅ CLEAR VTO ON CATEGORY CHANGE OR GREETING
+                            if _is_vto_flow_active(session_key):
+                                is_greeting = (intent_type or "").lower() == "greeting"
+                                started_new_browse = (
+                                    (intent_type or "").lower() in {"product_search", "catalog_request", "asking_inquiry"} and
+                                    ((entities or {}).get("category") or (entities or {}).get("name"))
+                                )
+                                if is_greeting or started_new_browse:
+                                    logging.info(
+                                        f"[VTO][EXIT] clearing VTO due to intent={intent_type}, category={entities.get('category')}, name={entities.get('name')}"
+                                    )
+                                    _clear_vto_state(session_key)
+
+                        except Exception:
+                            logging.exception("[CLOUD] Intent detection failed in normal flow")
+                            intent_type, entities, confidence = "other", {}, 0.0
+
+                    # Continue with existing VTO flow logic
                     if not _is_vto_flow_active(session_key):
                         # start VTO only if current text clearly asks for try-on
                         if mtype == "text" and _detect_vto_keywords(text_msg):
-                            last_text = (last_assistant or {}).get("text", "") or ""
-                            try:
-                                need_person_text = _get_vto_messages(current_language)["need_person"]
-                            except Exception:
-                                need_person_text = ""
                             _set_vto_state(session_key, {
                                 "active": True,
-                                "step": "need_person",
+                                "step": "need_person", 
                                 "person_image": None,
                                 "garment_image": None,
                             })

@@ -119,7 +119,7 @@ load_dotenv()
 
 # Point this to your local webhook route
 # If your endpoint is /meta/webhook, change the default below accordingly.
-WEBHOOK_URL = os.getenv("WHATSAPP_WEBHOOK_URL", "http://localhost:8000/whatsapp/webhook")
+WEBHOOK_URL = os.getenv("WHATSAPP_WEBHOOK_URL", "http://localhost:8001/whatsapp/webhook")
 
 DISPLAY_PHONE_NUMBER = os.getenv("DISPLAY_PHONE_NUMBER", "919274417433")
 PHONE_NUMBER_ID      = os.getenv("PHONE_NUMBER_ID", "805136529344134")
