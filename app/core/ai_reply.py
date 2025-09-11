@@ -1647,18 +1647,29 @@ async def analyze_message(
             product_lines.append(f"- {name} {tags}" + (f" — {url}" if url else ""))
         products_text = f"{heading}\n" + "\n".join(product_lines)
         # Fixed follow-up text per your earlier requirement
-        followup_base = await FollowUP_Question(intent_type, acc_entities, language, session_history=history)
+        followup_base = await FollowUP_Question(
+            intent_type, acc_entities, language, session_history=history
+        )
 
-        # Add VTO suggestion
-        lr = (language or "en-IN").split("-")[0].lower()
-        if lr == "hi":
-            vto_option = "\n\nया virtual try-on के लिए अपनी फोटो भेजें!"
-        elif lr == "gu": 
-            vto_option = "\n\nઅથવા virtual try-on માટે તમારો ફોટો મોકલો!"
+        # --- NEW: show VTO only until all early filters are filled ---
+        def _is_filled(v):
+            # False is valid (means "buy"), so only treat None/empty as missing
+            return v is not None and v != "" and v != [] and v != {}
+
+        early_keys = ["is_rental", "occasion", "fabric", "size", "color", "category"]
+        all_early_filled = all(_is_filled(acc_entities.get(k)) for k in early_keys)
+
+        if not all_early_filled:
+            lr = (language or "en-IN").split("-")[0].lower()
+            if lr == "hi":
+                vto_option = "\n\nया virtual try-on के लिए अपनी फोटो भेजें!"
+            elif lr == "gu":
+                vto_option = "\n\nઅથવા virtual try-on માટે તમારો ફોટો મોકલો!"
+            else:
+                vto_option = "\n\nOr send your photo for virtual try-on!"
+            followup = followup_base + vto_option
         else:
-            vto_option = "\n\nOr send your photo for virtual try-on!"
-
-        followup = followup_base + vto_option
+            followup = followup_base
         reply_text = products_text
         if mode == "call":
             spoken_pitch = await generate_product_pitch_prompt(language, acc_entities, pinecone_data)
