@@ -372,7 +372,38 @@ def _save_png_to_outbox(png_bytes: bytes) -> str:
         f.write(png_bytes)
     logging.info(f"[VTO][FILE] Saved result to {fpath}")
     return fpath
+async def fetch_image_bytes_by_message_id(msg_id: str) -> bytes | None:
+    """
+    Return raw bytes if the replied-to message is an image; else None.
 
+    Implementation notes:
+    - Prefer your own message store if you persist inbound messages with media_id.
+    - Otherwise, use WhatsApp Cloud API: GET /{message-id} -> extract image.id (media_id)
+      then GET /{media_id} -> url, then GET url -> bytes.
+    - Finally pass media_id to your existing download_media_bytes(media_id).
+    """
+    try:
+        # If you keep a store, try that first:
+        # prev = await load_whatsapp_message(msg_id)   # (implement if you persist messages)
+        prev = None
+
+        if not prev:
+            # Fallback: call Cloud API to read the message (implement with your existing client, if any)
+            # prev = await whatsapp_api_get_message(msg_id)
+            prev = None
+
+        media_id = None
+        if prev and prev.get("type") == "image":
+            media_id = (prev.get("image") or {}).get("id")
+
+        if media_id:
+            return await download_media_bytes(media_id)
+
+        # If you can’t fetch message payloads, return None; assistant image URL path will still work.
+        return None
+    except Exception as e:
+        logging.warning("fetch_image_bytes_by_message_id failed: %s", e)
+        return None
 
 async def upload_whatsapp_media_cloud(
     phone_number_id: str,
@@ -1000,7 +1031,7 @@ async def _handle_vto_flow(
     if not vto_state.get("active"):
         return False, []
 
-    current_step = vto_state.get("step") or "need_person"
+    current_step = vto_state.get("step") or "need_garment"
 
     # If text arrives while we're waiting for an image, gently remind once
     if mtype == "text" and ("need_person" in current_step or "need_garment" in current_step):
@@ -1208,13 +1239,30 @@ async def _handle_vto_flow(
 
             # If we were waiting for the garment
             elif current_step == "need_garment":
+                # Save the uploaded image as GARMENT
                 vto_state["garment_image"] = img_bytes
                 _set(vto_state)
 
-                logging.info("[VTO][READY] Both images present for session=%s (person=%s; garment=bytes)",
-                             session_key, "yes" if vto_state.get("person_image") else "no")
+                has_person = bool(vto_state.get("person_image"))
+                logging.info(
+                    "[VTO][GARMENT] session=%s stored garment bytes; person=%s",
+                    session_key, "yes" if has_person else "no"
+                )
 
-                # Tell user we're generating
+                # If we DON'T have person yet → ask for it and STOP (no visual search, no generation)
+                if not has_person:
+                    vto_state["step"] = "need_person"
+                    _set(vto_state)
+                    mid = await send_whatsapp_reply_cloud(
+                        to_waid=from_waid,
+                        body=vto_messages["need_person"],
+                        phone_number_id=outbound_pnid,
+                    )
+                    out_msgs.append(("text", vto_messages["need_person"], mid))
+                    logging.info("[VTO][PHASE] session=%s moved -> need_person (garment first)", session_key)
+                    return True, out_msgs
+
+                # Otherwise, both present → proceed exactly like before
                 mid = await send_whatsapp_reply_cloud(
                     to_waid=from_waid,
                     body=vto_messages["processing"],
@@ -1695,8 +1743,25 @@ async def receive_cloud_webhook(request: Request):
                             _clear_vto_state(session_key)
 
                     if intent_type == "virtual_try_on":
+                        
                         garment_image_url = _find_assistant_image_url(messages, context_obj.get("id"))
-
+                        # === BYTES FALLBACK IF NO ASSISTANT IMAGE URL WAS FOUND ===
+                        if not garment_image_url:
+                            try:
+                                replied_id = context_obj.get("id")
+                                if replied_id:
+                                    # Try to pull raw bytes from the replied message (works if the reply was a user image)
+                                    img_bytes = await fetch_image_bytes_by_message_id(replied_id)
+                                    if img_bytes:
+                                        st = _get_vto_state(session_key) or {}
+                                        st["garment_image"] = img_bytes
+                                        st["garment_image_url"] = None
+                                        st["step"] = "need_person"
+                                        _set_vto_state(session_key, st)
+                                        logging.info("[VTO][START] via SWIPE | took replied image bytes as garment")
+                            except Exception:
+                                logging.exception("[VTO] Could not pull bytes for replied message id")
+                        # === END FALLBACK ===
                         _set_vto_state(session_key, {
                             "active": True,
                             "step": "need_person",
@@ -1970,7 +2035,7 @@ async def receive_cloud_webhook(request: Request):
                         if mtype == "text" and _detect_vto_keywords(text_msg):
                             _set_vto_state(session_key, {
                                 "active": True,
-                                "step": "need_person", 
+                                "step": "need_garment", 
                                 "person_image": None,
                                 "garment_image": None,
                             })

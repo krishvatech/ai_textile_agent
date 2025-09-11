@@ -24,10 +24,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from datetime import date, datetime, timedelta, timezone
 from datetime import date as _date  # avoid touching globals
-def _get_set_vto_state():
-    """Runtime import to avoid circular dependency"""
-    from app.api.whatsapp import _set_vto_state
-    return _set_vto_state
 IST = timezone(timedelta(hours=5, minutes=30))
 
 load_dotenv()
@@ -44,6 +40,7 @@ if not api_key:
 session_memory: Dict[Any, List[Dict[str, str]]] = {}  # Conversation history
 session_entities: Dict[Any, Dict[str, Any]] = {}       # Merged entities per session
 last_main_intent_by_session: Dict[Any, str] = {}       # Remember last main intent
+VTO_PENDING_SESSIONS: Dict[str, Dict[str, Any]] = {}
 
 MAIN_INTENTS = {
     "product_search", "catalog_request", "order_placement", "order_status",
@@ -52,7 +49,10 @@ MAIN_INTENTS = {
 REFINEMENT_INTENTS = {
     "asking_inquiry", "color_preference", "size_query", "fabric_inquiry"
 }
-
+def _get_set_vto_state():
+    """Runtime import to avoid circular dependency"""
+    from app.api.whatsapp import _set_vto_state
+    return _set_vto_state
 # Quick “DD-DD” and “DD” parsers that assume current month & year (IST)
 DAY_RANGE_RE  = re.compile(r'(\b\d{1,2})\s*(?:[-–—]|to|till|until|upto|up to|se|tak)\s*(\d{1,2})\b', re.I)
 SINGLE_DAY_RE = re.compile(r'\b(\d{1,2})\b')
