@@ -133,7 +133,7 @@ If any product attribute (including occasion) is present, do NOT return asking_i
   — but ONLY when (a) the last bot turn asked for confirmation OR (b) exactly one product is in focus (e.g., context has product_variant_id).
   This is a final go-ahead, not just a preference update.
 - stock_check — user replies with ONLY a quantity (e.g., "1", "2", "25", "2 pcs"), meaning “check if this many of the currently selected item/category is available right now.”
-- virtual_try_on — the user wants to SEE a garment applied on a person photo or model (“try on”, “how will it look on me”, “mere photo pe pehna do”, “pehna ke dikhao”, “મને પહેરીને બતાવો”, “try karo”, “VTO”), possibly sharing/mentioning a person photo and/or garment image/URL. This is a visualization request, not a purchase/reservation step.
+- virtual_try_on — the user wants to SEE a garment applied on a person photo or model (“try on”, “how will it look on me”, “mere photo pe pehna do”, “pehna ke dikhao”, “mara photo par pehravi batavo”, “try kari ne batavo”,“try karo”, “VTO”,“mare try karvu che”, “મારે આ ટ્રાય કરું છું”, “virtual try on karo” ), possibly sharing/mentioning a person photo and/or garment image/URL. This is a visualization request, not a purchase/reservation step.
 - other — order status, tracking, delivery, payment, returns, complaints, small talk, or unrelated topics.
 - other — order status, tracking, delivery, payment, returns, complaints, small talk, or unrelated topics.
 
