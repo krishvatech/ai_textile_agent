@@ -1624,6 +1624,9 @@ async def receive_cloud_webhook(request: Request):
 
                     # 1) Caption to resolve the product
                     caption = find_assistant_image_caption_by_msg_id(messages, context_obj.get("id"))
+                    logging.info("="*100)
+                    logging.info(caption)
+                    logging.info("="*100)
                     if not caption:
                         await send_whatsapp_reply_cloud(
                             to_waid=from_waid,
