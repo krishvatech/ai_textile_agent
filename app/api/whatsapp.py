@@ -1831,7 +1831,7 @@ async def receive_cloud_webhook(request: Request):
                                 out_msgs.append(("image", cap, mid, img))
 
                         if followup_text:
-                            await asyncio.sleep(1.0)
+                            await asyncio.sleep(2.0)
                             mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text, phone_number_id=outbound_pnid)
                             out_msgs.append(("text", followup_text, mid))
                     else:
@@ -2207,7 +2207,7 @@ async def receive_cloud_webhook(request: Request):
                                     out_msgs.append(("image", _product_caption(prod), mid, img))
 
                             if followup_text:
-                                await asyncio.sleep(1.0)
+                                await asyncio.sleep(2.0)
                                 mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=followup_text, phone_number_id=outbound_pnid)
                                 out_msgs.append(("text", followup_text, mid))
                         else:
@@ -2303,7 +2303,7 @@ async def receive_cloud_webhook(request: Request):
                             else:
                                 current_language = (customer.preferred_language or "en-IN")
                                 ftxt = _visual_followup_text(current_language)
-                                await asyncio.sleep(0.2)
+                                await asyncio.sleep(2.0)
                                 mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=ftxt, phone_number_id=outbound_pnid)
                                 out_msgs.append(("text", ftxt, mid))
 
@@ -2409,7 +2409,7 @@ async def receive_cloud_webhook(request: Request):
                                 else:
                                     current_language = (customer.preferred_language or "en-IN")
                                     ftxt = _visual_followup_text(current_language)
-                                    await asyncio.sleep(0.2)
+                                    await asyncio.sleep(2.0)
                                     mid = await send_whatsapp_reply_cloud(to_waid=from_waid, body=ftxt, phone_number_id=outbound_pnid)
                                     out_msgs.append(("text", ftxt, mid))
 
