@@ -19,7 +19,8 @@
           <th>Joined</th>
           <th>Status</th>
           <!-- <th>Loyalty Points</th> -->
-          <th style="width:120px;">Actions</th>
+          <th style="width:120px;">View Details</th>
+          <th>Remove</th>
         </tr>
       </thead>
 
@@ -77,10 +78,13 @@
               <!-- Loyalty Points (optional) -->
               {# <td>{{ c.loyalty_points or 0 }}</td> #}
 
-              <!-- Actions -->
-              <td class="text-end">
+              <td>
                 <a class="btn btn-ghost" href="/dashboard/customer/{{ c.id }}">View</a>
               </td>
+              <!-- Actions -->
+               <td>
+                <button class="btn btn-ghost" style="color:#e74c3c">Delete</button>
+               </td>
             </tr>
           {% endfor %}
         {% endif %}

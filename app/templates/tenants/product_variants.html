@@ -1,0 +1,165 @@
+{% extends '_dashboard_base.html' %}
+{% block title %}Variants · {{ product.name }}{% endblock %}
+{% block nav_prod %}active{% endblock %}
+
+{% block content %}
+<style>
+  .thumb{width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--border,#232745);background:#101425}
+  .sticky{position:sticky;top:80px}
+  @media (max-width: 991px){ .sticky{position:static} }
+</style>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h3 class="mb-0">Variants — {{ product.name }}</h3>
+  <a class="btn btn-outline-light" href="/dashboard/product/{{ product.id }}/modify">
+    <i class="bi bi-arrow-left"></i> Back to Product
+  </a>
+  <a class="btn btn-outline-light" href="/dashboard/product">
+    <i class="bi bi-arrow-left"></i> Back to Product List
+  </a>
+</div>
+
+{% if request.query_params.get('added') %}<div class="alert alert-success">Variant added.</div>{% endif %}
+{% if request.query_params.get('updated') %}<div class="alert alert-success">Variant updated.</div>{% endif %}
+{% if request.query_params.get('deleted') %}<div class="alert alert-warning">Variant deleted.</div>{% endif %}
+{% if request.query_params.get('err') %}<div class="alert alert-danger">Something went wrong. Try again.</div>{% endif %}
+
+<div class="row g-3">
+  <!-- LEFT: table -->
+  <div class="col-12 col-lg-8">
+    <div class="card p-3">
+      <div class="table-responsive">
+        <table class="table align-middle">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Image</th>
+              <th>Color</th>
+              <th>Size</th>
+              <th>Fabric</th>
+              <th>Type</th>
+              <th>Price</th>
+              <th>Rent</th>
+              <th>Stock</th>
+              <th>Active</th>
+              <th style="width:150px">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for v in variants %}
+            <tr>
+              <td>{{ v.id }}</td>
+              <td>
+                {% if v.image_url %}
+                  <img class="thumb" src="{{ v.image_url }}" alt="">
+                {% else %}
+                  <div class="thumb d-flex align-items-center justify-content-center text-muted">—</div>
+                {% endif %}
+              </td>
+              <td>{{ v.color or '—' }}</td>
+              <td>{{ v.size or '—' }}</td>
+              <td>{{ v.fabric or '—' }}</td>
+              <td>
+                {% if v.is_rental %}<span class="badge text-bg-info">Rent</span>
+                {% else %}<span class="badge text-bg-success">Sale</span>{% endif %}
+              </td>
+              <td>{% if v.price is not none %}₹{{ '%.2f'|format(v.price) }}{% else %}—{% endif %}</td>
+              <td>{% if v.rental_price is not none %}₹{{ '%.2f'|format(v.rental_price) }}{% else %}—{% endif %}</td>
+              <td>{{ v.available_stock or 0 }}</td>
+              <td>{% if v.is_active %}✅{% else %}⛔{% endif %}</td>
+              <td class="d-flex gap-2">
+                <a class="btn btn-sm btn-secondary"
+                   href="/dashboard/product/{{ product.id }}/variants?variant_id={{ v.id }}">
+                  Edit
+                </a>
+                <form method="post"
+                      action="/dashboard/product/{{ product.id }}/variants/{{ v.id }}/delete"
+                      onsubmit="return confirm('Delete variant #{{ v.id }}? This cannot be undone.');">
+                  <button class="btn btn-sm btn-danger" type="submit">Delete</button>
+                </form>
+              </td>
+            </tr>
+          {% else %}
+            <tr><td colspan="11" class="text-center text-muted py-4">No variants yet.</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: add / edit -->
+  <div class="col-12 col-lg-4">
+    <div class="card p-3 sticky">
+      {% if edit %}
+        <h5 class="mb-3">Edit Variant #{{ edit.id }}</h5>
+        <form method="post" action="/dashboard/product/{{ product.id }}/variants/{{ edit.id }}/edit" class="row g-3">
+      {% else %}
+        <h5 class="mb-3">Add Variant</h5>
+        <form method="post" action="/dashboard/product/{{ product.id }}/variants/add" class="row g-3">
+      {% endif %}
+
+        <div class="col-6">
+          <label class="form-label">Color</label>
+          <input class="form-control" name="color" value="{{ edit.color if edit else '' }}">
+        </div>
+        <div class="col-6">
+          <label class="form-label">Size</label>
+          <input class="form-control" name="size" value="{{ edit.size if edit else '' }}">
+        </div>
+        <div class="col-12">
+          <label class="form-label">Fabric</label>
+          <input class="form-control" name="fabric" value="{{ edit.fabric if edit else '' }}">
+        </div>
+
+        <div class="col-6">
+          <label class="form-label">Price (₹)</label>
+          <input class="form-control" type="number" step="0.01" name="price" value="{{ edit.price if edit and edit.price is not none else '' }}">
+        </div>
+        <div class="col-6">
+          <label class="form-label">Rental Price (₹)</label>
+          <input class="form-control" type="number" step="0.01" name="rental_price" value="{{ edit.rental_price if edit and edit.rental_price is not none else '' }}">
+        </div>
+
+        <div class="col-6">
+          <label class="form-label">Stock</label>
+          <input class="form-control" type="number" name="available_stock" value="{{ edit.available_stock if edit else 0 }}">
+        </div>
+        <div class="col-6">
+          <label class="form-label">Type</label>
+          <select class="form-select" name="is_rental">
+            <option value="0" {% if edit and not edit.is_rental %}selected{% endif %}>Sale</option>
+            <option value="1" {% if edit and edit.is_rental %}selected{% endif %}>Rent</option>
+          </select>
+        </div>
+
+        <div class="col-12">
+          <label class="form-label">Image URL</label>
+          <input class="form-control" name="image_url" value="{{ edit.image_url if edit else '' }}">
+        </div>
+
+        <div class="col-6">
+          <label class="form-label">Active</label>
+          <select class="form-select" name="is_active">
+            <option value="1" {% if not edit or edit.is_active %}selected{% endif %}>Active</option>
+            <option value="0" {% if edit and not edit.is_active %}selected{% endif %}>Inactive</option>
+          </select>
+        </div>
+        <div class="col-6">
+          <label class="form-label">Variant URL (optional)</label>
+          <input class="form-control" name="product_url" value="{{ edit.product_url if edit else '' }}">
+        </div>
+
+        <div class="col-12 mt-2 d-flex gap-2">
+          <button class="btn btn-primary" type="submit">
+            {% if edit %}<i class="bi bi-save"></i> Update Variant{% else %}<i class="bi bi-plus"></i> Add Variant{% endif %}
+          </button>
+          {% if edit %}
+            <a class="btn btn-outline-light" href="/dashboard/product/{{ product.id }}/variants">Cancel</a>
+          {% endif %}
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}

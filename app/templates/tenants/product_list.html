@@ -15,6 +15,15 @@
 </style>
   <div class="d-flex justify-content-between align-items-center mb-3">
     <h3 class="mb-0">Products</h3>
+    <a class="btn btn-outline-light" href="/dashboard/product/add">
+      <i class="bi bi-plus"></i> Add Products
+    </a>
+    {% if request.query_params.get('updated') %}
+  <div class="alert alert-success" role="alert" style="margin-top:10px">
+    Product updated successfully.
+  </div>
+    {% endif %}
+
   </div>
 
   <!-- Tabs: JS-only filter (no navigation) -->
@@ -34,7 +43,11 @@
           <th>Product</th>
           <th>Product Name</th>
           <th >Counts</th>
-          <th></th>
+          <th>View Variants</th>
+          <th>Status</th>
+          <th>Modify Variants</th>
+          <th>Modify Product</th>
+          <th>Remove</th>
         </tr>
       </thead>
       <tbody>
@@ -52,8 +65,10 @@
         <td>
           <div class="prod-cell">
             {% if p.image_url %}
+               <a href="/dashboard/product/{{ p.product_id }}">
               <img src="{{ p.image_url }}" alt="{{ p.product }}" 
                    class="prod-thumb" loading="lazy" decoding="async">
+                   </a>
             {% else %}
               <div class="prod-thumb placeholder"><i class="bi bi-image"></i></div>
             {% endif %}
@@ -65,8 +80,29 @@
           <span class="badge bg-secondary me-1 badge-sell">Sell {{ p.sell_count }}</span>
           <span class="badge bg-success   me-1 badge-rent">Rent {{ p.rental_count }}</span>
         </td>
-        <td class="text-end">
+        <td>
           <a class="btn btn-ghost" href="/dashboard/product/{{ p.product_id }}">View</a>
+        </td>
+        {% set no_variants = (p.variant_count|int == 0) %}
+        <td>
+          <form method="post"
+                action="/dashboard/product/{{ p.product_id }}/toggle-active"
+                onsubmit="return {{ 'false' if no_variants else 'confirm(\'Toggle status for all variants of ' ~ p.product|e ~ '?\')' }}">
+            <button class="btn btn-ghost"
+                    {% if no_variants %}disabled title="Add a variant first"{% endif %}
+                    style="color: {{ 'green' if p.is_active else '#e74c3c' }};">
+              {{ 'Active' if p.is_active else 'Deactive' }}
+            </button>
+          </form>
+        </td>
+        <td>
+          <a class="btn btn-ghost" href="/dashboard/product/{{ p.product_id }}/variants">Variants</a>
+        </td>
+        <td>
+          <a class="btn btn-ghost" href="/dashboard/product/{{ p.product_id }}/modify">Modify</a>
+        </td>
+        <td>
+          <button class="btn btn-ghost" style="color:#e74c3c">Delete</button>
         </td>
       </tr>
     {% endfor %}

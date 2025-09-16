@@ -1,0 +1,49 @@
+{% extends '_dashboard_base.html' %}
+{% block title %}Modify Product{% endblock %}
+{% block nav_prod %}active{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h3 class="mb-0">Modify Product</h3>
+  <div class="d-flex gap-2">
+    <a class="btn btn-secondary" href="/dashboard/product/{{ p.id }}/variants">
+      <i class="bi bi-grid"></i> Manage Variants
+    </a>
+    <a class="btn btn-outline-light" href="/dashboard/product">
+      <i class="bi bi-arrow-left"></i> Back to Products
+    </a>
+  </div>
+</div>
+
+{% if form_error %}
+  <div class="alert alert-danger mb-3">{{ form_error }}</div>
+{% endif %}
+
+<form method="post" action="/dashboard/product/{{ p.id }}/modify" class="card p-4" style="max-width: 880px;">
+  <div class="row g-3">
+    <div class="col-12 col-md-8">
+      <label class="form-label">Product Name</label>
+      <input class="form-control" name="product" value="{{ p.product or '' }}" required>
+    </div>
+    <div class="col-12 col-md-4">
+      <label class="form-label">Category</label>
+      <input class="form-control" name="category" value="{{ p.category or '' }}">
+    </div>
+
+    <div class="col-12">
+      <label class="form-label">Product URL (optional)</label>
+      <input class="form-control" name="product_url" value="{{ p.product_url or '' }}">
+    </div>
+
+    <div class="col-12">
+      <label class="form-label">Description</label>
+      <textarea class="form-control" name="description" rows="4">{{ p.description or '' }}</textarea>
+    </div>
+
+    <div class="col-12 mt-2">
+      <button class="btn btn-primary" type="submit"><i class="bi bi-save"></i> Save Changes</button>
+      <a class="btn btn-danger" href="/dashboard/product"><i class="bi bi-x-circle"></i> Cancel</a>
+    </div>
+  </div>
+</form>
+{% endblock %}

@@ -9,11 +9,13 @@ from urllib.parse import urlparse, quote_plus
 from typing import List, Dict, Any, Optional
 
 import httpx
-from fastapi import APIRouter, Request, HTTPException, Depends, Query
+from fastapi import APIRouter, Request, HTTPException, Depends, Query, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import text
+# top of file (with other imports)
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.services.product_status_sync import toggle_product_active,push_variant_metadata_to_pinecone,push_product_metadata_to_pinecone
 
 # Use the same get_db that admin.py relies on
 from app.db.session import get_db  # <-- same pattern as admin.py
@@ -217,6 +219,62 @@ async def dashboard_home(request: Request, db: AsyncSession = Depends(get_db)):
 # ---------------------------------------------------------------------
 # Customers
 # ---------------------------------------------------------------------
+
+# -----------Delete Customer ---------------------
+@router.post("/customer/{customer_id}/delete")
+async def customer_delete(request: Request, customer_id: int, db: AsyncSession = Depends(get_db)):
+    # Only tenant_admins reach here because dashboard already gates on role
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    tenant_id = guard
+
+    # 1) Check that the customer belongs to this tenant
+    res = await db.execute(
+        text("SELECT id FROM customers WHERE id = :cid AND tenant_id = :tid LIMIT 1"),
+        {"cid": customer_id, "tid": tenant_id},
+    )
+    row = res.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    # 2) Delete dependent rows FIRST, then the customer
+    #    (keep this list in sync with your real schema / FKs)
+    try:
+        # Chat sessions
+        await db.execute(
+            text("DELETE FROM chat_sessions WHERE customer_id = :cid"),
+            {"cid": customer_id},
+        )
+
+        # Orders
+        await db.execute(
+            text("DELETE FROM orders WHERE tenant_id = :tid AND customer_id = :cid"),
+            {"tid": tenant_id, "cid": customer_id},
+        )
+
+        # Rentals
+        await db.execute(
+            text("DELETE FROM rentals WHERE tenant_id = :tid AND customer_id = :cid"),
+            {"tid": tenant_id, "cid": customer_id},
+        )
+
+        # Finally, the customer row
+        await db.execute(
+            text("DELETE FROM customers WHERE id = :cid AND tenant_id = :tid"),
+            {"cid": customer_id, "tid": tenant_id},
+        )
+
+        await db.commit()
+    except Exception as e:
+        # optional: log e
+        await db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to delete customer")
+
+    # 3) Back to list with a tiny flag for UI flash
+    return RedirectResponse(url="/dashboard/customer?deleted=1", status_code=303)
+
+
 @router.get("/customer", response_class=HTMLResponse)
 async def customers_list(request: Request, db: AsyncSession = Depends(get_db)):
     guard = require_auth(request)
@@ -341,6 +399,123 @@ async def customer_detail(request: Request, customer_id: int, db: AsyncSession =
 # ---------------------------------------------------------------------
 # Products
 # ---------------------------------------------------------------------
+# --------------------------------------------------------------------
+# PRoducts add By Tenants-Admin
+# --------------------------------------------------------------------
+
+@router.post("/product/{product_id}/toggle-active")
+async def product_toggle_active(request: Request, product_id: int, db: AsyncSession = Depends(get_db)):
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    tenant_id = guard
+
+    try:
+        await toggle_product_active(db, tenant_id, product_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    return RedirectResponse(url="/dashboard/product?status_toggled=1", status_code=303)
+
+
+# --- PRODUCT: Add (GET) ------------------------------
+@router.get("/product/add", response_class=HTMLResponse)
+async def product_add_form(request: Request):
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    return templates.TemplateResponse("product_add.html",
+                                      {"request": request, "form_error": None})
+
+# --- PRODUCT: Add (POST) -----------------------------
+@router.post("/product/add")
+async def product_add_submit(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+
+    # fields from product_add.html
+    product: str = Form(...),            # -> products.name
+    category: str = Form(""),
+    description: str = Form(""),
+    image_url: str = Form(""),
+
+    # initial variant (optional)
+    price: float | None = Form(None),
+    rental_price: float | None = Form(None),
+    fabric: str = Form(""),
+    color: str = Form(""),
+    size: str = Form(""),
+    stock: int | None = Form(None),
+    sellable: bool = Form(False),
+    rentable: bool = Form(False),
+):
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    tenant_id = guard
+
+    try:
+        # 1) create base product
+        r = await db.execute(text("""
+            INSERT INTO products (tenant_id, name, category, description, product_url)
+            VALUES (:tid, :name, :cat, :desc, NULL)
+            RETURNING id
+        """), {
+            "tid": tenant_id,
+            "name": product.strip(),
+            "cat": (category or "").strip() or None,
+            "desc": (description or "").strip() or None,
+        })
+        product_id = r.scalar_one()
+
+        # 2) optionally create one or two variants based on toggles
+        base = {
+            "product_id": product_id,
+            "color": (color or None),
+            "size": (size or None),
+            "fabric": (fabric or None),
+            "price": price,
+            "rental_price": rental_price,
+            "available_stock": stock or 0,
+            "image_url": (image_url or None),
+            "is_active": True,
+            "product_url": None,
+        }
+
+        # create a SELL variant
+        if sellable or (not sellable and not rentable):
+            await db.execute(text("""
+                INSERT INTO product_variants
+                  (product_id, color, size, fabric, price, rental_price, available_stock,
+                   is_rental, image_url, is_active, product_url)
+                VALUES
+                  (:product_id, :color, :size, :fabric, :price, :rental_price, :available_stock,
+                   FALSE, :image_url, :is_active, :product_url)
+            """), base)
+
+        # create a RENT variant
+        if rentable:
+            await db.execute(text("""
+                INSERT INTO product_variants
+                  (product_id, color, size, fabric, price, rental_price, available_stock,
+                   is_rental, image_url, is_active, product_url)
+                VALUES
+                  (:product_id, :color, :size, :fabric, :price, :rental_price, :available_stock,
+                   TRUE, :image_url, :is_active, :product_url)
+            """), base)
+
+        await db.commit()
+        return RedirectResponse("/dashboard/product?added=1", status_code=303)
+
+    except Exception:
+        await db.rollback()
+        return templates.TemplateResponse(
+            "product_add.html",
+            {"request": request, "form_error": "Failed to save product. Please check fields and try again."},
+            status_code=400
+        )
+
+
 @router.get("/product", response_class=HTMLResponse)
 async def products_list(request: Request, db: AsyncSession = Depends(get_db)):
     guard = require_auth(request)
@@ -360,34 +535,37 @@ async def products_list(request: Request, db: AsyncSession = Depends(get_db)):
         having = "HAVING COALESCE(SUM(CASE WHEN pv.is_rental = TRUE  THEN 1 END), 0) > 0"
 
     q = f"""
-        SELECT 
-            p.id,
-            p.name,
-            COUNT(pv.id) AS variant_count,
-            COALESCE(SUM(CASE WHEN pv.is_rental THEN 1 ELSE 0 END), 0)      AS rental_count,
-            COALESCE(SUM(CASE WHEN NOT pv.is_rental THEN 1 ELSE 0 END), 0)  AS sell_count,
-            MAX(pv.image_url) FILTER (WHERE pv.image_url IS NOT NULL)        AS image_url
-        FROM products p
-        LEFT JOIN product_variants pv ON pv.product_id = p.id
-        WHERE p.tenant_id = :tid
-        GROUP BY p.id, p.name
-        {having}
-        ORDER BY p.name ASC
-        LIMIT 300
-    """
+    SELECT 
+        p.id,
+        p.name,
+        COUNT(pv.id) AS variant_count,
+        COALESCE(SUM(CASE WHEN pv.is_rental THEN 1 ELSE 0 END), 0)      AS rental_count,
+        COALESCE(SUM(CASE WHEN NOT pv.is_rental THEN 1 ELSE 0 END), 0)  AS sell_count,
+        MAX(pv.image_url) FILTER (WHERE pv.image_url IS NOT NULL)        AS image_url,
+        COALESCE(BOOL_OR(pv.is_active), FALSE)                           AS any_active
+    FROM products p
+    LEFT JOIN product_variants pv ON pv.product_id = p.id
+    WHERE p.tenant_id = :tid
+    GROUP BY p.id, p.name
+    {having}
+    ORDER BY p.name ASC
+    LIMIT 300
+"""
     res = await db.execute(text(q), {"tid": tenant_id})
     rows = res.fetchall() or []
 
     products = [
-        {
-            "product_id": r[0],
-            "product": r[1],
-            "variant_count": r[2] or 0,
-            "rental_count": r[3] or 0,
-            "sell_count": r[4] or 0,
-            "image_url": r[5],
-        } for r in rows
-    ]
+    {
+        "product_id": r[0],
+        "product": r[1],
+        "variant_count": r[2] or 0,
+        "rental_count": r[3] or 0,
+        "sell_count": r[4] or 0,
+        "image_url": r[5],
+        "is_active": bool(r[6]),   # <— NEW
+    } for r in rows
+]
+
 
     tenant_name = request.session.get("tenant_name") or await get_tenant_name(tenant_id, db)
     return templates.TemplateResponse(
@@ -465,6 +643,321 @@ async def product_detail(request: Request, product_id: int, db: AsyncSession = D
             "current_type": current_type,
         },
     )
+
+
+
+
+# --- PRODUCT: Modify (GET) ----------------------------------------------
+@router.get("/product/{product_id}/modify")
+async def product_modify_form(request: Request, product_id: int, db: AsyncSession = Depends(get_db)):
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    tenant_id = guard
+
+    res = await db.execute(text("""
+        SELECT id, name, category, description, product_url
+        FROM products
+        WHERE id = :pid AND tenant_id = :tid
+        LIMIT 1
+    """), {"pid": product_id, "tid": tenant_id})
+    row = res.mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    p = {
+        "id": row["id"],
+        "product": row["name"],
+        "category": row["category"],
+        "description": row["description"],
+        "product_url": row["product_url"]
+    }
+    return templates.TemplateResponse("product_modify.html", {"request": request, "p": p, "form_error": None})
+
+
+# --- PRODUCT: Modify (POST) ---------------------------------------------
+@router.post("/product/{product_id}/modify")
+async def product_modify_submit(
+    request: Request,
+    product_id: int,
+    db: AsyncSession = Depends(get_db),
+    product: str = Form(...),
+    category: str = Form(""),
+    description: str = Form(""),
+    product_url: str = Form(""),
+):
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    tenant_id = guard
+
+    # ensure ownership
+    ok = await db.execute(text("SELECT 1 FROM products WHERE id=:pid AND tenant_id=:tid"), {"pid": product_id, "tid": tenant_id})
+    if not ok.first():
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    try:
+        await db.execute(text("""
+            UPDATE products
+            SET name = :name,
+                category = :category,
+                description = :description,
+                product_url = :product_url,
+                updated_at = NOW()
+            WHERE id = :pid AND tenant_id = :tid
+        """), {
+            "name": product.strip(),
+            "category": category.strip() or None,
+            "description": description.strip() or None,
+            "product_url": product_url.strip() or None,
+            "pid": product_id, "tid": tenant_id
+        })
+        await db.commit()
+
+        # ✅ Pinecone: push product fields to ALL variants of this product
+        try:
+            await push_product_metadata_to_pinecone(
+                db,
+                product_id,
+                product=product.strip(),
+                category=(category or "").strip() or None,
+                description=(description or "").strip() or None,
+                product_url=(product_url or "").strip() or None,
+            )
+        except Exception:
+            pass
+    except Exception:
+        await db.rollback()
+        return templates.TemplateResponse(
+            "product_modify.html",
+            {"request": request, "p": {
+                "id": product_id, "product": product, "category": category,
+                "description": description, "product_url": product_url
+            }, "form_error": "Failed to update product. Please try again."},
+            status_code=400
+        )
+
+    return RedirectResponse("/dashboard/product?updated=1", status_code=303)
+
+
+# ===================== VARIANTS =====================
+
+# --- VARIANTS: List + optional edit panel (GET) -------------------------
+@router.get("/product/{product_id}/variants")
+async def product_variants_page(
+    request: Request,
+    product_id: int,
+    variant_id: int | None = None,
+    db: AsyncSession = Depends(get_db)
+):
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    tenant_id = guard
+
+    # product header
+    pres = await db.execute(text("""
+        SELECT id, name FROM products WHERE id=:pid AND tenant_id=:tid
+    """), {"pid": product_id, "tid": tenant_id})
+    product_row = pres.mappings().first()
+    if not product_row:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    # all variants
+    vres = await db.execute(text("""
+        SELECT id, color, size, fabric, price, rental_price, available_stock,
+               is_rental, image_url, is_active, product_url, created_at, updated_at
+        FROM product_variants
+        WHERE product_id = :pid
+        ORDER BY id DESC
+    """), {"pid": product_id})
+    variants = [dict(r) for r in vres.mappings().all()]
+
+    # variant to edit (if any)
+    edit_variant = None
+    if variant_id:
+        eres = await db.execute(text("""
+            SELECT id, color, size, fabric, price, rental_price, available_stock,
+                   is_rental, image_url, is_active, product_url
+            FROM product_variants
+            WHERE id = :vid AND product_id = :pid
+            LIMIT 1
+        """), {"vid": variant_id, "pid": product_id})
+        edit_variant = eres.mappings().first()
+
+    ctx = {
+        "request": request,
+        "product": {"id": product_row["id"], "name": product_row["name"]},
+        "variants": variants,
+        "edit": edit_variant,
+        "form_error": None
+    }
+    return templates.TemplateResponse("product_variants.html", ctx)
+
+
+# --- VARIANTS: Add (POST) -----------------------------------------------
+@router.post("/product/{product_id}/variants/add")
+async def product_variant_add(
+    request: Request, product_id: int, db: AsyncSession = Depends(get_db),
+    color: str = Form(""), size: str = Form(""), fabric: str = Form(""),
+    price: float | None = Form(None), rental_price: float | None = Form(None),
+    available_stock: int = Form(0), is_rental: bool = Form(False),
+    image_url: str = Form(""), is_active: bool = Form(True),
+    product_url: str = Form(""),
+):
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    tenant_id = guard
+
+    # product belongs to tenant?
+    ok = await db.execute(text("SELECT 1 FROM products WHERE id=:pid AND tenant_id=:tid"),
+                          {"pid": product_id, "tid": tenant_id})
+    if not ok.first():
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    try:
+        # INSERT + RETURNING id
+        res = await db.execute(text("""
+            INSERT INTO product_variants
+              (product_id, color, size, fabric, price, rental_price, available_stock,
+               is_rental, image_url, is_active, product_url)
+            VALUES
+              (:pid, :color, :size, :fabric, :price, :rental_price, :stock,
+               :is_rental, :image_url, :is_active, :product_url)
+            RETURNING id
+        """), {
+            "pid": product_id,
+            "color": color or None,
+            "size": size or None,
+            "fabric": fabric or None,
+            "price": price,
+            "rental_price": rental_price,
+            "stock": available_stock or 0,
+            "is_rental": bool(is_rental),
+            "image_url": image_url or None,
+            "is_active": bool(is_active),
+            "product_url": product_url or None
+        })
+        new_variant_id = res.scalar_one()
+        await db.commit()
+
+        # ✅ Pinecone: push this variant’s metadata
+        try:
+            push_variant_metadata_to_pinecone(
+                new_variant_id,
+                color=color or None,
+                size=size or None,
+                fabric=fabric or None,
+                price=price,
+                rental_price=rental_price,
+                available_stock=available_stock or 0,
+                is_rental=bool(is_rental),
+                image_url=image_url or None,
+                is_active=bool(is_active),
+                product_url=product_url or None,
+            )
+        except Exception:
+            pass
+
+    except Exception:
+        await db.rollback()
+        return RedirectResponse(f"/dashboard/product/{product_id}/variants?err=add", status_code=303)
+
+    return RedirectResponse(f"/dashboard/product/{product_id}/variants?added=1", status_code=303)
+
+# --- VARIANTS: Update (POST) --------------------------------------------
+@router.post("/product/{product_id}/variants/{variant_id}/edit")
+async def product_variant_edit(
+    request: Request, product_id: int, variant_id: int,
+    db: AsyncSession = Depends(get_db),
+    color: str = Form(""), size: str = Form(""), fabric: str = Form(""),
+    price: float | None = Form(None), rental_price: float | None = Form(None),
+    available_stock: int = Form(0), is_rental: bool = Form(False),
+    image_url: str = Form(""), is_active: bool = Form(True),
+    product_url: str = Form(""),
+):
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    tenant_id = guard
+
+    # ownership checks (unchanged) ...
+
+    try:
+        await db.execute(text("""
+            UPDATE product_variants
+            SET color=:color, size=:size, fabric=:fabric,
+                price=:price, rental_price=:rental_price,
+                available_stock=:stock, is_rental=:is_rental,
+                image_url=:image_url, is_active=:is_active,
+                product_url=:product_url, updated_at = NOW()
+            WHERE id=:vid AND product_id=:pid
+        """), {
+            "color": color or None, "size": size or None, "fabric": fabric or None,
+            "price": price, "rental_price": rental_price, "stock": available_stock or 0,
+            "is_rental": bool(is_rental), "image_url": image_url or None,
+            "is_active": bool(is_active), "product_url": product_url or None,
+            "vid": variant_id, "pid": product_id
+        })
+        await db.commit()
+
+        # 🔁 Pinecone: mirror updated fields
+        try:
+            push_variant_metadata_to_pinecone(
+                variant_id,
+                color=color or None,
+                size=size or None,
+                fabric=fabric or None,
+                price=price,
+                rental_price=rental_price,
+                available_stock=available_stock or 0,
+                is_rental=bool(is_rental),
+                image_url=image_url or None,
+                is_active=bool(is_active),
+                product_url=product_url or None,
+            )
+        except Exception:
+            pass
+
+    except Exception:
+        await db.rollback()
+        return RedirectResponse(
+            f"/dashboard/product/{product_id}/variants?err=edit&variant_id={variant_id}",
+            status_code=303
+        )
+
+    return RedirectResponse(f"/dashboard/product/{product_id}/variants?updated=1", status_code=303)
+
+
+# --- VARIANTS: Delete (POST) --------------------------------------------
+@router.post("/product/{product_id}/variants/{variant_id}/delete")
+async def product_variant_delete(request: Request, product_id: int, variant_id: int, db: AsyncSession = Depends(get_db)):
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    tenant_id = guard
+
+    # ownership + existence
+    ok = await db.execute(text("""
+        SELECT 1 FROM products p
+        WHERE p.id=:pid AND p.tenant_id=:tid
+    """), {"pid": product_id, "tid": tenant_id})
+    if not ok.first():
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    vok = await db.execute(text("""
+        SELECT 1 FROM product_variants WHERE id=:vid AND product_id=:pid
+    """), {"vid": variant_id, "pid": product_id})
+    if not vok.first():
+        raise HTTPException(status_code=404, detail="Variant not found")
+
+    await db.execute(text("DELETE FROM product_variants WHERE id=:vid AND product_id=:pid"),
+                     {"vid": variant_id, "pid": product_id})
+    await db.commit()
+    return RedirectResponse(f"/dashboard/product/{product_id}/variants?deleted=1", status_code=303)
+
+
 
 # ---------------------------------------------------------------------
 # Orders & Rentals
