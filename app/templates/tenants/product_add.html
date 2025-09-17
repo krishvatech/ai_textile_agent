@@ -24,6 +24,25 @@
         <label class="form-label">Category</label>
         <input type="text" name="category" class="form-control" placeholder="e.g. Saree, Kurta Set">
       </div>
+      <!-- Type -->
+      <div class="col-md-6">
+        <label class="form-label">Type</label>
+        <select name="type" class="form-select">
+          <option value="Women" selected>Women</option>
+          <option value="Men">Men</option>
+        </select>
+      </div>
+
+      <!-- Occasion -->
+      <div class="col-md-6">
+        <label class="form-label">Occasion</label>
+        <select name="occasion_id" class="form-select">
+          <option value="">-- Select --</option>
+          {% for o in occasions %}
+            <option value="{{ o.id }}">{{ o.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
 
       <div class="col-md-6">
         <label class="form-label">Price (₹)</label>
@@ -50,6 +69,11 @@
       <div class="col-md-6">
         <label class="form-label">Stock Count</label>
         <input type="number" name="stock" class="form-control" placeholder="e.g. 10">
+      </div>
+
+      <div class="col-12">
+        <label class="form-label">Product URL</label>
+        <input type="url" name="product_url" class="form-control" placeholder="https://yourstore.com/products/..." />
       </div>
 
       <div class="col-12">

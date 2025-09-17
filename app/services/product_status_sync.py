@@ -320,6 +320,7 @@ async def push_product_metadata_to_pinecone(
     category: str | None = None,
     description: str | None = None,
     product_url: str | None = None,
+    type: str | None = None,      # ✅ NEW
 ) -> dict:
     vids = await _get_variant_ids_by_product(db, product_id)
     if not vids:
@@ -330,6 +331,7 @@ async def push_product_metadata_to_pinecone(
         "category": category,
         "description": description,
         "product_url": product_url,
+        "type": type,
     }
     _bulk_update_pinecone_metadata(vids, meta)
     return {"product_id": product_id, "variant_count": len(vids), "pushed": True}
@@ -424,3 +426,193 @@ async def delete_product_everywhere(
         "pinecone_index": PINECONE_INDEX,
         "pinecone_namespace": PINECONE_NAMESPACE,
     }
+
+# ============================
+# IMAGE EMBEDDING (lazy CLIP)
+# ============================
+from io import BytesIO
+from urllib.parse import urlsplit, urlunsplit, quote
+
+import requests
+import torch
+import open_clip
+from PIL import Image
+
+_clip_model = None
+_clip_preprocess = None
+
+def _ensure_clip_ready():
+    """Create/load CLIP only once (ViT-B-32-quickgelu)."""
+    global _clip_model, _clip_preprocess
+    if _clip_model is not None:
+        return
+    try:
+        torch.set_num_threads(min(4, (os.cpu_count() or 4)))
+    except Exception:
+        pass
+    m, _, preprocess = open_clip.create_model_and_transforms(
+        "ViT-B-32-quickgelu", pretrained="openai"
+    )
+    m.eval()
+    _clip_model = m
+    _clip_preprocess = preprocess
+
+def _download_image(url: str) -> Image.Image:
+    """Fetch image with browser-y headers, handle '+' in path if needed."""
+    parts = urlsplit(url)
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": f"{parts.scheme}://{parts.netloc}",
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    def _get(u: str):
+        r = requests.get(u, headers=headers, timeout=20)
+        if r.status_code == 403 and "+" in parts.path:
+            enc_path = quote(parts.path, safe="/:@")
+            u2 = urlunsplit((parts.scheme, parts.netloc, enc_path, parts.query, parts.fragment))
+            r = requests.get(u2, headers=headers, timeout=20)
+        r.raise_for_status()
+        return r
+    r = _get(url)
+    return Image.open(BytesIO(r.content)).convert("RGB")
+
+@torch.inference_mode()
+def _image_embed_from_url(url: str) -> list[float]:
+    _ensure_clip_ready()
+    img = _download_image(url)
+    img_t = _clip_preprocess(img).unsqueeze(0)
+    feats = _clip_model.encode_image(img_t).float()
+    feats /= feats.norm(dim=-1, keepdim=True)
+    return feats[0].cpu().tolist()   # 512 floats
+
+def _parse_image_urls(image_url: str | list[str] | None) -> list[str]:
+    """Support comma-separated string or list; returns cleaned list."""
+    urls: list[str] = []
+    if isinstance(image_url, str) and image_url.strip():
+        urls = [u.strip() for u in image_url.split(",") if u.strip()]
+    elif isinstance(image_url, list):
+        urls = [u.strip() for u in image_url if isinstance(u, str) and u.strip()]
+    # de-dupe preserving order
+    seen, out = set(), []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+def upsert_variant_image_vector(
+    *,
+    variant_id: int,
+    product_id: int,
+    tenant_id: int | None,
+    image_url: str | list[str] | None,
+    name: str | None = None,
+    category: str | None = None,
+    type: str | None = None,
+    fabric: str | None = None,
+    color: str | None = None,
+    size: str | None = None,
+    occasion: str | None = None,
+    price: float | None = None,
+    rental_price: float | None = None,
+    available_stock: int | None = None,
+    product_url: str | None = None,
+    is_rental: bool | None = None,
+    is_active: bool | None = None,
+    description: str | None = None,
+) -> None:
+    """Make/refresh the vector for THIS variant from its image URL (first URL wins)."""
+    if not _index:
+        return
+
+    urls = _parse_image_urls(image_url)
+    if not urls:
+        # If URL was cleared, drop the vector to avoid stale embedding.
+        try:
+            _index.delete(ids=[str(variant_id)], namespace=PINECONE_NAMESPACE)
+        except Exception as e:
+            print(f"[pinecone] delete (no-image) failed for {variant_id}: {e}")
+        return
+
+    try:
+        values = _image_embed_from_url(urls[0])
+    except Exception as e:
+        print(f"[img-embed] failed for variant {variant_id} url={urls[0]}: {e}")
+        return
+
+    # Metadata: keep consistent with your text/meta shape
+    meta = {
+        "tenant_id": int(tenant_id) if tenant_id is not None else None,
+        "product_id": int(product_id),
+        "variant_id": int(variant_id),
+        "name": name or "",
+        "category": category or "",
+        "type": type or "",
+        "fabric": fabric or "",
+        "color": color or "",
+        "size": size or "",
+        "occasion": occasion or "",
+        "price": float(price) if price is not None else None,
+        "rental_price": float(rental_price) if rental_price is not None else None,
+        "available_stock": int(available_stock or 0),
+        "product_url": product_url or "",
+        "is_rental": bool(is_rental) if is_rental is not None else None,
+        "is_active": bool(is_active) if is_active is not None else None,
+        "description": description or "",
+        "image_url": urls[0],
+    }
+    meta = {k: v for k, v in meta.items() if v is not None}
+
+    _index.upsert(
+        vectors=[{"id": str(variant_id), "values": values, "metadata": meta}],
+        namespace=PINECONE_NAMESPACE,
+    )
+    # (Optional) If you also want to tweak metadata after upsert, you can still call push_variant_metadata_to_pinecone
+    # but it's redundant because meta above already includes the same fields.
+
+async def upsert_variant_image_from_db(db: AsyncSession, variant_id: int) -> None:
+    res = await db.execute(text("""
+        SELECT
+            pv.id, pv.product_id, pv.color, pv.size, pv.fabric,
+            pv.price, pv.rental_price, pv.available_stock,
+            pv.is_rental, pv.image_url, pv.is_active, pv.product_url,
+            p.tenant_id, p.name, p.category, p.description, p.type,
+            -- NEW: pick one occasion name (if any) for this variant
+            (
+              SELECT o.name
+              FROM product_variant_occasions pvo
+              JOIN occasions o ON o.id = pvo.occasion_id
+              WHERE pvo.variant_id = pv.id
+              ORDER BY o.name ASC
+              LIMIT 1
+            ) AS occasion_name
+        FROM product_variants pv
+        JOIN products p ON p.id = pv.product_id
+        WHERE pv.id = :vid
+        LIMIT 1
+    """), {"vid": variant_id})
+    r = res.fetchone()
+    if not r:
+        return
+
+    upsert_variant_image_vector(
+        variant_id=r[0],
+        product_id=r[1],
+        tenant_id=r[12],
+        image_url=r[9],
+        name=r[13],
+        category=r[14],
+        type=r[16],
+        fabric=r[4],
+        color=r[2],
+        size=r[3],
+        price=r[5],
+        rental_price=r[6],
+        available_stock=r[7],
+        product_url=r[11],       # correct column
+        is_rental=r[8],
+        is_active=bool(r[10]),   # boolean
+        description=r[15],
+        occasion=r[17],          # now exists
+    )

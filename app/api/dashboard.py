@@ -15,7 +15,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import text
 # top of file (with other imports)
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.services.product_status_sync import toggle_product_active,push_variant_metadata_to_pinecone,push_product_metadata_to_pinecone,delete_product_everywhere,delete_variant_everywhere
+from app.services.product_status_sync import toggle_product_active,push_variant_metadata_to_pinecone,push_product_metadata_to_pinecone,delete_product_everywhere,delete_variant_everywhere,upsert_variant_image_from_db
 
 # Use the same get_db that admin.py relies on
 from app.db.session import get_db  # <-- same pattern as admin.py
@@ -418,14 +418,20 @@ async def product_toggle_active(request: Request, product_id: int, db: AsyncSess
     return RedirectResponse(url="/dashboard/product?status_toggled=1", status_code=303)
 
 
-# --- PRODUCT: Add (GET) ------------------------------
 @router.get("/product/add", response_class=HTMLResponse)
-async def product_add_form(request: Request):
+async def product_add_form(request: Request, db: AsyncSession = Depends(get_db)):
     guard = require_auth(request)
     if isinstance(guard, RedirectResponse):
         return guard
-    return templates.TemplateResponse("product_add.html",
-                                      {"request": request, "form_error": None})
+
+    res = await db.execute(text("SELECT id, name FROM occasions ORDER BY name ASC"))
+    occasions = [{"id": r[0], "name": r[1]} for r in res.fetchall()]
+
+    return templates.TemplateResponse(
+        "product_add.html",
+        {"request": request, "form_error": None, "occasions": occasions},
+    )
+
 
 # --- PRODUCT: Add (POST) -----------------------------
 @router.post("/product/add")
@@ -438,6 +444,8 @@ async def product_add_submit(
     category: str = Form(""),
     description: str = Form(""),
     image_url: str = Form(""),
+    product_url: str = Form(""),
+    type: str = Form("Women"),           # Men / Women
 
     # initial variant (optional)
     price: float | None = Form(None),
@@ -448,27 +456,47 @@ async def product_add_submit(
     stock: int | None = Form(None),
     sellable: bool = Form(False),
     rentable: bool = Form(False),
+
+    # occasion (single select)
+    occasion_id: str = Form(""),
 ):
     guard = require_auth(request)
     if isinstance(guard, RedirectResponse):
         return guard
     tenant_id = guard
 
+    name_clean = (product or "").strip()
+    if not name_clean:
+        return templates.TemplateResponse(
+            "product_add.html",
+            {"request": request, "form_error": "Product name is required."},
+            status_code=400,
+        )
+
     try:
-        # 1) create base product
-        r = await db.execute(text("""
-            INSERT INTO products (tenant_id, name, category, description, product_url)
-            VALUES (:tid, :name, :cat, :desc, NULL)
-            RETURNING id
-        """), {
-            "tid": tenant_id,
-            "name": product.strip(),
-            "cat": (category or "").strip() or None,
-            "desc": (description or "").strip() or None,
-        })
+        # 1) Create product (store type/product_url + timestamps)
+        r = await db.execute(
+            text("""
+                INSERT INTO products
+                    (tenant_id, name, type, category, description, product_url, created_at, updated_at)
+                VALUES
+                    (:tid, :name, :type, :cat, :desc, :purl, NOW(), NOW())
+                RETURNING id
+            """),
+            {
+                "tid": tenant_id,
+                "name": name_clean,
+                "type": (type or "").strip() or None,
+                "cat": (category or "").strip() or None,
+                "desc": (description or "").strip() or None,
+                "purl": (product_url or "").strip() or None,
+            },
+        )
         product_id = r.scalar_one()
 
-        # 2) optionally create one or two variants based on toggles
+        # 2) Create initial variant(s) and collect IDs
+        variant_ids: list[int] = []
+
         base = {
             "product_id": product_id,
             "color": (color or None),
@@ -479,41 +507,73 @@ async def product_add_submit(
             "available_stock": stock or 0,
             "image_url": (image_url or None),
             "is_active": True,
-            "product_url": None,
+            "product_url": (product_url or None),
         }
 
-        # create a SELL variant
+        async def _insert_variant(is_rental: bool) -> int:
+            res = await db.execute(
+                text("""
+                    INSERT INTO product_variants
+                        (product_id, color, size, fabric, price, rental_price, available_stock,
+                         is_rental, image_url, is_active, product_url, created_at, updated_at)
+                    VALUES
+                        (:product_id, :color, :size, :fabric, :price, :rental_price, :available_stock,
+                         :is_rental, :image_url, :is_active, :product_url, NOW(), NOW())
+                    RETURNING id
+                """),
+                {**base, "is_rental": is_rental},
+            )
+            return res.scalar_one()
+
+        # If neither is checked, default to SELL
         if sellable or (not sellable and not rentable):
-            await db.execute(text("""
-                INSERT INTO product_variants
-                  (product_id, color, size, fabric, price, rental_price, available_stock,
-                   is_rental, image_url, is_active, product_url)
-                VALUES
-                  (:product_id, :color, :size, :fabric, :price, :rental_price, :available_stock,
-                   FALSE, :image_url, :is_active, :product_url)
-            """), base)
-
-        # create a RENT variant
+            variant_ids.append(await _insert_variant(False))
         if rentable:
-            await db.execute(text("""
-                INSERT INTO product_variants
-                  (product_id, color, size, fabric, price, rental_price, available_stock,
-                   is_rental, image_url, is_active, product_url)
-                VALUES
-                  (:product_id, :color, :size, :fabric, :price, :rental_price, :available_stock,
-                   TRUE, :image_url, :is_active, :product_url)
-            """), base)
+            variant_ids.append(await _insert_variant(True))
 
+        # 3) Map selected occasion to each variant (if any)
+        if occasion_id and occasion_id.isdigit():
+            oid = int(occasion_id)
+            for vid in variant_ids:
+                await db.execute(
+                    text("""
+                        INSERT INTO product_variant_occasions (variant_id, occasion_id)
+                        VALUES (:vid, :oid)
+                    """),
+                    {"vid": vid, "oid": oid},
+                )
+
+        # 4) Commit DB so Pinecone readers see fresh rows
         await db.commit()
-        return RedirectResponse("/dashboard/product?added=1", status_code=303)
 
     except Exception:
         await db.rollback()
         return templates.TemplateResponse(
             "product_add.html",
             {"request": request, "form_error": "Failed to save product. Please check fields and try again."},
-            status_code=400
+            status_code=400,
         )
+
+    # 5) Pinecone upserts: CLIP embed from image_url + full metadata (incl. type/occasion)
+    try:
+        for vid in variant_ids:
+            await upsert_variant_image_from_db(db, vid)
+
+        await push_product_metadata_to_pinecone(
+            db,
+            product_id,
+            product=name_clean,
+            category=(category or None),
+            description=(description or None),
+            product_url=((product_url or "").strip() or None),
+            # include type if your helper accepts it:
+            # type=(type or None),
+        )
+    except Exception:
+        pass
+
+    return RedirectResponse("/dashboard/product?added=1", status_code=303)
+
 
 
 @router.get("/product", response_class=HTMLResponse)
@@ -905,6 +965,7 @@ async def product_variant_add(
 
         # ✅ Pinecone: push this variant’s metadata
         try:
+            await upsert_variant_image_from_db(db, new_variant_id)
             push_variant_metadata_to_pinecone(
                 new_variant_id,
                 color=color or None,
@@ -943,42 +1004,64 @@ async def product_variant_edit(
         return guard
     tenant_id = guard
 
-    # ownership checks (unchanged) ...
+    # 1) OWNERSHIP CHECKS (don’t skip these)
+    ok = await db.execute(
+        text("SELECT 1 FROM products WHERE id=:pid AND tenant_id=:tid"),
+        {"pid": product_id, "tid": tenant_id},
+    )
+    if not ok.first():
+        raise HTTPException(status_code=404, detail="Product not found")
 
+    prev = await db.execute(
+        text("SELECT image_url FROM product_variants WHERE id=:vid AND product_id=:pid"),
+        {"vid": variant_id, "pid": product_id},
+    )
+    row = prev.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Variant not found")
+    prev_image_url = row[0] or ""
+
+    # 2) UPDATE DB
     try:
         await db.execute(text("""
             UPDATE product_variants
-            SET color=:color, size=:size, fabric=:fabric,
-                price=:price, rental_price=:rental_price,
-                available_stock=:stock, is_rental=:is_rental,
-                image_url=:image_url, is_active=:is_active,
-                product_url=:product_url, updated_at = NOW()
-            WHERE id=:vid AND product_id=:pid
+               SET color=:color, size=:size, fabric=:fabric,
+                   price=:price, rental_price=:rental_price,
+                   available_stock=:stock, is_rental=:is_rental,
+                   image_url=:image_url, is_active=:is_active,
+                   product_url=:product_url, updated_at = NOW()
+             WHERE id=:vid AND product_id=:pid
         """), {
             "color": color or None, "size": size or None, "fabric": fabric or None,
             "price": price, "rental_price": rental_price, "stock": available_stock or 0,
-            "is_rental": bool(is_rental), "image_url": image_url or None,
+            "is_rental": bool(is_rental), "image_url": (image_url or None),
             "is_active": bool(is_active), "product_url": product_url or None,
             "vid": variant_id, "pid": product_id
         })
         await db.commit()
 
-        # 🔁 Pinecone: mirror updated fields
+        # 3) SYNC PINECONE
         try:
-            push_variant_metadata_to_pinecone(
-                variant_id,
-                color=color or None,
-                size=size or None,
-                fabric=fabric or None,
-                price=price,
-                rental_price=rental_price,
-                available_stock=available_stock or 0,
-                is_rental=bool(is_rental),
-                image_url=image_url or None,
-                is_active=bool(is_active),
-                product_url=product_url or None,
-            )
+            # Only re-embed if the image_url actually changed (saves time)
+            if (prev_image_url or "") != (image_url or ""):
+                await upsert_variant_image_from_db(db, variant_id)
+            else:
+                # keep metadata fresh even if embedding unchanged
+                push_variant_metadata_to_pinecone(
+                    variant_id,
+                    color=color or None,
+                    size=size or None,
+                    fabric=fabric or None,
+                    price=price,
+                    rental_price=rental_price,
+                    available_stock=available_stock or 0,
+                    is_rental=bool(is_rental),
+                    image_url=image_url or None,
+                    is_active=bool(is_active),
+                    product_url=product_url or None,
+                )
         except Exception:
+            # don’t block the UI if Pinecone hiccups
             pass
 
     except Exception:
