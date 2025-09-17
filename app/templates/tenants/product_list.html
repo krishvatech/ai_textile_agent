@@ -102,7 +102,10 @@
           <a class="btn btn-ghost" href="/dashboard/product/{{ p.product_id }}/modify">Modify</a>
         </td>
         <td>
-          <button class="btn btn-ghost" style="color:#e74c3c">Delete</button>
+          <button class="btn btn-ghost" style="color:#e74c3c"
+          onclick="deleteProduct('{{ p.product_id }}','{{ p.product|e }}')">
+          Delete
+          </button>
         </td>
       </tr>
     {% endfor %}
@@ -127,6 +130,21 @@
       </label>
     </nav>
   </div>
+
+  <script>
+async function deleteProduct(id, name){
+  if(!confirm(`Delete "${name}" and all its variants? This cannot be undone.`)) return;
+
+  const res = await fetch(`/dashboard/product/${id}/delete`, { method: 'DELETE' });
+  const data = await res.json();
+  if(!res.ok || !data.ok){
+    const msg = (data && data.detail) ? data.detail : `HTTP ${res.status}`;
+    return alert('Delete failed: ' + msg);
+  }
+  // remove row or reload
+  location.reload();
+}
+</script>
 
   <!-- Page-scoped JS to wire the filter and keep pager in sync -->
   <script>

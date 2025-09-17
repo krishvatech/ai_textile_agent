@@ -10,12 +10,12 @@ from typing import List, Dict, Any, Optional
 
 import httpx
 from fastapi import APIRouter, Request, HTTPException, Depends, Query, Form
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse,JSONResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import text
 # top of file (with other imports)
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.services.product_status_sync import toggle_product_active,push_variant_metadata_to_pinecone,push_product_metadata_to_pinecone
+from app.services.product_status_sync import toggle_product_active,push_variant_metadata_to_pinecone,push_product_metadata_to_pinecone,delete_product_everywhere,delete_variant_everywhere
 
 # Use the same get_db that admin.py relies on
 from app.db.session import get_db  # <-- same pattern as admin.py
@@ -674,6 +674,67 @@ async def product_modify_form(request: Request, product_id: int, db: AsyncSessio
     }
     return templates.TemplateResponse("product_modify.html", {"request": request, "p": p, "form_error": None})
 
+
+# DELETE (AJAX-friendly)
+@router.delete("/product/{product_id}/delete")
+async def dashboard_delete_product_api(
+    request: Request,
+    product_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    # tenant login check (same as your other dashboard actions)
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    tenant_id = guard
+
+    result = await delete_product_everywhere(db=db, tenant_id=tenant_id, product_id=product_id)
+    return JSONResponse(result)
+
+
+# Optional: POST (for form submissions or <button formmethod="post">)
+@router.post("/product/{product_id}/delete")
+async def dashboard_delete_product_form(
+    request: Request,
+    product_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    tenant_id = guard
+
+    await delete_product_everywhere(db=db, tenant_id=tenant_id, product_id=product_id)
+    # Redirect back to product list after deletion
+    return RedirectResponse(url="/dashboard/products", status_code=303)
+
+
+
+@router.post("/product/{product_id}/variants/{variant_id}/delete")
+async def product_variant_delete(
+    request: Request,
+    product_id: int,
+    variant_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    tenant_id = guard
+
+    try:
+        await delete_variant_everywhere(db, tenant_id, product_id, variant_id)
+        return RedirectResponse(
+            f"/dashboard/product/{product_id}/variants?deleted=1",
+            status_code=303
+        )
+    except HTTPException as e:
+        # surface a concise reason in the UI
+        detail = str(e.detail) if getattr(e, "detail", None) else "delete failed"
+        return RedirectResponse(
+            f"/dashboard/product/{product_id}/variants?err=delete&why={quote_plus(detail)}",
+            status_code=303
+        )
 
 # --- PRODUCT: Modify (POST) ---------------------------------------------
 @router.post("/product/{product_id}/modify")

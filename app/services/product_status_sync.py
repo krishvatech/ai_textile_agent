@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import os
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any, Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
+from fastapi import HTTPException
+
 from dotenv import load_dotenv
 from pinecone import Pinecone
 
-# --- Pinecone setup (same style as variant_sync.py) --------------------
+# -------------------------------------------------------------------
+# Pinecone setup (single init used for ALL ops: update + delete)
+# -------------------------------------------------------------------
 load_dotenv()
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_INDEX = os.getenv("PINECONE_INDEX", "textile-products")
@@ -26,7 +30,9 @@ if PINECONE_API_KEY:
         _index = None
 
 
-# --- Internal helpers --------------------------------------------------
+# =========================
+# Internal helpers (status)
+# =========================
 async def _product_belongs_to_tenant(db: AsyncSession, product_id: int, tenant_id: int) -> bool:
     r = await db.execute(
         text("SELECT 1 FROM products WHERE id=:pid AND tenant_id=:tid LIMIT 1"),
@@ -71,7 +77,9 @@ def _push_is_active_to_pinecone(variant_ids: List[int], is_active: bool) -> None
             print(f"[pinecone] update failed for {vid}: {e}")
 
 
-# --- Public API --------------------------------------------------------
+# ===================
+# Public API (status)
+# ===================
 async def toggle_product_active(
     db: AsyncSession,
     tenant_id: int,
@@ -80,8 +88,7 @@ async def toggle_product_active(
 ) -> Dict[str, object]:
     """
     Flip all variants of a product to active/deactive in Postgres,
-    then mirror the same `is_active` metadata in Pinecone.
-    If `new_state` is None, it toggles (based on any variant being active).
+    then mirror `is_active` in Pinecone.
     """
     if not await _product_belongs_to_tenant(db, product_id, tenant_id):
         raise ValueError("Product not found for this tenant.")
@@ -92,7 +99,6 @@ async def toggle_product_active(
     ids = await _set_all_variants_state(db, product_id, state)
     await db.commit()
 
-    # Pinecone mirror (best-effort)
     try:
         _push_is_active_to_pinecone(ids, state)
     except Exception:
@@ -140,8 +146,103 @@ async def set_variant_active(
     return {"variant_id": variant_id, "product_id": row[1], "new_state": bool(is_active)}
 
 
-# --- Pinecone metadata sync for a single variant (edit) ----------------
+# check table existence safely
+async def _table_exists(db: AsyncSession, table_name: str) -> bool:
+    q = await db.execute(
+        text("SELECT to_regclass(:tname) IS NOT NULL"),
+        {"tname": f"public.{table_name}" if "." not in table_name else table_name},
+    )
+    return bool(q.scalar())
 
+def _chunk(lst: Sequence, n: int = 1000):
+    for i in range(0, len(lst), n):
+        yield lst[i:i+n]
+
+# delete from known mapping tables that reference variant_id
+async def _delete_variant_dependents(db: AsyncSession, variant_ids: list[int]) -> None:
+    if not variant_ids:
+        return
+
+    # list any mapping tables you use that have a "variant_id" FK
+    candidate_tables = [
+        "product_variant_occasions",
+        "product_variant_images",
+        "product_variant_sizes",
+        "product_variant_colors",
+        "product_variant_attributes",
+    ]
+
+    # filter to only existing tables
+    existing = []
+    for tbl in candidate_tables:
+        if await _table_exists(db, tbl):
+            existing.append(tbl)
+
+    # delete in chunks for each existing table
+    for tbl in existing:
+        for batch in _chunk(variant_ids, 1000):
+            # ANY(:ids) works with asyncpg as an int[] bind
+            await db.execute(
+                text(f"DELETE FROM {tbl} WHERE variant_id = ANY(:ids)"),
+                {"ids": batch},
+            )
+
+
+async def delete_variant_everywhere(
+    db: AsyncSession,
+    tenant_id: int,
+    product_id: int,
+    variant_id: int,
+) -> dict:
+    # Ownership + existence checks
+    ok = await db.execute(
+        text("SELECT 1 FROM products WHERE id=:pid AND tenant_id=:tid"),
+        {"pid": product_id, "tid": tenant_id},
+    )
+    if not ok.first():
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    vok = await db.execute(
+        text("SELECT 1 FROM product_variants WHERE id=:vid AND product_id=:pid"),
+        {"vid": variant_id, "pid": product_id},
+    )
+    if not vok.first():
+        raise HTTPException(status_code=404, detail="Variant not found")
+
+    # Pinecone first (fail-fast)
+    try:
+        _pinecone_delete_variants_by_ids([variant_id])
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Pinecone delete failed: {e}")
+
+    # DB: dependents -> variant
+    try:
+        # remove rows in mapping tables that reference variant_id
+        await _delete_variant_dependents(db, [variant_id])
+
+        # finally remove the variant
+        await db.execute(
+            text("DELETE FROM product_variants WHERE id=:vid AND product_id=:pid"),
+            {"vid": variant_id, "pid": product_id},
+        )
+
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"DB delete failed: {e}")
+
+    return {
+        "ok": True,
+        "action": "deleted_variant",
+        "product_id": product_id,
+        "deleted_variant_id": variant_id,
+        "pinecone_index": PINECONE_INDEX,
+        "pinecone_namespace": PINECONE_NAMESPACE,
+    }
+
+# ==========================================
+# Pinecone metadata sync for a single variant
+# ==========================================
 def push_variant_metadata_to_pinecone(
     variant_id: int,
     *,
@@ -156,14 +257,9 @@ def push_variant_metadata_to_pinecone(
     is_active=None,
     product_url=None,
 ) -> None:
-    """
-    Update Pinecone metadata for one variant id. Call this after
-    you UPDATE the variant row in Postgres.
-    """
     if not _index:
         return
 
-    # keep only keys that have a non-None value so we don't overwrite with nulls
     meta = {
         "color": color,
         "size": size,
@@ -177,7 +273,6 @@ def push_variant_metadata_to_pinecone(
         "product_url": product_url,
     }
     clean = {k: v for k, v in meta.items() if v is not None}
-
     if not clean:
         return
 
@@ -191,10 +286,9 @@ def push_variant_metadata_to_pinecone(
         print(f"[pinecone] variant {variant_id} metadata update failed: {e}")
 
 
-# ---- Bulk Pinecone metadata helpers (generic) -------------------------
-
-from typing import Dict, List
-
+# ================================
+# Bulk push product-level metadata
+# ================================
 async def _get_variant_ids_by_product(db: AsyncSession, product_id: int) -> List[int]:
     res = await db.execute(
         text("SELECT id FROM product_variants WHERE product_id = :pid"),
@@ -218,8 +312,6 @@ def _bulk_update_pinecone_metadata(variant_ids: List[int], metadata: Dict):
         except Exception as e:
             print(f"[pinecone] bulk meta update failed for {vid}: {e}")
 
-# ---- Product → all variants: push product fields into Pinecone --------
-
 async def push_product_metadata_to_pinecone(
     db: AsyncSession,
     product_id: int,
@@ -229,20 +321,106 @@ async def push_product_metadata_to_pinecone(
     description: str | None = None,
     product_url: str | None = None,
 ) -> dict:
-    """
-    Push product-level fields to *all* variant vectors of this product.
-    Call this after updating products table.
-    """
     vids = await _get_variant_ids_by_product(db, product_id)
     if not vids:
         return {"product_id": product_id, "variant_count": 0, "pushed": False}
 
-    # Use keys you want visible in Pinecone metadata
     meta = {
-        "name": product,                       # product name
+        "name": product,
         "category": category,
         "description": description,
         "product_url": product_url,
     }
     _bulk_update_pinecone_metadata(vids, meta)
     return {"product_id": product_id, "variant_count": len(vids), "pushed": True}
+
+
+# ======================
+# Delete (DB + Pinecone)
+# ======================
+def _chunk(lst: Sequence, n: int = 1000):
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
+async def _ensure_product_belongs_to_tenant_or_404(
+    db: AsyncSession, product_id: int, tenant_id: int
+) -> None:
+    q = await db.execute(
+        text("SELECT 1 FROM products WHERE id = :pid AND tenant_id = :tid"),
+        {"pid": product_id, "tid": tenant_id},
+    )
+    if not q.first():
+        raise HTTPException(status_code=404, detail="Product not found")
+
+async def _collect_variant_ids(db: AsyncSession, product_id: int, tenant_id: int) -> List[int]:
+    # Use the correct table AND tenant guard via join
+    q = await db.execute(
+        text("""
+            SELECT pv.id
+            FROM product_variants pv
+            JOIN products p ON p.id = pv.product_id
+            WHERE pv.product_id = :pid AND p.tenant_id = :tid
+        """),
+        {"pid": product_id, "tid": tenant_id},
+    )
+    return [r[0] for r in q.fetchall()]
+
+def _pinecone_delete_variants_by_ids(variant_ids: List[int]) -> None:
+    if not _index or not variant_ids:
+        return
+    ids = [str(vid) for vid in variant_ids]   # change to f"variant:{vid}" if you used a prefix
+    for batch in _chunk(ids, 1000):
+        try:
+            _index.delete(ids=batch, namespace=PINECONE_NAMESPACE)
+        except Exception as e:
+            print(f"[pinecone] delete batch failed ({len(batch)} ids): {e}")
+            raise
+
+async def delete_product_everywhere(
+    db: AsyncSession, tenant_id: int, product_id: int
+) -> Dict[str, Any]:
+    """
+    1) Verify ownership
+    2) Collect connected variant IDs
+    3) Delete Pinecone vectors (fail-fast)
+    4) Delete DB rows: product_variants then products (transactional)
+    """
+    await _ensure_product_belongs_to_tenant_or_404(db, product_id, tenant_id)
+
+    variant_ids = await _collect_variant_ids(db, product_id, tenant_id)
+
+    # Pinecone first (fail-fast)
+    try:
+        _pinecone_delete_variants_by_ids(variant_ids)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Pinecone delete failed: {e}")
+
+    # DB delete
+    try:
+
+        # remove dependent rows that reference variant_id (fixes your FK error)
+        await _delete_variant_dependents(db, variant_ids)
+
+        # Variants
+        await db.execute(
+            text("DELETE FROM product_variants WHERE product_id = :pid"),
+            {"pid": product_id},
+        )
+        # Product
+        await db.execute(
+            text("DELETE FROM products WHERE id = :pid AND tenant_id = :tid"),
+            {"pid": product_id, "tid": tenant_id},
+        )
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"DB delete failed: {e}")
+
+    return {
+        "ok": True,
+        "action": "deleted_product_and_variants",
+        "deleted_product_id": product_id,
+        "deleted_variant_ids": variant_ids,
+        "pinecone_index": PINECONE_INDEX,
+        "pinecone_namespace": PINECONE_NAMESPACE,
+    }
