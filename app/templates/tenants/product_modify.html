@@ -27,17 +27,17 @@
     </div>
     <div class="col-12 col-md-4">
       <label class="form-label">Category</label>
-      <input class="form-control" name="category" value="{{ p.category or '' }}">
+      <input class="form-control" name="category" value="{{ p.category or '' }}" required>
     </div>
 
     <div class="col-12">
       <label class="form-label">Product URL (optional)</label>
-      <input class="form-control" name="product_url" value="{{ p.product_url or '' }}">
+      <input class="form-control" name="product_url" value="{{ p.product_url or '' }}" required>
     </div>
 
     <div class="col-12">
       <label class="form-label">Description</label>
-      <textarea class="form-control" name="description" rows="4">{{ p.description or '' }}</textarea>
+      <textarea class="form-control" name="description" rows="4" required>{{ p.description or '' }}</textarea>
     </div>
 
     <div class="col-12 mt-2">

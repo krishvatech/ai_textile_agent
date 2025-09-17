@@ -101,33 +101,33 @@
 
         <div class="col-6">
           <label class="form-label">Color</label>
-          <input class="form-control" name="color" value="{{ edit.color if edit else '' }}">
+          <input class="form-control" name="color" value="{{ edit.color if edit else '' }}" required>
         </div>
         <div class="col-6">
           <label class="form-label">Size</label>
-          <input class="form-control" name="size" value="{{ edit.size if edit else '' }}">
+          <input class="form-control" name="size" value="{{ edit.size if edit else '' }}" required>
         </div>
         <div class="col-12">
           <label class="form-label">Fabric</label>
-          <input class="form-control" name="fabric" value="{{ edit.fabric if edit else '' }}">
+          <input class="form-control" name="fabric" value="{{ edit.fabric if edit else '' }}" required>
         </div>
 
         <div class="col-6">
           <label class="form-label">Price (₹)</label>
-          <input class="form-control" type="number" step="0.01" name="price" value="{{ edit.price if edit and edit.price is not none else '' }}">
+          <input class="form-control" type="number" step="0.01" name="price" value="{{ edit.price if edit and edit.price is not none else '' }}" required>
         </div>
         <div class="col-6">
           <label class="form-label">Rental Price (₹)</label>
-          <input class="form-control" type="number" step="0.01" name="rental_price" value="{{ edit.rental_price if edit and edit.rental_price is not none else '' }}">
+          <input class="form-control" type="number" step="0.01" name="rental_price" value="{{ edit.rental_price if edit and edit.rental_price is not none else '' }}" required>
         </div>
 
         <div class="col-6">
           <label class="form-label">Stock</label>
-          <input class="form-control" type="number" name="available_stock" value="{{ edit.available_stock if edit else 0 }}">
+          <input class="form-control" type="number" name="available_stock" value="{{ edit.available_stock if edit else 0 }}"required>
         </div>
         <div class="col-6">
           <label class="form-label">Type</label>
-          <select class="form-select" name="is_rental">
+          <select class="form-select" name="is_rental" required>
             <option value="0" {% if edit and not edit.is_rental %}selected{% endif %}>Sale</option>
             <option value="1" {% if edit and edit.is_rental %}selected{% endif %}>Rent</option>
           </select>
@@ -135,19 +135,19 @@
 
         <div class="col-12">
           <label class="form-label">Image URL</label>
-          <input class="form-control" name="image_url" value="{{ edit.image_url if edit else '' }}">
+          <input class="form-control" name="image_url" value="{{ edit.image_url if edit else '' }}" required>
         </div>
 
         <div class="col-6">
           <label class="form-label">Active</label>
-          <select class="form-select" name="is_active">
+          <select class="form-select" name="is_active" required>
             <option value="1" {% if not edit or edit.is_active %}selected{% endif %}>Active</option>
             <option value="0" {% if edit and not edit.is_active %}selected{% endif %}>Inactive</option>
           </select>
         </div>
         <div class="col-6">
           <label class="form-label">Variant URL (optional)</label>
-          <input class="form-control" name="product_url" value="{{ edit.product_url if edit else '' }}">
+          <input class="form-control" name="product_url" value="{{ edit.product_url if edit else '' }}" required>
         </div>
 
         <div class="col-12 mt-2 d-flex gap-2">

@@ -22,12 +22,12 @@
       </div>
       <div class="col-md-4">
         <label class="form-label">Category</label>
-        <input type="text" name="category" class="form-control" placeholder="e.g. Saree, Kurta Set">
+        <input type="text" name="category" class="form-control" placeholder="e.g. Saree, Kurta Set" required>
       </div>
       <!-- Type -->
       <div class="col-md-6">
         <label class="form-label">Type</label>
-        <select name="type" class="form-select">
+        <select name="type" class="form-select" required>
           <option value="Women" selected>Women</option>
           <option value="Men">Men</option>
         </select>
@@ -36,7 +36,7 @@
       <!-- Occasion -->
       <div class="col-md-6">
         <label class="form-label">Occasion</label>
-        <select name="occasion_id" class="form-select">
+        <select name="occasion_id" class="form-select" required>
           <option value="">-- Select --</option>
           {% for o in occasions %}
             <option value="{{ o.id }}">{{ o.name }}</option>
@@ -46,44 +46,44 @@
 
       <div class="col-md-6">
         <label class="form-label">Price (₹)</label>
-        <input type="number" step="0.01" name="price" class="form-control" placeholder="e.g. 2499">
+        <input type="number" step="0.01" name="price" class="form-control" placeholder="e.g. 2499" required>
       </div>
       <div class="col-md-6">
         <label class="form-label">Rental Price (₹)</label>
-        <input type="number" step="0.01" name="rental_price" class="form-control" placeholder="e.g. 699">
+        <input type="number" step="0.01" name="rental_price" class="form-control" placeholder="e.g. 699" required>
       </div>
 
       <div class="col-md-6">
         <label class="form-label">Fabric</label>
-        <input type="text" name="fabric" class="form-control" placeholder="e.g. Jimmy Chu, Silk, Linen Slub">
+        <input type="text" name="fabric" class="form-control" placeholder="e.g. Jimmy Chu, Silk, Linen Slub" required>
       </div>
       <div class="col-md-6">
         <label class="form-label">Color</label>
-        <input type="text" name="color" class="form-control" placeholder="e.g. Purple">
+        <input type="text" name="color" class="form-control" placeholder="e.g. Purple" required>
       </div>
 
       <div class="col-md-6">
         <label class="form-label">Default Size</label>
-        <input type="text" name="size" class="form-control" placeholder="e.g. Freesize, M, L">
+        <input type="text" name="size" class="form-control" placeholder="e.g. Freesize, M, L" required>
       </div>
       <div class="col-md-6">
         <label class="form-label">Stock Count</label>
-        <input type="number" name="stock" class="form-control" placeholder="e.g. 10">
+        <input type="number" name="stock" class="form-control" placeholder="e.g. 10" required>
       </div>
 
       <div class="col-12">
         <label class="form-label">Product URL</label>
-        <input type="url" name="product_url" class="form-control" placeholder="https://yourstore.com/products/..." />
+        <input type="url" name="product_url" class="form-control" placeholder="https://yourstore.com/products/..." required>
       </div>
 
       <div class="col-12">
         <label class="form-label">Image URL</label>
-        <input type="url" name="image_url" class="form-control" placeholder="https://...">
+        <input type="url" name="image_url" class="form-control" placeholder="https://..." required>
       </div>
 
       <div class="col-12">
         <label class="form-label">Description</label>
-        <textarea name="description" class="form-control" rows="4" placeholder="Short description"></textarea>
+        <textarea name="description" class="form-control" rows="4" placeholder="Short description" required></textarea>
       </div>
 
       <div class="col-12">
@@ -92,7 +92,7 @@
           <label class="form-check-label" for="sellable">Available for Sell</label>
         </div>
         <div class="form-check form-switch">
-          <input class="form-check-input" type="checkbox" id="rentable" name="rentable" checked>
+          <input class="form-check-input" type="checkbox" id="rentable" name="rentable">
           <label class="form-check-label" for="rentable">Available for Rent</label>
         </div>
       </div>
