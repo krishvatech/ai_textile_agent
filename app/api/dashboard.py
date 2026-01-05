@@ -7,6 +7,8 @@ import re
 from io import BytesIO
 from urllib.parse import urlparse, quote_plus
 from typing import List, Dict, Any, Optional
+from uuid import uuid4
+from fastapi import UploadFile, File, status
 
 import httpx
 from fastapi import APIRouter, Request, HTTPException, Depends, Query, Form
@@ -68,6 +70,69 @@ def get_waba_token_for_tenant(tenant_id: int) -> Optional[str]:
     return (
         os.getenv("WHATSAPP_TOKEN")
     )
+
+@router.get("/modelling", response_class=HTMLResponse)
+async def tenant_modelling_page(request: Request, db: AsyncSession = Depends(get_db)):
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+
+    tenant_id = guard
+    tenant_name = request.session.get("tenant_name") or await get_tenant_name(tenant_id, db)
+
+    return templates.TemplateResponse(
+        "product_modelling.html",
+        {"request": request, "tenant_id": tenant_id, "tenant_name": tenant_name},
+    )
+
+
+@router.post("/modelling/generate", response_class=JSONResponse)
+async def tenant_modelling_generate(
+    request: Request,
+    image: UploadFile = File(...),
+    num_images: int = Form(6),
+    background: str = Form("white"),
+    pose_set: str = Form("ecom6"),
+    strict_garment: str = Form("1"),
+):
+    # JSON auth (no redirect)
+    role = request.session.get("role")
+    tenant_id = request.session.get("tenant_id")
+    if role != "tenant_admin" or tenant_id is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authorized")
+
+    if not image.content_type or not image.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Please upload a valid image.")
+
+    job_id = uuid4().hex
+
+    # tenant-isolated folder
+    out_dir = os.path.join("app", "static", "generated", "modelling", f"tenant_{tenant_id}", job_id)
+    os.makedirs(out_dir, exist_ok=True)
+
+    ext = (os.path.splitext(image.filename or "")[1] or ".png").lower()
+    if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
+        ext = ".png"
+
+    in_path = os.path.join(out_dir, f"input{ext}")
+    data = await image.read()
+    with open(in_path, "wb") as f:
+        f.write(data)
+
+    public_url = f"/static/generated/modelling/tenant_{tenant_id}/{job_id}/input{ext}"
+    n = max(1, min(int(num_images or 6), 12))
+
+    return JSONResponse({
+        "job_id": job_id,
+        "tenant_id": int(tenant_id),
+        "images": [public_url] * n,   # placeholder (replace with real AI outputs)
+        "meta": {
+            "background": background,
+            "pose_set": pose_set,
+            "strict_garment": (str(strict_garment) == "1"),
+            "placeholder": True
+        }
+    })
 
 @router.get("/media/wa/{media_id}")
 async def wa_media_by_id(request: Request, media_id: str):

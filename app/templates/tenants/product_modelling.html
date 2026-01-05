@@ -1,0 +1,335 @@
+{% extends '_dashboard_base.html' %}
+
+{% block title %}Admin / Product Modelling{% endblock %}
+{% block nav_modelling %}active{% endblock %}
+
+
+{% block content %}
+  <style>
+    .dropzone {
+      border: 2px dashed rgba(255,255,255,.18);
+      border-radius: 16px;
+      padding: 18px;
+      background: rgba(255,255,255,.03);
+      transition: 140ms ease;
+      cursor: pointer;
+    }
+    html[data-bs-theme='light'] .dropzone {
+      border-color: rgba(0,0,0,.18);
+      background: rgba(0,0,0,.02);
+    }
+    .dropzone.dragover {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 30px rgba(0,0,0,.22);
+    }
+    .img-thumb {
+      width: 100%;
+      max-height: 240px;
+      object-fit: contain;
+      border-radius: 14px;
+      background: rgba(0,0,0,.10);
+    }
+    html[data-bs-theme='light'] .img-thumb { background: rgba(0,0,0,.06); }
+    .result-card img {
+      width: 100%;
+      height: 220px;
+      object-fit: cover;
+      border-radius: 14px;
+      background: rgba(0,0,0,.10);
+    }
+    .busy-overlay {
+      position: absolute;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      border-radius: 16px;
+      background: rgba(0,0,0,.45);
+      backdrop-filter: blur(6px);
+      z-index: 5;
+    }
+    .busy-overlay.show { display: flex; }
+    .small-help { font-size: .86rem; }
+  </style>
+
+  <div class="d-flex justify-content-between align-items-start gap-3 mb-4">
+    <div>
+      <h3 class="mb-1">Product Modelling</h3>
+      <div class="text-secondary small">Upload 1 clothing image → generate a clean 6-image e-commerce catalog (different poses/angles).</div>
+    </div>
+    <span class="badge rounded-pill text-bg-secondary">Tenant only</span>
+  </div>
+
+  <div class="row g-3">
+    <!-- LEFT: Upload + Settings -->
+    <div class="col-lg-4">
+      <div class="glass p-3 rounded-3 position-relative" id="pmCard">
+        <div class="busy-overlay" id="pmBusy">
+          <div class="text-center">
+            <div class="spinner-border" role="status" aria-hidden="true"></div>
+            <div class="mt-2 fw-semibold">Generating catalog…</div>
+            <div class="small text-secondary" id="pmStatus">This can take a moment.</div>
+          </div>
+        </div>
+
+        <div class="d-flex align-items-center justify-content-between mb-2">
+          <h6 class="mb-0">Input Image</h6>
+          <button class="btn btn-sm btn-outline-light" type="button" id="pmClearBtn" disabled>
+            <i class="bi bi-x"></i> Clear
+          </button>
+        </div>
+
+        <div class="dropzone" id="pmDrop">
+          <input class="d-none" type="file" id="pmFile" accept="image/*" />
+          <div class="d-flex align-items-center gap-3">
+            <div class="fs-2"><i class="bi bi-cloud-arrow-up"></i></div>
+            <div>
+              <div class="fw-semibold">Drop an image here</div>
+              <div class="text-secondary small">or click to browse (JPG/PNG/WebP)</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-3" id="pmPreviewWrap" style="display:none;">
+          <img id="pmPreview" class="img-thumb" alt="Product preview" />
+          <div class="text-secondary small mt-2" id="pmFileMeta"></div>
+        </div>
+
+        <hr class="my-3" />
+
+        <h6 class="mb-2">Catalog Settings</h6>
+        <div class="row g-2">
+          <div class="col-6">
+            <label class="form-label small mb-1">Images</label>
+            <select class="form-select form-select-sm" id="pmCount">
+              <option value="4">4</option>
+              <option value="6" selected>6 (recommended)</option>
+              <option value="8">8</option>
+            </select>
+          </div>
+          <div class="col-6">
+            <label class="form-label small mb-1">Background</label>
+            <select class="form-select form-select-sm" id="pmBg">
+              <option value="white" selected>White studio</option>
+              <option value="lightgray">Light gray studio</option>
+              <option value="lifestyle">Minimal lifestyle</option>
+            </select>
+          </div>
+          <div class="col-12">
+            <label class="form-label small mb-1">Pose set</label>
+            <select class="form-select form-select-sm" id="pmPose">
+              <option value="ecom6" selected>E-commerce (Front, 3/4, Side, Back, Detail, Flat)</option>
+              <option value="model6">Model-focused (6 different poses)</option>
+              <option value="angles6">Angles-only (Front/Back/Side/Detail variants)</option>
+            </select>
+          </div>
+          <div class="col-12">
+            <div class="form-check mt-1">
+              <input class="form-check-input" type="checkbox" id="pmKeepGarment" checked />
+              <label class="form-check-label small" for="pmKeepGarment">Preserve garment color/pattern/logo (strict)</label>
+            </div>
+            <div class="text-secondary small-help mt-1">
+              Tip: Use a clean product photo with the garment centered and well-lit.
+            </div>
+          </div>
+        </div>
+
+        <div class="d-grid mt-3">
+          <button class="btn btn-primary" type="button" id="pmGenerateBtn" disabled>
+            <i class="bi bi-stars"></i> Generate Catalog
+          </button>
+        </div>
+
+        <div class="alert alert-warning mt-3 mb-0 small" role="alert">
+          This UI expects an API endpoint that returns generated image URLs.
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: Results -->
+    <div class="col-lg-8">
+      <div class="glass p-3 rounded-3">
+        <div class="d-flex align-items-center justify-content-between mb-2">
+          <h6 class="mb-0">Generated Catalog</h6>
+          <div class="d-flex gap-2">
+            <button class="btn btn-sm btn-outline-light" type="button" id="pmCopyJson" disabled>
+              <i class="bi bi-clipboard"></i> Copy JSON
+            </button>
+            <button class="btn btn-sm btn-outline-light" type="button" id="pmReset" disabled>
+              <i class="bi bi-arrow-counterclockwise"></i> Reset
+            </button>
+          </div>
+        </div>
+
+        <div id="pmEmpty" class="text-center py-5 text-secondary">
+          <div class="fs-1 mb-2"><i class="bi bi-images"></i></div>
+          <div class="fw-semibold">No catalog yet</div>
+          <div class="small">Upload a product image and click “Generate Catalog”.</div>
+        </div>
+
+        <div id="pmGrid" class="row g-3" style="display:none;"></div>
+
+        <details class="mt-3" id="pmDebugWrap" style="display:none;">
+          <summary class="text-secondary small">Debug response</summary>
+          <pre class="mt-2 mb-0" style="white-space:pre-wrap;word-break:break-word;"><code id="pmDebug"></code></pre>
+        </details>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const drop = $('pmDrop');
+    const fileInput = $('pmFile');
+    const previewWrap = $('pmPreviewWrap');
+    const previewImg = $('pmPreview');
+    const fileMeta = $('pmFileMeta');
+    const btnGenerate = $('pmGenerateBtn');
+    const btnClear = $('pmClearBtn');
+    const busy = $('pmBusy');
+    const status = $('pmStatus');
+    const grid = $('pmGrid');
+    const empty = $('pmEmpty');
+    const btnCopyJson = $('pmCopyJson');
+    const btnReset = $('pmReset');
+    const dbgWrap = $('pmDebugWrap');
+    const dbg = $('pmDebug');
+
+    let selectedFile = null;
+    let lastResponse = null;
+
+    function setBusy(on, msg){
+      busy.classList.toggle('show', !!on);
+      if (msg) status.textContent = msg;
+    }
+    function setEnabled(el, on){ if (el) el.disabled = !on; }
+
+    function humanSize(bytes){
+      const units = ['B','KB','MB','GB'];
+      let b = bytes || 0, i = 0;
+      while (b >= 1024 && i < units.length-1) { b /= 1024; i++; }
+      return `${b.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+    }
+
+    function setFile(file){
+      selectedFile = file;
+      if (!file){
+        previewWrap.style.display = 'none';
+        previewImg.src = '';
+        fileMeta.textContent = '';
+        setEnabled(btnGenerate, false);
+        setEnabled(btnClear, false);
+        return;
+      }
+      previewWrap.style.display = '';
+      previewImg.src = URL.createObjectURL(file);
+      fileMeta.textContent = `${file.name} • ${humanSize(file.size)}`;
+      setEnabled(btnGenerate, true);
+      setEnabled(btnClear, true);
+    }
+
+    function resetResults(){
+      lastResponse = null;
+      grid.innerHTML = '';
+      grid.style.display = 'none';
+      empty.style.display = '';
+      dbgWrap.style.display = 'none';
+      dbg.textContent = '';
+      setEnabled(btnCopyJson, false);
+      setEnabled(btnReset, false);
+    }
+
+    drop.addEventListener('click', () => fileInput.click());
+    drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('dragover'); });
+    drop.addEventListener('dragleave', () => drop.classList.remove('dragover'));
+    drop.addEventListener('drop', (e) => {
+      e.preventDefault();
+      drop.classList.remove('dragover');
+      const f = e.dataTransfer?.files?.[0];
+      if (f) setFile(f);
+    });
+    fileInput.addEventListener('change', (e) => {
+      const f = e.target.files?.[0];
+      if (f) setFile(f);
+    });
+
+    btnClear.addEventListener('click', () => {
+      fileInput.value = '';
+      setFile(null);
+      resetResults();
+    });
+    btnReset.addEventListener('click', resetResults);
+
+    function renderImages(urls){
+      grid.innerHTML = '';
+      urls.forEach((url, idx) => {
+        const col = document.createElement('div');
+        col.className = 'col-12 col-sm-6 col-xl-4';
+        col.innerHTML = `
+          <div class="glass p-2 rounded-3 result-card">
+            <img src="${url}" alt="Catalog image ${idx+1}" />
+            <div class="d-flex justify-content-between align-items-center mt-2">
+              <div class="small text-secondary">#${idx+1}</div>
+              <div class="d-flex gap-2">
+                <a class="btn btn-sm btn-outline-light" href="${url}" target="_blank" rel="noreferrer">
+                  <i class="bi bi-box-arrow-up-right"></i>
+                </a>
+                <a class="btn btn-sm btn-outline-light" href="${url}" download>
+                  <i class="bi bi-download"></i>
+                </a>
+              </div>
+            </div>
+          </div>
+        `;
+        grid.appendChild(col);
+      });
+      empty.style.display = 'none';
+      grid.style.display = '';
+      setEnabled(btnCopyJson, true);
+      setEnabled(btnReset, true);
+    }
+
+    btnGenerate.addEventListener('click', async () => {
+      if (!selectedFile) return;
+      resetResults();
+      setBusy(true, 'Uploading image…');
+
+      const fd = new FormData();
+      fd.append('image', selectedFile);
+      fd.append('num_images', $('pmCount').value);
+      fd.append('background', $('pmBg').value);
+      fd.append('pose_set', $('pmPose').value);
+      fd.append('strict_garment', $('pmKeepGarment').checked ? '1' : '0');
+
+      try {
+        setBusy(true, 'Generating images…');
+        const res = await fetch('/dashboard/modelling/generate', { method: 'POST', body: fd });
+        const data = await res.json().catch(() => ({}));
+        lastResponse = data;
+        dbgWrap.style.display = '';
+        dbg.textContent = JSON.stringify(data, null, 2);
+
+        if (!res.ok) throw new Error(data?.detail || data?.message || `Request failed (${res.status})`);
+
+        const urls = data?.images || [];
+        if (!Array.isArray(urls) || urls.length === 0) throw new Error('No images returned by API.');
+        renderImages(urls);
+      } catch (err) {
+        alert(err?.message || 'Failed to generate catalog.');
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    btnCopyJson.addEventListener('click', async () => {
+      if (!lastResponse) return;
+      try {
+        await navigator.clipboard.writeText(JSON.stringify(lastResponse, null, 2));
+        btnCopyJson.innerHTML = '<i class="bi bi-check2"></i> Copied';
+        setTimeout(() => (btnCopyJson.innerHTML = '<i class="bi bi-clipboard"></i> Copy JSON'), 1200);
+      } catch {
+        alert('Clipboard permission blocked.');
+      }
+    });
+  </script>
+{% endblock %}

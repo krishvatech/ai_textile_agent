@@ -1,6 +1,9 @@
 # app/api/admin_dashboard.py
 from __future__ import annotations
 from fastapi import Form, status
+import os
+from uuid import uuid4
+from fastapi import UploadFile, File, HTTPException
 
 from typing import Any, Dict, List, Optional, OrderedDict as _OrderedDict
 from collections import OrderedDict
@@ -631,3 +634,58 @@ async def admin_analytics_top_tenants(db: AsyncSession = Depends(get_db)):
     """))
     items = [{"tenant_id": r[0], "tenant_name": r[1], "orders_30d": int(r[2] or 0)} for r in (res.fetchall() or [])]
     return JSONResponse({"items": items})
+
+@router.get("/modelling", response_class=HTMLResponse)
+async def product_modelling_page(request: Request):
+    guard = require_superadmin(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    return templates.TemplateResponse(
+        "product_modelling.html",
+        {"request": request, "tenant_name": "Superadmin"},
+    )
+
+
+@router.post("/modelling/generate", response_class=JSONResponse)
+async def product_modelling_generate(
+    request: Request,
+    image: UploadFile = File(...),
+    num_images: int = Form(6),
+    background: str = Form("white"),
+    pose_set: str = Form("ecom6"),
+    strict_garment: str = Form("1"),
+):
+    # admin-only for fetch/XHR
+    if request.session.get("role") != "superadmin":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authorized")
+
+    if not image.content_type or not image.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Please upload a valid image.")
+
+    # Placeholder: save input and return same URL repeated N times (UI works end-to-end)
+    job_id = uuid4().hex
+    out_dir = os.path.join("app", "static", "generated", "modelling", job_id)
+    os.makedirs(out_dir, exist_ok=True)
+
+    ext = (os.path.splitext(image.filename or "")[1] or ".png").lower()
+    if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
+        ext = ".png"
+
+    in_path = os.path.join(out_dir, f"input{ext}")
+    data = await image.read()
+    with open(in_path, "wb") as f:
+        f.write(data)
+
+    public_url = f"/static/generated/modelling/{job_id}/input{ext}"
+    n = max(1, min(int(num_images or 6), 12))
+
+    return JSONResponse({
+        "job_id": job_id,
+        "images": [public_url] * n,
+        "meta": {
+            "background": background,
+            "pose_set": pose_set,
+            "strict_garment": bool(str(strict_garment) == "1"),
+            "placeholder": True,
+        },
+    })

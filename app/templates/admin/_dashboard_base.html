@@ -61,9 +61,18 @@
 
           <!-- Tenants/Shops only -->
           <a class="nav-link d-flex align-items-center gap-2 {% block nav_tenants %}
+
             {% endblock %}"
             href="/admin/tenants">
             <i class="bi bi-buildings"></i><span>Tenants/Shops</span>
+          </a>
+
+          <div class="nav-title text-uppercase small text-secondary px-2 mt-3">AI Tools</div>
+
+          <a class="nav-link d-flex align-items-center gap-2 {% block nav_modelling %}
+            {% endblock %}"
+            href="/admin/modelling">
+            <i class="bi bi-magic"></i><span>Product Modelling</span>
           </a>
         </nav>
       </aside>
