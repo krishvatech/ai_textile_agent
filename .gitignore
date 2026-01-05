@@ -24,6 +24,7 @@ env/
 venv/
 ENV/
 env.bak/
+generated/
 
 # IDE/Editor settings
 .vscode/
