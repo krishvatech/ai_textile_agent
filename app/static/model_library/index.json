@@ -1,0 +1,26 @@
+﻿{
+    "women":  [
+                  {
+                      "label":  "Women Studio 1",
+                      "path":  "/static/model_library/women/w1.jpg",
+                      "id":  "w1"
+                  },
+                  {
+                      "label":  "Women Studio 2",
+                      "path":  "/static/model_library/women/w2.jpg",
+                      "id":  "w2"
+                  }
+              ],
+    "men":  [
+                {
+                    "label":  "Men Studio 1",
+                    "path":  "/static/model_library/men/m1.jpg",
+                    "id":  "m1"
+                },
+                {
+                    "label":  "Men Studio 2",
+                    "path":  "/static/model_library/men/m2.jpg",
+                    "id":  "m2"
+                }
+            ]
+}

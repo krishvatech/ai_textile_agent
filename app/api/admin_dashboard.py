@@ -1,8 +1,6 @@
 # app/api/admin_dashboard.py
 from __future__ import annotations
 from fastapi import Form, status
-import os
-from uuid import uuid4
 from fastapi import UploadFile, File, HTTPException
 
 from typing import Any, Dict, List, Optional, OrderedDict as _OrderedDict
@@ -16,6 +14,7 @@ from sqlalchemy import text
 
 # keep the same import convention as your other routers
 from app.db.session import get_db
+from app.services.product_modelling.service import generate_catalog, load_model_library_index, MAX_IMAGE_BYTES
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates/admin")
@@ -649,8 +648,14 @@ async def product_modelling_page(request: Request):
 @router.post("/modelling/generate", response_class=JSONResponse)
 async def product_modelling_generate(
     request: Request,
-    image: UploadFile = File(...),
-    num_images: int = Form(6),
+    product_image: UploadFile = File(None),
+    image: UploadFile = File(None),  # backward-compat
+    reference_image: UploadFile = File(None),
+    model_image: UploadFile = File(None),
+    workflow: str = Form("auto"),
+    predefined_model_id: str = Form(""),
+    style_preset: str = Form(""),
+    num_images: int = Form(4),
     background: str = Form("white"),
     pose_set: str = Form("ecom6"),
     strict_garment: str = Form("1"),
@@ -659,33 +664,57 @@ async def product_modelling_generate(
     if request.session.get("role") != "superadmin":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authorized")
 
+    image = product_image or image
+    if not image:
+        raise HTTPException(status_code=400, detail="Product image is required.")
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Please upload a valid image.")
 
-    # Placeholder: save input and return same URL repeated N times (UI works end-to-end)
-    job_id = uuid4().hex
-    out_dir = os.path.join("app", "static", "generated", "modelling", job_id)
-    os.makedirs(out_dir, exist_ok=True)
-
-    ext = (os.path.splitext(image.filename or "")[1] or ".png").lower()
-    if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
-        ext = ".png"
-
-    in_path = os.path.join(out_dir, f"input{ext}")
     data = await image.read()
-    with open(in_path, "wb") as f:
-        f.write(data)
+    if len(data) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Product image is too large.")
 
-    public_url = f"/static/generated/modelling/{job_id}/input{ext}"
-    n = max(1, min(int(num_images or 6), 12))
+    reference_bytes = None
+    if reference_image and reference_image.filename:
+        if not reference_image.content_type or not reference_image.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="Reference image must be an image.")
+        reference_bytes = await reference_image.read()
+        if len(reference_bytes) > MAX_IMAGE_BYTES:
+            raise HTTPException(status_code=413, detail="Reference image is too large.")
 
-    return JSONResponse({
-        "job_id": job_id,
-        "images": [public_url] * n,
-        "meta": {
-            "background": background,
-            "pose_set": pose_set,
-            "strict_garment": bool(str(strict_garment) == "1"),
-            "placeholder": True,
-        },
-    })
+    model_bytes = None
+    if model_image and model_image.filename:
+        if not model_image.content_type or not model_image.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="Model image must be an image.")
+        model_bytes = await model_image.read()
+        if len(model_bytes) > MAX_IMAGE_BYTES:
+            raise HTTPException(status_code=413, detail="Model image is too large.")
+
+    try:
+        result = await generate_catalog(
+            workflow=workflow,
+            product_image_bytes=data,
+            reference_image_bytes=reference_bytes,
+            model_image_bytes=model_bytes,
+            predefined_model_id=(predefined_model_id or "").strip() or None,
+            style_preset=(style_preset or "").strip() or None,
+            background=background,
+            pose_set=pose_set,
+            strict_garment=(str(strict_garment) == "1"),
+            num_images=num_images,
+            tenant_scope="admin",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Vertex AI failed: {e}")
+
+    return JSONResponse(result)
+
+
+@router.get("/modelling/models", response_class=JSONResponse)
+async def product_modelling_models(request: Request):
+    guard = require_superadmin(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    return JSONResponse(load_model_library_index())

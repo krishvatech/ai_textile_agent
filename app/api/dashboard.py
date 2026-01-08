@@ -7,7 +7,6 @@ import re
 from io import BytesIO
 from urllib.parse import urlparse, quote_plus
 from typing import List, Dict, Any, Optional
-from uuid import uuid4
 from fastapi import UploadFile, File, status
 
 import httpx
@@ -18,6 +17,7 @@ from sqlalchemy import text
 # top of file (with other imports)
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.product_status_sync import toggle_product_active,push_variant_metadata_to_pinecone,push_product_metadata_to_pinecone,delete_product_everywhere,delete_variant_everywhere,upsert_variant_image_from_db
+from app.services.product_modelling.service import generate_catalog, load_model_library_index, MAX_IMAGE_BYTES
 
 # Use the same get_db that admin.py relies on
 from app.db.session import get_db  # <-- same pattern as admin.py
@@ -89,8 +89,14 @@ async def tenant_modelling_page(request: Request, db: AsyncSession = Depends(get
 @router.post("/modelling/generate", response_class=JSONResponse)
 async def tenant_modelling_generate(
     request: Request,
-    image: UploadFile = File(...),
-    num_images: int = Form(6),
+    product_image: UploadFile = File(None),
+    image: UploadFile = File(None),  # backward-compat
+    reference_image: UploadFile = File(None),
+    model_image: UploadFile = File(None),
+    workflow: str = Form("auto"),
+    predefined_model_id: str = Form(""),
+    style_preset: str = Form(""),
+    num_images: int = Form(4),
     background: str = Form("white"),
     pose_set: str = Form("ecom6"),
     strict_garment: str = Form("1"),
@@ -101,38 +107,60 @@ async def tenant_modelling_generate(
     if role != "tenant_admin" or tenant_id is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authorized")
 
+    image = product_image or image
+    if not image:
+        raise HTTPException(status_code=400, detail="Product image is required.")
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Please upload a valid image.")
 
-    job_id = uuid4().hex
-
-    # tenant-isolated folder
-    out_dir = os.path.join("app", "static", "generated", "modelling", f"tenant_{tenant_id}", job_id)
-    os.makedirs(out_dir, exist_ok=True)
-
-    ext = (os.path.splitext(image.filename or "")[1] or ".png").lower()
-    if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
-        ext = ".png"
-
-    in_path = os.path.join(out_dir, f"input{ext}")
     data = await image.read()
-    with open(in_path, "wb") as f:
-        f.write(data)
+    if len(data) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Product image is too large.")
 
-    public_url = f"/static/generated/modelling/tenant_{tenant_id}/{job_id}/input{ext}"
-    n = max(1, min(int(num_images or 6), 12))
+    reference_bytes = None
+    if reference_image and reference_image.filename:
+        if not reference_image.content_type or not reference_image.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="Reference image must be an image.")
+        reference_bytes = await reference_image.read()
+        if len(reference_bytes) > MAX_IMAGE_BYTES:
+            raise HTTPException(status_code=413, detail="Reference image is too large.")
 
-    return JSONResponse({
-        "job_id": job_id,
-        "tenant_id": int(tenant_id),
-        "images": [public_url] * n,   # placeholder (replace with real AI outputs)
-        "meta": {
-            "background": background,
-            "pose_set": pose_set,
-            "strict_garment": (str(strict_garment) == "1"),
-            "placeholder": True
-        }
-    })
+    model_bytes = None
+    if model_image and model_image.filename:
+        if not model_image.content_type or not model_image.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="Model image must be an image.")
+        model_bytes = await model_image.read()
+        if len(model_bytes) > MAX_IMAGE_BYTES:
+            raise HTTPException(status_code=413, detail="Model image is too large.")
+
+    try:
+        result = await generate_catalog(
+            workflow=workflow,
+            product_image_bytes=data,
+            reference_image_bytes=reference_bytes,
+            model_image_bytes=model_bytes,
+            predefined_model_id=(predefined_model_id or "").strip() or None,
+            style_preset=(style_preset or "").strip() or None,
+            background=background,
+            pose_set=pose_set,
+            strict_garment=(str(strict_garment) == "1"),
+            num_images=num_images,
+            tenant_scope=f"tenant_{tenant_id}",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Vertex AI failed: {e}")
+
+    return JSONResponse(result)
+
+
+@router.get("/modelling/models", response_class=JSONResponse)
+async def tenant_modelling_models(request: Request):
+    guard = require_auth(request)
+    if isinstance(guard, RedirectResponse):
+        return guard
+    return JSONResponse(load_model_library_index())
 
 @router.get("/media/wa/{media_id}")
 async def wa_media_by_id(request: Request, media_id: str):

@@ -29,6 +29,7 @@ import io
 import json
 import base64
 import tempfile
+import hashlib
 import random
 import asyncio
 import typing
@@ -401,10 +402,31 @@ async def generate_vto_image(
     """
     Returns PNG bytes of the try-on result. Fully env-driven; no hardcoded paths/keys.
     """
+    candidates = await generate_tryon_candidates(
+        person_bytes=person_bytes,
+        garment_bytes=garment_bytes,
+        cfg=cfg,
+        is_flare=is_flare,
+        num_images=1,
+    )
+    if not candidates:
+        raise RuntimeError("VTO returned no image")
+    return candidates[0]
+
+
+async def generate_tryon_candidates(
+    person_bytes: bytes,
+    garment_bytes: bytes,
+    num_images: int = 4,
+    cfg: typing.Optional[VTOConfig] = None,
+    is_flare: bool = False,
+) -> typing.List[bytes]:
+    """
+    Returns multiple PNG bytes candidates for try-on (sorted by torso-fit score).
+    """
     cfg = cfg or VTOConfig()
     client = _make_client(cfg)
 
-    # Prep inputs
     torso_box = None
     if _env_bool("VTO_NEUTRALIZE_TORSO", True):
         person_tmp, torso_box = neutralize_torso_bytes(
@@ -420,29 +442,25 @@ async def generate_vto_image(
 
     garment_tmp = prep_garment_bytes(garment_bytes, is_flare=is_flare)
 
-
     person_img = Image.from_file(location=person_tmp)
     garment_img = Image.from_file(location=garment_tmp)
 
-    # Recontext config
     try:
         re_cfg = RecontextImageConfig(
-            number_of_images=_env_int("VTO_NUM_IMAGES", 4),
+            number_of_images=max(1, int(num_images)),
             base_steps=cfg.base_steps,
             seed=(cfg.seed or random.randint(1, 10_000_000)),
             add_watermark=cfg.add_watermark,
         )
     except Exception as e:
         log.debug("RecontextImageConfig with extras failed; falling back: %s", e)
-        re_cfg = RecontextImageConfig(number_of_images=1)
+        re_cfg = RecontextImageConfig(number_of_images=max(1, int(num_images)))
 
-    # Build source once
     src = RecontextImageSource(
         person_image=person_img,
         product_images=[ProductImage(product_image=garment_img)],
     )
 
-    # Robust call across SDK versions
     def _call_recontext():
         fn = client.models.recontext_image
         params = tuple(inspect.signature(fn).parameters.keys())
@@ -457,7 +475,6 @@ async def generate_vto_image(
 
     resp = await asyncio.to_thread(_call_recontext)
 
-    # Collect candidates
     images = (
         getattr(resp, "generated_images", None)
         or getattr(resp, "images", None)
@@ -465,14 +482,12 @@ async def generate_vto_image(
         or (resp if isinstance(resp, (list, tuple)) else None)
         or []
     )
-
     if not images:
         if isinstance(resp, dict) and "predictions" in resp:
             images = resp["predictions"]
         else:
             raise RuntimeError("VTO returned no image")
 
-    # Score & select best
     scored: typing.List[typing.Tuple[float, bytes]] = []
     for cand in images:
         obj = cand.image if hasattr(cand, "image") else cand
@@ -487,4 +502,14 @@ async def generate_vto_image(
         raise RuntimeError("VTO returned images but none were decodable")
 
     scored.sort(key=lambda t: t[0], reverse=True)
-    return scored[0][1]
+    seen = set()
+    out: typing.List[bytes] = []
+    for _, b in scored:
+        key = hashlib.sha256(b).hexdigest()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(b)
+        if len(out) >= int(num_images):
+            break
+    return out

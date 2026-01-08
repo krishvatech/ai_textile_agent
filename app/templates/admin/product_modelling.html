@@ -55,7 +55,7 @@
   <div class="d-flex justify-content-between align-items-start gap-3 mb-4">
     <div>
       <h3 class="mb-1">Product Modelling</h3>
-      <div class="text-secondary small">Upload 1 clothing image → generate a clean 6-image e-commerce catalog (different poses/angles).</div>
+      <div class="text-secondary small">Upload a product image, add optional reference and model inputs, and generate a clean catalog.</div>
     </div>
     <span class="badge rounded-pill text-bg-secondary">Admin only</span>
   </div>
@@ -99,12 +99,22 @@
 
         <h6 class="mb-2">Catalog Settings</h6>
         <div class="row g-2">
+          <div class="col-12">
+            <label class="form-label small mb-1">Workflow</label>
+            <select class="form-select form-select-sm" id="pmWorkflow">
+              <option value="auto" selected>Auto (decide best workflow)</option>
+              <option value="accessory">Accessory (watch/necklace/sunglasses)</option>
+              <option value="clothing">Clothing (shirt/dress/kurta)</option>
+            </select>
+          </div>
           <div class="col-6">
             <label class="form-label small mb-1">Images</label>
             <select class="form-select form-select-sm" id="pmCount">
-              <option value="4">4</option>
-              <option value="6" selected>6 (recommended)</option>
-              <option value="8">8</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4" selected>4</option>
+              <option value="5">5</option>
+              <option value="6">6</option>
             </select>
           </div>
           <div class="col-6">
@@ -114,6 +124,35 @@
               <option value="lightgray">Light gray studio</option>
               <option value="lifestyle">Minimal lifestyle</option>
             </select>
+          </div>
+          <div class="col-12">
+            <label class="form-label small mb-1">Style preset</label>
+            <select class="form-select form-select-sm" id="pmStyle">
+              <option value="" selected>None</option>
+              <option value="Minimal">Minimal</option>
+              <option value="Luxury">Luxury</option>
+              <option value="Lifestyle">Lifestyle</option>
+              <option value="Street">Street</option>
+              <option value="Festival">Festival</option>
+            </select>
+          </div>
+          <div class="col-12">
+            <label class="form-label small mb-1">Reference image (optional)</label>
+            <input class="form-control form-control-sm" type="file" id="pmRefFile" accept="image/*" />
+            <div class="text-secondary small mt-1" id="pmRefMeta"></div>
+          </div>
+          <div class="col-12">
+            <label class="form-label small mb-1">Predefined model (optional)</label>
+            <select class="form-select form-select-sm" id="pmModelSelect">
+              <option value="" selected>None</option>
+            </select>
+            <div class="text-secondary small-help mt-1">If no model is provided for clothing, a default model is auto-picked.</div>
+          </div>
+          <div class="col-12">
+            <label class="form-label small mb-1">Custom model image (optional)</label>
+            <input class="form-control form-control-sm" type="file" id="pmModelFile" accept="image/*" />
+            <div class="text-secondary small mt-1" id="pmModelMeta"></div>
+            <div class="text-secondary small-help">Custom model overrides predefined when provided.</div>
           </div>
           <div class="col-12">
             <label class="form-label small mb-1">Pose set</label>
@@ -126,7 +165,7 @@
           <div class="col-12">
             <div class="form-check mt-1">
               <input class="form-check-input" type="checkbox" id="pmKeepGarment" checked />
-              <label class="form-check-label small" for="pmKeepGarment">Preserve garment color/pattern/logo (strict)</label>
+              <label class="form-check-label small" for="pmKeepGarment">Preserve product color/pattern/logo (strict)</label>
             </div>
             <div class="text-secondary small-help mt-1">
               Tip: Use a clean product photo with the garment centered and well-lit.
@@ -184,6 +223,13 @@
     const previewWrap = $('pmPreviewWrap');
     const previewImg = $('pmPreview');
     const fileMeta = $('pmFileMeta');
+    const refInput = $('pmRefFile');
+    const refMeta = $('pmRefMeta');
+    const modelInput = $('pmModelFile');
+    const modelMeta = $('pmModelMeta');
+    const modelSelect = $('pmModelSelect');
+    const workflow = $('pmWorkflow');
+    const stylePreset = $('pmStyle');
     const btnGenerate = $('pmGenerateBtn');
     const btnClear = $('pmClearBtn');
     const busy = $('pmBusy');
@@ -196,6 +242,8 @@
     const dbg = $('pmDebug');
 
     let selectedFile = null;
+    let referenceFile = null;
+    let modelFile = null;
     let lastResponse = null;
 
     function setBusy(on, msg){
@@ -209,6 +257,15 @@
       let b = bytes || 0, i = 0;
       while (b >= 1024 && i < units.length-1) { b /= 1024; i++; }
       return `${b.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+    }
+
+    function setAuxFile(file, metaEl, setter){
+      setter(file || null);
+      if (!file){
+        if (metaEl) metaEl.textContent = '';
+        return;
+      }
+      if (metaEl) metaEl.textContent = `${file.name} • ${humanSize(file.size)}`;
     }
 
     function setFile(file){
@@ -239,6 +296,34 @@
       setEnabled(btnReset, false);
     }
 
+    function ensureClothingModel(){
+      if (workflow.value !== 'clothing') return;
+      const hasCustom = !!modelInput?.files?.[0];
+      if (!hasCustom && !modelSelect.value && modelSelect.options.length > 1) {
+        modelSelect.selectedIndex = 1;
+      }
+    }
+
+    async function loadModelLibrary(){
+      try {
+        const res = await fetch('/admin/modelling/models');
+        if (!res.ok) return;
+        const data = await res.json();
+        const groups = ['women', 'men'];
+        groups.forEach((grp) => {
+          (data?.[grp] || []).forEach((m) => {
+            const opt = document.createElement('option');
+            opt.value = m.id;
+            opt.textContent = `${m.label}`;
+            modelSelect.appendChild(opt);
+          });
+        });
+        ensureClothingModel();
+      } catch (err) {
+        console.warn('Model library load failed', err);
+      }
+    }
+
     drop.addEventListener('click', () => fileInput.click());
     drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('dragover'); });
     drop.addEventListener('dragleave', () => drop.classList.remove('dragover'));
@@ -253,9 +338,29 @@
       if (f) setFile(f);
     });
 
+    refInput.addEventListener('change', (e) => {
+      const f = e.target.files?.[0];
+      setAuxFile(f, refMeta, (val) => { referenceFile = val; });
+    });
+
+    modelInput.addEventListener('change', (e) => {
+      const f = e.target.files?.[0];
+      setAuxFile(f, modelMeta, (val) => { modelFile = val; });
+    });
+
+    workflow.addEventListener('change', ensureClothingModel);
+    modelSelect.addEventListener('change', ensureClothingModel);
+
     btnClear.addEventListener('click', () => {
       fileInput.value = '';
+      refInput.value = '';
+      modelInput.value = '';
+      modelSelect.value = '';
+      workflow.value = 'auto';
+      stylePreset.value = '';
       setFile(null);
+      setAuxFile(null, refMeta, (val) => { referenceFile = val; });
+      setAuxFile(null, modelMeta, (val) => { modelFile = val; });
       resetResults();
     });
     btnReset.addEventListener('click', resetResults);
@@ -295,7 +400,12 @@
       setBusy(true, 'Uploading image…');
 
       const fd = new FormData();
-      fd.append('image', selectedFile);
+      fd.append('product_image', selectedFile);
+      fd.append('workflow', workflow.value);
+      fd.append('style_preset', stylePreset.value || '');
+      fd.append('predefined_model_id', modelSelect.value || '');
+      if (referenceFile) fd.append('reference_image', referenceFile);
+      if (modelFile) fd.append('model_image', modelFile);
       fd.append('num_images', $('pmCount').value);
       fd.append('background', $('pmBg').value);
       fd.append('pose_set', $('pmPose').value);
@@ -331,5 +441,7 @@
         alert('Clipboard permission blocked.');
       }
     });
+
+    loadModelLibrary();
   </script>
 {% endblock %}
