@@ -197,7 +197,7 @@ async def product_recontext(
     timeout_s: float = 90.0,
 ) -> List[bytes]:
     client = _make_client()
-    model = os.getenv("PRODUCT_RECONTEXT_MODEL", "product-recontext-preview-09-30")
+    model = os.getenv("PRODUCT_RECONTEXT_MODEL", "imagen-product-recontext-preview-06-30")
     seed = (seeds or [None])[0]
     try:
         cfg = RecontextImageConfig(
@@ -248,7 +248,7 @@ async def edit_place_product_on_person(
     timeout_s: float = 90.0,
 ) -> List[bytes]:
     client = _make_client()
-    model = os.getenv("IMAGEN_EDIT_MODEL", "imagen-3.0-edit-002")
+    model = os.getenv("IMAGEN_EDIT_MODEL", "imagen-3.0-capability-001")
     fn = getattr(client.models, "edit_image", None)
     if fn is None:
         return await _recontext_on_person(
@@ -304,7 +304,7 @@ async def _recontext_on_person(
     timeout_s: float,
 ) -> List[bytes]:
     client = _make_client()
-    model = os.getenv("PRODUCT_RECONTEXT_MODEL", "product-recontext-preview-09-30")
+    model = os.getenv("PRODUCT_RECONTEXT_MODEL", "imagen-product-recontext-preview-06-30")
     seed = None
     try:
         cfg = RecontextImageConfig(

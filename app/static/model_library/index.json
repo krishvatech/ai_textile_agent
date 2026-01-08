@@ -1,26 +1,86 @@
-﻿{
+{
     "women":  [
                   {
                       "label":  "Women Studio 1",
-                      "path":  "/static/model_library/women/w1.jpg",
+                      "path":  "/static/model_library/women/w1.jpeg",
                       "id":  "w1"
                   },
                   {
                       "label":  "Women Studio 2",
-                      "path":  "/static/model_library/women/w2.jpg",
+                      "path":  "/static/model_library/women/w2.jpeg",
                       "id":  "w2"
+                  },
+                  {
+                      "label":  "Women Studio 3",
+                      "path":  "/static/model_library/women/w3.jpeg",
+                      "id":  "w3"
+                  },
+                  {
+                      "label":  "Women Studio 4",
+                      "path":  "/static/model_library/women/w4.jpeg",
+                      "id":  "w4"
+                  },
+                  {
+                      "label":  "Women Studio 5",
+                      "path":  "/static/model_library/women/w5.jpeg",
+                      "id":  "w5"
+                  },
+                  {
+                      "label":  "Women Studio 6",
+                      "path":  "/static/model_library/women/w6.jpeg",
+                      "id":  "w6"
+                  },
+                  {
+                      "label":  "Women Studio 7",
+                      "path":  "/static/model_library/women/w7.jpeg",
+                      "id":  "w7"
+                  },
+                  {
+                      "label":  "Women Studio 8",
+                      "path":  "/static/model_library/women/w8.jpeg",
+                      "id":  "w8"
+                  },
+                  {
+                      "label":  "Women Studio 9",
+                      "path":  "/static/model_library/women/w9.jpeg",
+                      "id":  "w9"
+                  },
+                  {
+                      "label":  "Women Studio 10",
+                      "path":  "/static/model_library/women/w10.jpeg",
+                      "id":  "w10"
                   }
               ],
     "men":  [
                 {
                     "label":  "Men Studio 1",
-                    "path":  "/static/model_library/men/m1.jpg",
+                    "path":  "/static/model_library/men/m1.jpeg",
                     "id":  "m1"
                 },
                 {
                     "label":  "Men Studio 2",
-                    "path":  "/static/model_library/men/m2.jpg",
+                    "path":  "/static/model_library/men/m2.jpeg",
                     "id":  "m2"
+                },
+                {
+                    "label":  "Men Studio 3",
+                    "path":  "/static/model_library/men/m3.jpeg",
+                    "id":  "m3"
+                },
+                {
+                    "label":  "Men Studio 4",
+                    "path":  "/static/model_library/men/m4.jpeg",
+                    "id":  "m4"
+                },
+                {
+                    "label":  "Men Studio 5",
+                    "path":  "/static/model_library/men/m5.jpeg",
+                    "id":  "m5"
+                },
+                {
+                    "label":  "Men Studio 6",
+                    "path":  "/static/model_library/men/m6.jpeg",
+                    "id":  "m6"
                 }
             ]
 }

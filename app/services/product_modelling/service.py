@@ -275,8 +275,8 @@ async def generate_catalog(
             "tenant_scope": scope,
             "reference_style": reference_style or {},
             "models": {
-                "product_recontext": os.getenv("PRODUCT_RECONTEXT_MODEL", "product-recontext-preview-09-30"),
-                "edit_model": os.getenv("IMAGEN_EDIT_MODEL", "imagen-3.0-edit-002"),
+                "product_recontext": os.getenv("PRODUCT_RECONTEXT_MODEL", "imagen-product-recontext-preview-06-30"),
+                "edit_model": os.getenv("IMAGEN_EDIT_MODEL", "imagen-3.0-capability-001"),
                 "vto_model": os.getenv("VTO_MODEL", "virtual-try-on-preview-08-04"),
             },
         },
